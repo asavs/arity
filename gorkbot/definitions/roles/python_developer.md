@@ -5,14 +5,6 @@ tier: 2
 skills:
   - python-development
   - pytest-tdd
-allowed_tools:
-  - read_file
-  - write_file
-  - run_command
-  - search_files
-  - list_directory
-  - web_search
-  - fetch_url
 denied_paths:
   - .ssh
   - id_rsa
