@@ -1,0 +1,42 @@
+tools:
+  approvalMode: write
+  approval:
+    read: allow
+    grep: allow
+    glob: allow
+    lsp: allow
+    edit: allow
+    write: allow
+    todo: allow
+    web_search: allow
+    fetch: allow
+    ast_edit: allow
+    ast_grep: allow
+    task: allow
+    ask: allow
+    bash: prompt
+    eval: prompt
+    browser: prompt
+    computer: prompt
+    hub: prompt
+    debug: prompt
+bash:
+  patterns:
+    - match: python demo.py*
+      approval: allow
+    - match: python demo.py
+      approval: allow
+    - match: python -c *
+      approval: allow
+    - match: python -m *
+      approval: allow
+    - match: python *
+      approval: allow
+    - match: pytest*
+      approval: allow
+    - match: python -m pytest*
+      approval: allow
+    - match: git status*
+      approval: allow
+    - match: ls*
+      approval: allow
