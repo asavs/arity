@@ -7,6 +7,7 @@ Axiom 7: Prompt cache boundary preservation.
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -120,14 +121,46 @@ class SeatLedger:
         now = time.time()
         default_reset = now + 86400.0  # 24h from now
 
-        # Gemini
-        gemini_key = os.environ.get("GEMINI_API_KEY")
+        # 1. Codex CLI (OpenAI / ChatGPT Subscription Seat)
+        if shutil.which("codex"):
+            self.register(
+                Seat(
+                    id="codex-sol",
+                    provider="codex",
+                    endpoint="cli://codex",
+                    model="gpt-5.6-sol",
+                    kind="quota",
+                    total_allowance=2_000_000,
+                    remaining=2_000_000,
+                    reset_deadline=default_reset,
+                    base_price_per_m=0.001,  # Near-zero marginal cost (Subscription)
+                )
+            )
+
+        # 2. Claude Code CLI (Anthropic / Claude Subscription Seat)
+        if shutil.which("claude"):
+            self.register(
+                Seat(
+                    id="claude-sonnet",
+                    provider="claude",
+                    endpoint="cli://claude",
+                    model="claude-3-7-sonnet",
+                    kind="quota",
+                    total_allowance=2_000_000,
+                    remaining=2_000_000,
+                    reset_deadline=default_reset,
+                    base_price_per_m=0.001,  # Near-zero marginal cost (Subscription)
+                )
+            )
+
+        # 3. Gemini API
+        gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if gemini_key:
             self.register(
                 Seat(
                     id="gemini-flash",
                     provider="gemini",
-                    endpoint="https://generativelanguage.googleapis.com/v1beta/openai",
+                    endpoint="https://generativelanguage.googleapis.com/v1beta",
                     model="gemini-3.6-flash",
                     kind="quota",
                     total_allowance=1_000_000,
@@ -138,7 +171,7 @@ class SeatLedger:
                 )
             )
 
-        # NVIDIA NIM
+        # 4. NVIDIA NIM
         nim_key = os.environ.get("NVIDIA_NIM_API_KEY")
         if nim_key:
             self.register(
@@ -156,7 +189,7 @@ class SeatLedger:
                 )
             )
 
-        # OpenRouter
+        # 5. OpenRouter
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.register(
@@ -171,7 +204,7 @@ class SeatLedger:
                 )
             )
 
-        # OpenAI
+        # 6. OpenAI API Key (Metered)
         openai_key = os.environ.get("OPENAI_API_KEY")
         if openai_key:
             self.register(
@@ -180,10 +213,7 @@ class SeatLedger:
                     provider="openai",
                     endpoint="https://api.openai.com/v1",
                     model="gpt-4o",
-                    kind="quota",
-                    total_allowance=2_000_000,
-                    remaining=2_000_000,
-                    reset_deadline=default_reset,
+                    kind="metered_api",
                     base_price_per_m=2.50,
                     api_key=openai_key,
                 )

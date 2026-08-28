@@ -14,7 +14,7 @@ from .handlers import (
     JsonlRecordStore,
     LocalToolRunner,
     MetricsObserver,
-    OpenAIModelProvider,
+    create_default_model_provider,
 )
 from .seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
 from .transition import transition
@@ -48,7 +48,7 @@ class Runtime:
         transport: Optional[Transport] = None,
         observers: Optional[list[Observer]] = None,
     ):
-        self.model = model_provider or OpenAIModelProvider()
+        self.model = model_provider or create_default_model_provider()
         self.tools = tool_runner or LocalToolRunner()
         self.store = store or JsonlRecordStore()
         self.transport = transport or ConsoleTransport()
