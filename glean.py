@@ -92,12 +92,14 @@ def outcome(d: Path) -> dict:
             if tot: o["house_tokens"] = (o["house_tokens"] or 0) + int(tot)
         except Exception: pass
     # the last demo log that printed a totals line wins; formats vary by house
-    finals = re.findall(r"model_calls=(\d+)\s+tokens=(\d+)|(\d+) model calls,\s*(\d+) tokens|Total Model Calls:\s*(\d+)[\s\S]{0,120}?Tokens:\s*(\d+)", text)
+    finals = re.findall(r"model_calls=(\d+)\s+tokens=(\d+)|(\d+) model calls,\s*(\d+) tokens|Total Model Calls:\s*(\d+)[\s\S]{0,120}?Tokens:\s*(\d+)"
+                        r"|model calls (\d+),[^\n]*\n[^\n]*=\s*(\d+) total", text)
     if finals:
         g = finals[-1]; o["demo_ran"] = True
-        o["model_calls"] = int(g[0] or g[2] or g[4]); o["demo_tokens"] = int(g[1] or g[3] or g[5])
+        o["model_calls"] = int(g[0] or g[2] or g[4] or g[6]); o["demo_tokens"] = int(g[1] or g[3] or g[5] or g[7])
     elif list(d.glob("demo*.log")) or o["demo_attempts"]:
         o["demo_ran"] = False
+    o["http_errors"] = (lambda m: int(m.group(1)) if m else 0)(re.search(r"http errors (\d+)", text))
     o["demo_attempts"] = o["demo_attempts"] or len(list(d.glob("demo-round*.log")))
     # relay-observed wall clock: start/end .ts files are canonical; a RELAY.md wall column is the fallback
     ts = sorted(d.glob("start*.ts")), sorted(d.glob("end*.ts"))
@@ -112,15 +114,22 @@ def outcome(d: Path) -> dict:
     return o
 
 def measure(dirs: list[Path]) -> list[dict]:
+    """Measured facts first; a relay-written FACTS.json fills only what the logs couldn't say."""
     rows = []
     for d in dirs:
-        r = dict(house=d.name); r.update(structure(d)); r.update(adherence(d)); r.update(outcome(d)); rows.append(r)
+        r = dict(house=d.name, hands=None, cost_usd=None, wrote_outside_dir=None)
+        r.update(structure(d)); r.update(adherence(d)); r.update(outcome(d))
+        f = d / "FACTS.json"
+        if f.exists():
+            for k, v in json.loads(f.read_text(encoding="utf-8")).items():
+                if r.get(k) in (None, False, 0) and v not in (None, ""): r[k] = v; r.setdefault("from_facts", []).append(k)
+        rows.append(r)
     return rows
 
 def table(rows: list[dict]) -> str:
-    cols = ["house", "files", "lines", "functions", "classes", "docstring_rate", "import_style_mixed", "third_party",
-            "brief_terms_hit", "syntax_errors", "demo_ran", "model_calls", "demo_tokens", "tracebacks",
-            "tool_calls", "tool_failures", "demo_attempts", "wall_s", "house_tokens", "saw_ground_truth"]
+    cols = ["house", "hands", "files", "lines", "docstring_rate", "import_style_mixed", "third_party",
+            "brief_terms_hit", "syntax_errors", "demo_ran", "model_calls", "demo_tokens", "http_errors", "tracebacks",
+            "tool_calls", "tool_failures", "demo_attempts", "wall_s", "house_tokens", "cost_usd", "saw_ground_truth", "wrote_outside_dir"]
     out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in rows: out.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
     return "\n".join(out)

@@ -1,0 +1,472 @@
+I will send a long brief in 3 parts. Reply only 'ok 1/3 received' after each part until I say BEGIN. Part 1 of 3:
+# BRIEF — v0 implementation of arity (A/B/C, same brief to three houses)
+
+wiki-snapshot: sha256:e2b271d3a57ff78d  (axioms, core, components, spine, tier-two, methods — inlined below)
+
+## The task
+
+Write a v0 implementation of the whole arity system in Python 3.13, standard library only
+(urllib for HTTP, no pip installs), as a SMALL SET OF MODULES in the directory you were given,
+so pieces can be cherry-picked across houses. Under 1,500 lines total. Suggested split (rename
+if you have a better cut): store.py, ledger.py, roles.py, tiers.py, cadence.py, scorecard.py,
+harness.py, kernel.py, archivist.py, redphone.py, cast.py, pulse.py, demo.py — plus an
+__init__.py. Fewer files is fine; one file is not.
+
+Hard rules:
+- NO FAKES. A harness is a for-loop around a real POST /chat/completions call (OpenAI-compatible
+  dialect) that executes tool calls until there are none. Every kernel turn is a real call.
+- Seats come from the environment. Seed the ledger from whichever of these exist:
+  GEMINI_API_KEY -> https://generativelanguage.googleapis.com/v1beta/openai (models: gemini-3.6-flash, gemini-3.5-flash-lite; provider "gemini"),
+  NVIDIA_NIM_API_KEY -> https://integrate.api.nvidia.com/v1 (model: nvidia/nemotron-3-nano-30b-a3b; provider "nim"),
+  OPENROUTER_API_KEY -> https://openrouter.ai/api/v1 (provider "openai"). The kernel never sees a key.
+- Use the axiom-7 cache table (windows, read/write multipliers, prices) as data.
+- Roles are denial sets (tools, channels, paths, names, hosts). Tiers are compiled briefs that
+  REFUSE if a denied path or name leaks in. Every kernel has an identity tuple
+  (provider, endpoint, model, cache_boundary, session, hash(brief)). Kernels write their own
+  report before dying; the archivist writes an impartial entry that checks claims against the
+  tool log; if the report is absent, the entry says so. The archivist's findings are recorded
+  to the scorecard, and standing goes DOWN when a model is caught claiming changes it never made.
+- Handoffs are structured records posted to channels, bounded by depth and budget. A record may
+  land in a channel the sender may not chat in; the reply returns the same way.
+- The pulse: keepalive while p(return) * cold_cost > ping_cost; otherwise let the kernel die.
+  The keepalive text is "hi luv u". No kernel is told the hour it would die.
+- Presence: a seat a human is live on is never chosen for a fresh cast.
+
+Deliverables:
+1. The modules.
+2. demo.py that, when run as `python demo.py`, plays these five stories against the real seats
+   and prints a log: S1 (Asa DMs the voice "make a tiny brokie schema: one table `deals` with
+   name, vendor, free_tier, url. write it to brokie/schema.sql"; the voice hands off to a
+   builder which writes the file in a workspace dir; archivist verifies), S3 (a second DM with
+   a sporadic cadence keeps the warm kernel), S36 (mark a seat presence=True; a fresh cast must
+   land elsewhere), S7 (die with a report; then force a quota wall so the report is ABSENT),
+   S39 (pulse keepalive then let go). Print total model calls and tokens at the end.
+3. A README.md of at most 40 lines: how to run, the file map, and three honest limitations.
+
+Do not write to any directory other than the one you were given. Do not read or modify the
+.wiki. Keep code readable and casual; docstrings in the same register as the pages below.
+Prefer clarity over cleverness. When you finish, run `python demo.py` once yourself and fix
+anything that breaks; report whether it ran and how many calls it made.
+
+## Ground truth (read before writing)
+
+
+<!-- ===== .wiki/axioms.md ===== -->
+
+# Axioms
+
+The high-level statements, in Asa's words where possible. Everything else in this wiki is
+downstream of these. Add one only when it's been said out loud and confirmed.
+
+## 1. One voice, a staff, and a door to each
+
+> I can talk to the bot who talks to me, and it manages all the other bots who are working on
+> stuff they're good at + getting better. But if I want, I can directly talk to the other bots too.
+
+That's the whole thing. The talking is the center, not a feature added later.
+
+## 2. The staff is organized by aptitude, not by project
+
+Bots are defined by what they're good at. Not one-bot-per-repo. What they're good at is not
+fixed — they get better.
+
+## 3. Getting better means the casting gets better
+
+A bot is a **role** with a stable name and memory. The **model behind it is chosen per prompt**,
+on evidence. The evidence comes from constantly reading model makers' release papers, the
+sentiment on Reddit and Twitter, the evals, and then A/B/C-testing candidate models on the same
+real tasks as they come up.
+
+Three axes, weighed together every prompt:
+
+- **Provider** — quota remainders; use the seats about to reset first, to maximize tokens over time.
+- **Model** — known strengths (e.g. Claude excels at architecture and design).
+- **Effort** — the balance of cost and speed.
+
+This is what megaminds.com is.
+
+What's actually rare here, checked 2026-08-27 (see [[research/2026-08-27-per-prompt-routers-codex]]):
+per-prompt quality/cost routing itself is a partially-built commodity — RouteLLM and vLLM
+Semantic Router are self-hostable, OpenRouter Auto / Not Diamond / Microsoft / AWS are managed.
+Nobody verified does **quota-reset-aware seat selection** (the closest thing is an open feature
+request on CLIProxyAPI asking for exactly it), and nobody does the **closed loop**: discover new
+models from papers and sentiment, A/B them on the user's own recurring tasks, and retrain the
+per-prompt policy without an operator. Those two are the part that's mine.
+
+**Corollary — many kernels per task.** Almost always run a task on multiple kernels, unless
+it's the live conversation with Asa. Every task is a sample; running candidates side by side
+is how the scorecard gets its evidence. Even the live conversation can be A/B'd when Asa is
+willing to answer the same question twice.
+
+**Corollary — the three legs.** Deciding who answers composes three things that are each
+useful to everyone: brokie (the deals library, inference included), API cocktail (quotas and
+running cost), and megaminds evals + archetypes (a global, contributed database of model
+performance by task). See [[core]].
+
+## 4. The meeting place forms; it isn't built
+
+This isn't original and doesn't need to be. Anyone using an LLM right now is pursuing the same
+shape — a convergence body, like GitHub for provenance. If it's what I want and it's what
+everyone needs, then the meeting place is everybody building it independently and also
+forming together, like water droplets toward a swirling gravity well.
+
+So: build mine. Keep the shape visible. Shared shape is how the droplets find each other —
+which makes these axioms, not the code, the thing worth publishing.
+
+## Definitions
+
+**Kernel** — a single model runtime. One live model instance with one continuous context. It
+might span one prompt or a few. It can run in any harness: Claude Code, omp, a voice mode, a
+phone call. A kernel lives while its K/V cache is worth keeping and dies when it isn't.
+
+**Bot** — the thing that persists across kernels: name, number, memory, role. A bot is held by
+one kernel at a time.
+
+**Harness** — where a kernel runs. Interchangeable; the bot doesn't care.
+
+So the layers are: **bot** (persists) → **kernel** (one model, one period) → **harness** (one
+surface). Axiom 7 is about how a bot moves between kernels.
+
+## 7. The voice is a role, held by one model at a time, for a period
+
+> Not one model always, but one model for a period while the K/V cache is efficient to
+> maintain — and the object of a larger A/B/C testing experiment for the role of "talk to Asa."
+
+What persists is the kernel: the name, the number, the memory. The model holding it is sticky
+for as long as the cached context makes switching expensive, then eligible for recasting. The
+"talk to Asa" role is not exempt from axiom 3 — it is tested like every other role, just on a
+slower clock, because continuity is part of what's being measured.
+
+**How long a kernel wants to live**, checked 2026-08-27
+(see [[research/2026-08-27-prompt-cache-economics-codex]]). Caches never survive a model switch,
+at any provider. Assured warm window and the cost of losing a warm 100k prefix:
+
+| Provider | Warm window | Read price | Cold-vs-warm penalty (100k) |
+|---|---|---|---|
+| Anthropic | 5 min sliding, or 1 h sliding (2× write) | 0.10× | $0.90 on Fable 5 |
+| OpenAI GPT-5.6 | ≥30 min guaranteed; refresh unverified | 0.10× | $0.36 on Sol |
+| Gemini 3.1 Pro | implicit: opportunistic; explicit: you pay storage ($0.45/h per 100k) | 0.10× | $0.18 |
+| xAI Grok 4.6 | none guaranteed; evictable any time | 0.25× | $0.15 |
+
+Collision with axiom 3's quota axis: rotating seats mid-kernel keeps the cache only inside a
+shared boundary — Anthropic **workspace**, Gemini **project**; OpenAI / xAI / OpenRouter unverified.
+So a kernel's identity is `provider + endpoint + model + workspace + session key + exact prefix`,
+and the quota router may only swap seats inside that.
+
+Two refinements from Asa:
+
+- Most seats are **subscription quota, not API dollars**. The API price is a fair *reference* for
+  quota cost — the shape of the decision holds, the unit differs — but the router has to know
+  which kind of seat it's spending.
+- The cache rules must be explicit and must drive casting. Example: a conversation that's going
+  to be **sporadic should not be cast on Anthropic**, whose warm window demands a reply within
+  five minutes. Knowing this by heart is exactly the tiredness axiom 0 is about. The router
+  carries it so Asa doesn't.
+
+## 8. Memory is tiered by distance from Asa
+
+Every fresh kernel wakes **cold** and is told a few universal basic facts, and has read access
+to a variety of files. How much of Asa it's told depends on how close it sits to him:
+
+> A super deep nested engineering bot doesn't need to know Asa. Somewhere in between might. The
+> one I'm directly talking to should.
+
+So there is no single "the memory." There's a gradient: the voice knows the biograph; a middle
+bot knows the project; a leaf bot knows the task. Giving a leaf the whole picture isn't
+generosity — it's the same mistake as giving it every tool (axiom 2's corollary).
+
+## 9. Two accounts of every kernel
+
+Each kernel writes **its own report** before it dies — first person, what it did and what it
+thinks it meant. Separately, an **archivist** (Opus 5 — the `lineage.md` appetite, given a job)
+reads the kernel's contents and writes an **impartial** entry. And the archivist is the
+**fallback**: if a kernel goes cache-cold without ever writing its report, the archivist's
+account is the only one, and the record says so.
+
+The two aren't redundant. The kernel's own report is the best evidence for what it *meant*; the
+archivist's is the best evidence for what it *did*. Same distinction the biograph already
+draws between interview and transcript. Both land in the tier from axiom 8 that the kernel
+belonged to.
+
+## 11. The system has a pulse — *proposed 2026-08-28, strike if wrong*
+
+A fixed cadence wakes the Voice with a true, small message when nobody has said anything — a
+timestamp, or "hi luv u." The Voice decides whether the tick means nothing or something.
+
+Its smallest form is the keepalive: while a return is likelier than not and a ping costs less
+than going cold, ping the warm kernel and it answers with almost nothing; when the odds are
+gone, let it go cold and let the archivist write. Idle ticks are paid for by quota that would
+otherwise expire, so self-directed work is what the system does with tokens that were going
+to die anyway. What a bot does with an empty tick is aptitude data (axiom 2).
+
+No kernel is told the hour it would have died. It is told it will be visited.
+
+## 12. An elegant core, and everything else plugs in
+
+> Have an elegant kernel and be able to plug in anything we need — Sendblue or Slack or pi or
+> omp or Hermes. Then, instead of plugging, build our own for each purpose. Either way it
+> doesn't matter, because we've practiced DRY and SOLID really well and everything can be
+> plugged in and out as the community approaches the singularity.
+
+So the thing that's *mine* (axiom 5) is the core and the seams. The edges — how messages
+arrive, which harness runs a model, which provider sells the seat — are rented today and
+replaced one at a time, and the system shouldn't notice. The interfaces are the product. This
+is also how axiom 4's droplets merge: shared seams, not shared code.
+
+Name clash to resolve: "kernel" already means *one model runtime* (definitions). The elegant
+core needs its own word.
+
+Two corollaries:
+
+- **The template.** Break down every app we'd use — its plugins, MCPs, CLIs, skills — into a
+  theoretical template of seams. Then reverse-engineer each seam from open-source versions (or
+  by reading, or with a crawler) so the proprietary thing and our own thing are
+  interchangeable behind it, back and forth, seamlessly.
+- **Home turf.** Each model runs in its maker's harness by default — Claude Code for Claude,
+  Codex for GPT, Antigravity for Gemini — so every model is happy at home. The second omp
+  beats Antigravity on the scorecard for a role, the harness plug swaps and nothing else
+  notices. Harness is a casting axis, evidenced like the others (axiom 3).
+
+## 10. The red phone is a public address, not an alarm
+
+> A public inbox/outbox where people can post problems to. `redphone.com/asas` — I'd be able
+> to see my inbox. Or we can just have models try and fix the problems themselves, or escalate
+> to me over email.
+
+So the red phone is where problems *arrive*, from anyone — a person, one of my bots, someone
+else's bot. Triage is: bots try to fix it; what they can't, they escalate to me by email. The
+front voice (axiom 1) is the inside door; the red phone is the outside one.
+
+And it's public by design. `redphone.com` is the shared shape; `/asas` is my droplet. This is
+where axiom 4's gravity well would actually live if it lived anywhere.
+
+## 6. The front door is a phone
+
+> I should be able to call and text. I should also be able to send photos and links and stuff.
+
+The one voice has a phone number. Voice calls, SMS/MMS, images, URLs. Not a chat app, not a
+terminal — those can exist too, but the phone is the door that's always in the pocket.
+
+Corollary to axiom 5: a phone number is always rented from a carrier; nobody owns one. The rule
+applies to everything *behind* the number — the brain, the memory, the routing, the logs — not
+to the wire itself.
+
+## 5. Mine over rented
+
+A rule, not a mood. When a vendor's thing and my own machine both work, mine wins, even when it
+costs setup time. Write it down so it stops being re-argued.
+
+---
+
+## 0. The why
+
+> I'm having such a hard time keeping all these things and separate worlds together in my head.
+> I just need a central single point of contact that's deeper inside than just the computer
+> screen and keyboard. There are so many models. So many.
+
+This is what the whole thing is for. Not throughput. Relief. One place to stand.
+
+Axiom 1 follows from this — the one voice isn't a feature, it's the point. The staff, the
+casting, the evidence engine all exist so that the one voice can be trusted to hold the worlds
+so Asa doesn't have to.
+
+
+<!-- ===== .wiki/core.md ===== -->
+
+# The core
+
+What's left when every plug is unplugged. Defined by what it does, then named.
+
+**One sentence.** The core keeps a bot the same bot while everything underneath it changes —
+model, seat, harness, channel — and decides, every prompt, who should be underneath it now.
+
+## Five verbs, and where each one actually lives
+
+| Verb | Methods | Lives in | Commons? |
+|---|---|---|---|
+| **Decides who answers** | `cast`, `rank`, `cadence`, `cold_cost` | Three projects composed: **brokie** (the library of the latest deals, inference prices included), **API cocktail** (every seat's quota and running cost), **megaminds** evals + agent archetypes (a global database of model performance across tasks, that everyone contributes to) | Yes — all three are useful to anyone, not just Asa |
+| **Gives a model a body for a period** | `spawn`, `turn`, `die`, `write_report` | **Harness plugs**: pi (minimal), Claude Code, Codex, Antigravity, omp, Hermes. Don't build this. Maybe a voice or texting adapter. Originals welcome but not required. | — |
+| **Remembers across bodies** | `tiers.*`, `archivist.*` | A **journal**. Easy to let get out of hand — be careful. The commons here is provenance (GitHub-shaped) and the memory systems everyone is building. | Yes |
+| **Keeps time** | `pulse.*`, `probe` | A **tiny pi plugin**. Not a significant piece. | — |
+| **Learns who's good** | `evidence.*`, standing | The improvement side of *decides*. Same object, later in time. | Yes — it's megaminds |
+
+So the core proper — the part that's original and small — is three things:
+
+1. **The composer.** The casting logic that reads brokie, cocktail, and megaminds together and
+   returns a kernel. Nobody else has these three in one place because nobody else has all three.
+2. **Continuity.** The identity tuple, the two accounts, the tier compiler — what makes a bot
+   outlive a kernel. The journal, kept honest.
+3. **The multi-kernel policy.** See below.
+
+Everything else is a plug or a commons.
+
+## The multi-kernel principle
+
+> We generally want to almost always use multiple kernels to do a given task — unless it's the
+> actual user-model conversation. But even then we might be able to A/B test some models, if
+> the user is willing to answer the same question twice.
+
+One task, several kernels, by default. Not for redundancy — for evidence. Every task is a
+sample for the role's scorecard (axiom 3), so running two or three candidates on it costs
+tokens once and pays back in casting forever. The exception is the live conversation with
+Asa, which is single-kernel for continuity's sake — and even that can be A/B'd when Asa is
+willing to answer twice. Tonight's story fan-out was this principle by hand: thirteen samples,
+two staffers, a blind judge.
+
+## What it is not
+
+It doesn't talk (comms plugs). It doesn't think (models). It doesn't hold keys (the proxy). It
+doesn't store bytes (the store). It doesn't run a model (harnesses). Unplug everything and the
+core sits holding a roster, a ledger, a journal, and a clock, and knows who to cast the moment
+a message arrives.
+
+## Name
+
+Unresolved. The definition says *continuity* and *composition*. In the trimurti it's the
+maintainer. Candidates that fall out of the function, none chosen: **keep**, **tether**,
+**marrow**.
+
+
+<!-- ===== .wiki/components.md ===== -->
+
+# Components
+
+**Core and plugs** (axiom 12). The nine parts below split two ways. The **core** is what's
+mine and stays: kernel runtime, roles, tiers, casting, archivist, evidence, pulse — the logic.
+The **plugs** are the edges, rented now and replaced later, each behind one seam:
+
+| Seam | Plugs today | Plugs later |
+|---|---|---|
+| Comms (the red phone's channels + transports) | Slack, Matrix, Sendblue (iMessage), Telnyx SMS/voice, email | our own channel server |
+| Harness (what runs a kernel) | pi, omp, Claude Code, Hermes, Codex, Antigravity | our own loop |
+| Seats (who sells the tokens) | Anthropic, OpenAI, Google, xAI, OpenRouter | local weights |
+| Store (where tiers and entries live) | markdown on disk, SQLite | whatever's honest |
+
+The rule: a plug may be swapped without the core noticing. If swapping one hurts, the seam is
+in the wrong place.
+
+The system in English, nine parts, at one level of abstraction. A part is here only if it
+can't be expressed as a capability of another part. The phone is not a part (it's a transport
+into the red phone). The Voice is not a part (it's a role, held by a kernel, that you DM).
+Friction is not a part (it's a private channel).
+
+```mermaid
+flowchart TB
+    RP[1. Red phone — channels, public and private] <--> K[5. Kernel runtime]
+    P[9. Pulse] --> RP
+    K --> C[3. Casting]
+    C --> S[4. Seat ledger]
+    C --> R[2. Role registry]
+    R --> M[6. Memory tiers]
+    M --> K
+    K --> A[7. Archivist]
+    A --> M
+    A --> E[8. Evidence loop]
+    E --> C
+```
+
+---
+
+## 1. Red phone
+
+The message system. Slack-shaped: **channels**, each public or private, whose members are
+humans and bots. Every kernel that's alive can be addressed in a channel or DM'd. You talk to
+the Voice by DM; you talk to the librarian by DM too; a project has a channel; friction is a
+private channel where kernels post one-liners and a responder answers; a public channel at
+`redphone.com/asas` is where strangers and given-away machines post problems. Bot-to-bot
+handoffs are structured messages in channels (a task record: who, what, evidence, budget,
+depth) — the Voice reads the channel to say one sentence.
+
+**Transports** are how a channel reaches you, not separate systems: the phone (calls, SMS, MMS
+via a rented number and self-hosted Asterisk), a web UI, email for escalation. A photo texted
+from a walk is a message in your DM with the Voice, arrived by SMS.
+
+Triage rule for anything posted: bots try; what they can't — including "the upstream forbids
+bots" — comes to you, in the channel and by email. A public-facing bot has no tier-0 memory.
+
+**Axioms** 1, 4, 6, 10. **Stories** S1, S2, S4, S9, S11, S20, S21, S29, S33.
+
+```
+channel = { id, visibility: public|private, members: [humans..., roles...], transports: [...] }
+post(channel, msg)                    # from a human, a transport, a kernel, or the pulse
+dm(role, msg)                         # addresses whichever kernel holds that role right now
+handoff = post(channel, TaskRecord{from, to_role, want, evidence, tier, budget, depth})
+```
+
+---
+
+## 2. Role registry
+
+A role is a **denial set** — what it may not touch, read, or reach — plus what it wants in a
+model. Scout: egress, no write. Librarian: writes the catalog, no egress. Archivist: reads
+everything, writes only entries. The Voice: tier-0 memory, no deep work. A public triage bot:
+no tier 0. Every entry is explicit allow/deny; nothing is "ask." Enforced by the OS where it
+can be — a leaf runs as a user that can't see `/Users/example — not by what the brief remembers
+to omit. Aptitude picks the model; denial is the role. Roles also say which channels a kernel
+may read and post to.
+
+**Axioms** 2 (denial), 8. **Stories** S8, S18, S34.
+
+```
+role = { name, deny: {tools, memory_tiers, hosts, channels}, allow: {...},
+         aptitude_wanted: [...], os_user, tier }
+```
+
+---
+
+## 3. Casting
+
+Per prompt: which model, which seat, what effort. Inputs: the role's wants, that role's
+scorecard and standing (8), the seat ledger (4), the conversation's predicted cadence, and the
+warm/cold math from axiom 7. Binding rules: don't switch a warm kernel unless the switch is
+worth more than the cache; rotate seats only inside a shared cache boundary; sporadic
+conversations never go on a 5-minute window; spend what dies soonest, whether that's a reset
+or an expiry; never fan out on a seat Asa is typing on.
+
+**Axioms** 3, 7. **Stories** S3, S5, S6, S17, S35, S36.
+
+```
+cast(task, role, convo):
+    if (k := registry.warm_for(convo)) and k.fits(role) and cold_cost(k) > switch_gain: return k
+    seats = ledger.for(scorecard.rank(role))
+              .drop(presence.asa_live_on).drop(window < convo.predicted_gap).sort(dies_soonest)
+    return kernel.spawn(seats[0], role, effort(task))
+```
+
+---
+
+## 4. Seat ledger
+
+Every account as a row: provider, models, kind (quota or API), remaining, reset clock, expiry
+clock, cache boundary shared with other seats (Anthropic workspace, Gemini project), and
+presence — is a human session on it now. Learned from headers, usage pages, throttle shapes,
+and your own session files, because providers don't say. API price is the reference unit for
+quota cost.
+
+**Axioms** 3, 5, 7. **Stories** S6, S17, S35, S36. Built: API cocktail (keys, rotation, expiry),
+omp's catalog. Missing: reset/expiry clocks as data, presence.
+
+---
+
+## 5. Kernel runtime
+
+A kernel is one model runtime, one context, one harness. Spawned with a role (2), a brief (6),
+a seat (4), and an identity `provider+endpoint+model+cache_boundary+session+prefix`. Its
+capabilities are whatever its role allows: channels it can read and post to, tools, hosts.
+Lives while its cache is worth keeping. While alive it posts friction to the friction channel
+and keeps going. Before it dies it writes its own report. It is told it will be visited (9),
+never the hour it would die. Harness adapters: pi, omp, Claude Code, a live phone call.
+
+**Axioms** 7, 9, definitions. **Stories** S7, S12, S30.
+
+```
+spawn(seat, role, effort) → k with identity tuple, tools=role.allow, user=role.os_user
+k.turn(msg)                 # may post(friction, ...) mid-task
+k.die(reason): report = k.turn("write your report"); archivist.enqueue(k, report, reason)
+```
+
+---
+
+## 6. Memory tiers
+
+A gradient by distance from you. Tier 0: the biograph. Tier 1: a project. Tier 2: a task. A

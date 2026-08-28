@@ -1,0 +1,43 @@
+Relay report, round 1. Syntax: syntax ok. Demo output (last 60 lines, verbatim):
+============================================================
+ARITY v0 DEMO - PLAYING 5 STORIES
+============================================================
+
+--- STORY 1 (S1): Voice DM, Builder Handoff & Archivist Audit ---
+[Asa -> Voice]: make a tiny brokie schema: one table `deals` with name, vendor, free_tier, url. write it to brokie/schema.sql
+[Voice -> Builder Handoff]: Task status=done
+[Builder Self-Report]: **What I was doing:**
+Initializing the initial database schema for the `brokie` project.
+
+**What I changed & why:**
+Created `brokie/schema.sql` with a `deals` table (`id`, `name`, `vendor`, `free_tier`, `url`) to provide a simple SQLite structure for storing free-tier deal records.
+
+**What's open:**
+Database initialization/migration scripts, inserting initial seed data, and building backend API endpoints to query or manage the deals.
+
+**Last known safe state:**
+`brokie/schema.sql` is written with valid SQLite DDL syntax.
+
+**Advice:**
+Keep the schema lightweight, but add indexes on `vendor` or `name` if you plan to implement filtering or search endpoints down the road.
+[Archivist Entry Summary]: Kernel k_292209 (builder on gemini-3.6-flash) ended by 'task done'. Verified 1/2 changes.
+[Archivist Verified Changes]: [{'claim': 'write brokie/schema.sql', 'verified': True, 'on_disk': True, 'in_tool_log': True}, {'claim': 'write initialization/migration', 'verified': False, 'on_disk': False, 'in_tool_log': False}]
+[Voice -> Asa Phone Brief]: "Builder wrote the brokie deals schema with 1 verified table in schema.sql."
+
+--- STORY 2 (S3): Sporadic Cadence Keeps Warm Kernel ---
+[Turn 1]: Spawned k_302719 on seat gemini-3.6-flash, cache_expires_in=298.7s
+[Turn 2]: Cast returned kernel k_302719. Warm kernel retained: True
+
+--- STORY 3 (S36): Seat Presence Live Avoidance ---
+[Presence Update]: Marked seat seat_92209 (gemini-3.6-flash) presence=True (Asa typing)
+[Fresh Cast]: Selected seat=seat_92209 (gemini-3.5-flash-lite), presence=False
+Traceback (most recent call last):
+  File "C:\Users\example\Projects\arity\impl\agy2\demo.py", line 150, in <module>
+    run_demo()
+    ~~~~~~~~^^
+  File "C:\Users\example\Projects\arity\impl\agy2\demo.py", line 92, in run_demo
+    assert fresh_builder_k.seat.id != seat_to_block.id or not seat_to_block.presence
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+If anything is wrong, return ONLY the files that need to change as `=== FILE: <name> ===` blocks with complete contents. If the demo ran correctly end to end, reply exactly DONE.
