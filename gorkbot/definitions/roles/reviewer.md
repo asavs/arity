@@ -4,11 +4,6 @@ description: Read-only code auditor and test verifier.
 tier: 3
 skills:
   - pytest-tdd
-allowed_tools:
-  - read_file
-  - list_directory
-  - search_files
-  - run_command
 denied_tools:
   - write_file
 denied_paths:

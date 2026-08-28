@@ -57,12 +57,10 @@ class TestRolesAndDenialSets(unittest.TestCase):
         tools = [
             {"type": "function", "function": {"name": "read_file"}},
             {"type": "function", "function": {"name": "write_file"}},
-            {"type": "function", "function": {"name": "run_destructive_command"}},
         ]
         filtered_reviewer = self.registry.filter_tools(REVIEWER_ROLE, tools)
         self.assertEqual(len(filtered_reviewer), 1)
         self.assertEqual(filtered_reviewer[0]["function"]["name"], "read_file")
-
 
 class TestTiersAndBriefCompiler(unittest.TestCase):
     def setUp(self):

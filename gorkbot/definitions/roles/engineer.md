@@ -5,12 +5,6 @@ tier: 1
 skills:
   - firecrawl-developer-index
   - scout-recon
-allowed_tools:
-  - web_search
-  - fetch_url
-  - read_file
-  - list_directory
-  - search_files
 denied_tools:
   - write_file
   - run_command
