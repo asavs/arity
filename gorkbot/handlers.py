@@ -523,20 +523,38 @@ class ConsoleTransport:
 
 @dataclass
 class MetricsObserver:
-    """Tracks token counts, tool calls, and event flow for telemetry/evals."""
+    """Tracks token counts, tool calls, cache hits, and event flow for telemetry and evals."""
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
+    cached_prompt_tokens: int = 0
     total_tool_calls: int = 0
+    failed_tool_calls: int = 0
     events_seen: int = 0
     effects_seen: int = 0
+    fallback_events: int = 0
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        """Fraction of prompt tokens served from cache (Axiom 7)."""
+        return self.cached_prompt_tokens / max(1, self.total_prompt_tokens)
+
+    @property
+    def tool_success_ratio(self) -> float:
+        """Fraction of tool calls executed without runtime errors."""
+        if self.total_tool_calls == 0:
+            return 1.0
+        return max(0.0, (self.total_tool_calls - self.failed_tool_calls) / self.total_tool_calls)
 
     def on_event(self, state: State, event: Event) -> None:
         self.events_seen += 1
         if isinstance(event, ModelCompleted) and event.usage:
             self.total_prompt_tokens += event.usage.get("prompt_tokens", 0)
             self.total_completion_tokens += event.usage.get("completion_tokens", 0)
+            self.cached_prompt_tokens += event.usage.get("cached_tokens", 0) or event.usage.get("cache_read_input_tokens", 0)
         if isinstance(event, ToolCompleted):
             self.total_tool_calls += 1
+            if event.is_error:
+                self.failed_tool_calls += 1
 
     def on_effect(self, state: State, effect: Effect) -> None:
         self.effects_seen += 1
