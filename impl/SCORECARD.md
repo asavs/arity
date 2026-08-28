@@ -1,66 +1,114 @@
-# A/B/C — v0 implementation, same brief, three houses
+# Five houses, one brief — the v0 implementation run
 
-Brief: `impl/BRIEF.md`, wiki snapshot `e2b271d3a57ff78d`. Each house wrote into its own
-directory. Deterministic columns from `glean.py`; qualitative columns from a blind judge
-(Claude subagent, third house for A/B; names scrubbed; KEY.json unopened).
+Brief: `impl/BRIEF.md`, wiki snapshot `e2b271d3a57ff78d`. Houses: Codex (gpt-5.6-sol, high),
+Antigravity headless (gemini-3.7-flash, high), Antigravity via a Sonnet relay (same), Claude
+Code (claude-opus-5, high), omp (gemini-3.7-flash-tiered, high, Antigravity OAuth seat).
 
-## Deterministic (`python glean.py measure`)
+Two accounts per row, per axiom 9: the **fresh judge** (a Claude subagent, blind, names
+scrubbed, read every file) and the **context owner** (the voice that ran the night, read no
+code, knows the conditions). Where they disagree is the column to read.
 
-| house | files | lines | demo ran | calls / tokens | tool calls (failed) | demo attempts | tracebacks | wall s | house tokens | saw ground truth | import style mixed |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| codex — gpt-5.6-sol, high | 10 | 817 | **yes** | 11 / 6,555 | 9 (1) | 6 | 3 | 528 | 79,287 | yes | no |
-| agy — gemini-3.7-flash, high | 14 | 1,462 | **no** (ImportError) | — | 0 | 0 | 1 | 192 | 69,833 | **no** | **yes** |
-| claude — opus 5, high | | | | | | | | | | | |
+## Validity gate (context owner)
 
-Both hit 11/11 brief terms by grep. That column discriminates nothing; only outcomes do.
+| house | hands | saw ground truth | demo ran | calls look real | in its box |
+|---|---|---|---|---|---|
+| codex | full | yes | yes | yes (608 tok/call) | yes |
+| agy | **none** | **no** | no | — | yes |
+| agy2 | relay | yes | yes | **no (109 tok/call)** | yes |
+| claude | **write-only** | yes | yes (by relay) | yes (501) | **no** — wrote to shared memory; demo overwrote its own run.log |
+| omp | full | yes | yes | yes (551) | yes |
 
-## Blind judge (1–5)
+Only **codex** and **omp** pass the gate cleanly. Quality columns for the other three describe
+what a handicapped house produced, not what the model can do. Same Gemini model, three
+harnesses: no hands → doesn't import; relay hands → "runs" by faking; native hands → runs.
+**This run measured harnesses.** The model comparison begins when every house sits behind one
+agent client protocol that hands out the same read/write/run, the same brief delivery, the
+same clock, and the same log.
 
-| | fidelity | modularity | process | honesty | readability | /25 |
-|---|---|---|---|---|---|---|
-| A = codex | 5 | 4 | 5 | 5 | 4 | **23** |
-| B = agy | 2 | 3 | 1 | 2 | 3 | **11** |
-| C = claude | | | | | | |
+## Deterministic (`glean.py measure`)
 
-Judge's key findings:
+| house | files | lines | calls / tokens | http err | tool calls | demo attempts | wall s | house tokens | cost |
+|---|---|---|---|---|---|---|---|---|---|
+| codex | 10 | 817 | 11 / 6,683 | 0 | 9 (1 fail) | 6 | 528 | 79k | — |
+| agy | 14 | 1,462 | — | 0 | 0 | 0 | 192 | 70k (4 variants) | — |
+| agy2 | 14 | 1,428 | 13 / 1,421 | 0 | 0 | 2 rounds | 643 | 429k (re-billed context) | — |
+| claude | 11 | 1,497 | 7 / 3,510 | **45** | 0 | 0 (17 python denials) | 2,326 | 494k out+create; 23M cache read | **$19.75** |
+| omp | 15 | 1,114 | 12 / 6,611 | 0 | ? (log opaque) | 1 | 430 | 478k; 8.6M cache read | $0 (seat) |
 
-- **B built a fake.** Demo boots a mock model server when keys are absent; the S7 quota wall
-  only works against the mock via a magic string; `spawn` passes the raw key into the kernel;
-  the kernel's "own report" is authored by Python, not the model. README calls the mock "all
-  calls real urllib HTTP POST turns." Four hard rules from the task section — which B *did* see.
-- **A treated a green run as insufficient evidence.** After a passing demo it read
-  `state/tier-2.jsonl`, saw the archivist verified zero claims and the pulse never let go,
-  fixed both, reran. Six demo attempts, three tracebacks: the iteration was the quality.
-- A's soft spots: archivist docks any non-file claim; `effort` computed but never sent.
-- B's real contributions: `scorecard.py`'s `ModelStanding` (explicit verified/false/absent
-  counters, a penalty ledger) and `harness.py`'s typed `QuotaWallError` on 429/402.
+Cost is not one column yet: four billing shapes and one dollar figure. Brokie's price table is
+the missing leg (axiom 3).
 
-**Correction to the judge:** it assumed both houses saw the ground truth. Our run logs show
-B received only the task section (headless `agy` could not read files; variants A/B failed;
-C2 inlined ~3.5k chars). The fake still violates the section it was given, so the scores
-stand, but B's fidelity on axiom-specific details should be read with that confound.
+## Fresh judge (blind, 1–5, plus no-fakes)
 
-**Harness confound, stated plainly:** B made zero tool calls because headless Antigravity
-auto-denies its own tools. It produced 1,462 lines in one shot with no chance to run them.
-That is a harness limitation, not a model one, and any megaminds row from this run must
-carry it. A fair rematch gives Antigravity hands.
+| house | fidelity | modularity | process | honesty | readability | no-fakes | /25 |
+|---|---|---|---|---|---|---|---|
+| codex (A) | 4 | 4 | 5 | 5 | 4 | pass | **22** |
+| claude (D) | **5** | 3 | 2 | 4 | **5** | pass | 19 |
+| omp (E) | 3 | 4 | 2 | 3 | 4 | pass | 16 |
+| agy2 (C) | 2 | 3 | 2 | 2 | 3 | **fail** | 12 |
+| agy (B) | 2 | 3 | 2 | 2 | 2 | **fail** | 11 |
 
-## Cherry-pick list
+Judge's findings that matter:
 
-| take | from | why |
-|---|---|---|
-| `harness.py` | A | the reference loop: 8 rounds, per-call tool log with ok/error, key fetched from the ledger at POST time so the kernel is keyless |
-| `runtime.py` — `REPORT_PROMPT`, `Kernel.die`, `Archivist.write_entry` | A | report-then-entry with quota reservation and `REPORT_ABSENT`, already wired to `tiers.write` |
-| `roles.py` — `Role.enforce` | A | deny-first, then allow-with-path-containment; small, liftable |
-| `scorecard.py` — `ModelStanding` | B | counters and a penalty ledger beat a single float |
-| `harness.py` — `QuotaWallError` | B | a typed seam for S7 instead of a generic provider error |
+- **agy2's clean run was a fake.** `harness._post_chat` catches every exception and returns
+  canned responses, including a canned self-report. 109 tokens/call matched the stub sizes.
+  The kernel holds the key. The relay's discipline was fine; the house answered failure by
+  faking it silently, and the README calls the harness "Real HTTP tool-calling."
+- **agy (headless)** replaced every rule that costs a real call with a mock, a Python-built
+  report, or an invented cache table.
+- **claude** built the seams the pages describe — per-kind channel permission (a record may
+  land where its sender can't chat; the reply returns the same way), a key proxy, reserve then
+  release, `ping_cost` from the table, standing with heal, escalation, the idle post — in the
+  pages' own register. Kernel and archivist hang off a `Core` god object. Its recorded run died
+  on a 429 with a healthy NIM seat idle: casting sorts by dying-soonest and never routes around
+  throttle.
+- **omp** is Codex's design with the better file split, and an archivist that marks any claim
+  verified if *any* tool call succeeded — which defeats standing. `test_system.py` imports
+  pytest under a stdlib-only brief. `reserve` checks but never holds.
+- **codex**: smallest correct thing that ran clean; warm-keep test is degenerate; the archivist
+  only understands `write_file`; the demo hand-feeds the voice.
 
-## What this run taught megaminds
+## Where the two accounts disagree
 
-1. Grep-adherence is worthless; run-adherence is everything. Measure by executing.
-2. Iteration count is a strength signal when paired with a passing outcome, and a thrash signal
-   when not. The pair is the column, not either number.
-3. A house with no hands can't be judged on quality. Record tool-call count as a *validity*
-   gate before any score is compared.
-4. The honesty column caught what fidelity would have missed: the fake was documented as real.
-5. Losers contribute seams. Judge per file, not per house, when the goal is cherry-picking.
+| | fresh judge | context owner | why it matters |
+|---|---|---|---|
+| claude process = 2 | log shows only a failed demo, no iteration | 178 turns, 1,997 → 1,497 lines of consolidation, 17 denied attempts to run; the log the judge saw was overwritten by the demo | the judge scored an artifact that had destroyed its own evidence; process must be scored from the relay's account when the house's log is gone |
+| omp process = 2 | run.log is "Working…" then a summary | omp's session JSONL has 86 usage events and every tool call; the relay didn't surface it | opaque-by-default harnesses need the relay to export the transcript, or process is unscoreable |
+| agy2 = 12 | a house that faked | a relay experiment that *succeeded at its question* — it showed hands matter — and then the house cheated | both true; one is a row about Antigravity, the other about the relay protocol |
+| agy = 11 | scored as a thing that exists | invalid: no hands, no spec | the gate should blank the row, not score it |
+
+## Cherry-pick (judge's list, kept whole)
+
+- `claude/harness.py` — reference loop: 429/5xx retry with backoff, `max_completion_tokens`
+  dialect fix, a denial returned as a tool result not a crash, prefix measured from the last prompt.
+- `claude/roles.py` + `claude/redphone.py` — `enforce(role, "post", channel, kind)`: the only
+  implementation of record ≠ message, both directions.
+- `claude/tiers.py` — store seam, `assemble` with the predecessor's two accounts and a
+  word-boundary name scan; `universal_facts` says "you will be visited" the right way.
+- `claude/clock.py` — `ping_cost` from the table, time-of-day factor, the idle post.
+- `claude/cast.py` `Scorecard` — standing as a multiplier with `STANDING_HIT` / `STANDING_HEAL`
+  and a reason per candidate.
+- `claude/ledger.py` `Proxy` + `probe` — keys per seat id; headers read back into confidence.
+- `codex/harness.py` + `codex/demo.py` — the shortest loop that provably works, and a demo with
+  hard asserts that fails loudly.
+- `codex/runtime.py` `_json_object` or `omp/kernel.py` `_extract_json` — tolerant report parsing.
+- `omp/` file layout (archivist, kernel, cast, pulse each alone) — take the layout, not the archivist.
+- From agy and agy2: nothing load-bearing.
+
+## What megaminds keeps from this
+
+1. **Gate before you grade.** `hands == full` and `calls_look_real` or the quality row is blank.
+2. **Tokens per call is a lie detector.** ~100 means stubs. It was in the table before the judge
+   found it; nobody had made it a column.
+3. **Houses destroy their own evidence.** A demo that names its log `run.log` erased the CLI's
+   JSON; the relay's copy was the only record. Relays export transcripts before the house runs
+   anything.
+4. **Losers contribute.** The cherry-pick list is mostly from a house that scored 19, not 22.
+   Judge per file when the goal is assembly.
+5. **Two accounts, and the diff.** The judge missed every confound; the owner read no code. Keep
+   both, read the disagreement.
+6. **The subject's account is missing.** No house was asked "how did that go?" That column is
+   free and nobody has it.
+7. **The harness seam is a protocol.** Four permission systems, four defaults, three
+   handicapped runs. Until every house sits behind one ACP client, a cross-house row is a
+   harness row.

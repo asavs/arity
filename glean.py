@@ -100,6 +100,10 @@ def outcome(d: Path) -> dict:
     elif list(d.glob("demo*.log")) or o["demo_attempts"]:
         o["demo_ran"] = False
     o["http_errors"] = (lambda m: int(m.group(1)) if m else 0)(re.search(r"http errors (\d+)", text))
+    # sanity floor: a real chat turn with a system prompt and tools is hundreds of tokens; ~100/call means stubs
+    if o["model_calls"] and o["demo_tokens"]:
+        o["tokens_per_call"] = round(o["demo_tokens"] / o["model_calls"])
+        o["calls_look_real"] = o["tokens_per_call"] >= 250
     o["demo_attempts"] = o["demo_attempts"] or len(list(d.glob("demo-round*.log")))
     # relay-observed wall clock: start/end .ts files are canonical; a RELAY.md wall column is the fallback
     ts = sorted(d.glob("start*.ts")), sorted(d.glob("end*.ts"))
@@ -128,7 +132,7 @@ def measure(dirs: list[Path]) -> list[dict]:
 
 def table(rows: list[dict]) -> str:
     cols = ["house", "hands", "files", "lines", "docstring_rate", "import_style_mixed", "third_party",
-            "brief_terms_hit", "syntax_errors", "demo_ran", "model_calls", "demo_tokens", "http_errors", "tracebacks",
+            "brief_terms_hit", "syntax_errors", "demo_ran", "model_calls", "demo_tokens", "tokens_per_call", "calls_look_real", "http_errors", "tracebacks",
             "tool_calls", "tool_failures", "demo_attempts", "wall_s", "house_tokens", "cost_usd", "saw_ground_truth", "wrote_outside_dir"]
     out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in rows: out.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
