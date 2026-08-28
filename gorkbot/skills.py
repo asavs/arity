@@ -119,12 +119,50 @@ class SkillRegistry:
             except Exception:
                 continue
 
+    def install(
+        self,
+        name: str,
+        description: str,
+        instructions: str,
+        tools: tuple[str, ...] = (),
+        tags: tuple[str, ...] = ("installed",),
+    ) -> Skill:
+        """Install a new skill manifest to disk and register in memory."""
+        clean_name = name.lower().replace(" ", "-")
+        target_dir = self.skills_dir / clean_name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = target_dir / "SKILL.md"
+
+        content = f"# {clean_name}\n{description}\n\n{instructions}\n"
+        skill_file.write_text(content, encoding="utf-8")
+
+        sk = Skill(
+            name=clean_name,
+            description=description,
+            instructions=instructions,
+            tools=tools,
+            tags=tags,
+        )
+        self.register(sk)
+        return sk
+
+    def remove(self, name: str) -> bool:
+        """Remove a skill from memory and delete its disk directory if present."""
+        key = name.lower().replace(" ", "-")
+        if key in self._skills:
+            del self._skills[key]
+            target_dir = self.skills_dir / key
+            if target_dir.exists():
+                import shutil
+                shutil.rmtree(target_dir, ignore_errors=True)
+            return True
+        return False
+
     def register(self, skill: Skill) -> None:
-        self._roles_key = skill.name.lower()
         self._skills[skill.name.lower()] = skill
 
     def get(self, name: str) -> Optional[Skill]:
-        return self._skills.get(name.lower())
+        return self._skills.get(name.lower().replace(" ", "-"))
 
     def list_skills(self) -> list[Skill]:
         return list(self._skills.values())
