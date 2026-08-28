@@ -117,11 +117,45 @@ class SeatLedger:
             seat.presence = is_present
 
     def _seed_from_env(self) -> None:
-        """Discover seats from environment variables."""
         now = time.time()
         default_reset = now + 86400.0  # 24h from now
 
-        # 1. Codex CLI (OpenAI / ChatGPT Subscription Seat)
+        # 0. Direct OAuth Subscription Wire Seats (ChatGPT Codex & SuperGrok)
+        try:
+            from .wire import load_local_oauth_credentials
+            creds = load_local_oauth_credentials()
+            if "openai-codex" in creds:
+                self.register(
+                    Seat(
+                        id="codex-wire",
+                        provider="codex-wire",
+                        endpoint="wire://chatgpt/codex",
+                        model="gpt-5.6-sol",
+                        kind="quota",
+                        total_allowance=2_000_000,
+                        remaining=2_000_000,
+                        reset_deadline=default_reset,
+                        base_price_per_m=0.0001,  # Fast direct wire
+                    )
+                )
+            if "xai-oauth" in creds:
+                self.register(
+                    Seat(
+                        id="grok-wire",
+                        provider="grok-wire",
+                        endpoint="wire://xai/grok",
+                        model="grok-4.5",
+                        kind="quota",
+                        total_allowance=2_000_000,
+                        remaining=2_000_000,
+                        reset_deadline=default_reset,
+                        base_price_per_m=0.0001,  # Fast direct wire
+                    )
+                )
+        except Exception:
+            pass
+
+        # 1. Codex CLI Harness Seat
         if shutil.which("codex"):
             self.register(
                 Seat(
@@ -133,11 +167,11 @@ class SeatLedger:
                     total_allowance=2_000_000,
                     remaining=2_000_000,
                     reset_deadline=default_reset,
-                    base_price_per_m=0.001,  # Near-zero marginal cost (Subscription)
+                    base_price_per_m=0.001,
                 )
             )
 
-        # 2. Claude Code CLI (Anthropic / Claude Subscription Seat)
+        # 2. Claude Code CLI Harness Seat
         if shutil.which("claude"):
             self.register(
                 Seat(
@@ -149,10 +183,9 @@ class SeatLedger:
                     total_allowance=2_000_000,
                     remaining=2_000_000,
                     reset_deadline=default_reset,
-                    base_price_per_m=0.001,  # Near-zero marginal cost (Subscription)
+                    base_price_per_m=0.001,
                 )
             )
-
         # 3. Gemini API
         gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if gemini_key:

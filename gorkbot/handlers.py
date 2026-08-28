@@ -269,7 +269,13 @@ class CLIModelProvider:
 
 
 def create_model_provider(seat: Any) -> ModelProvider:
-    """Factory creating the appropriate ModelProvider for any given Seat."""
+    """Factory creating the appropriate ModelProvider for any given Seat (Wire with Harness Fallback)."""
+    try:
+        from .wire import create_wire_model_provider
+        return create_wire_model_provider(seat)
+    except Exception:
+        pass
+
     provider = getattr(seat, "provider", "").lower()
     model = getattr(seat, "model", "")
     api_key = getattr(seat, "api_key", None)
@@ -288,7 +294,27 @@ def create_model_provider(seat: Any) -> ModelProvider:
 
 
 def create_default_model_provider() -> ModelProvider:
-    """Return the best available live ModelProvider based on environment and CLI availability."""
+    """Return the best available live ModelProvider based on wire, OAuth, API keys, and CLIs."""
+    try:
+        from .wire import create_wire_model_provider, load_local_oauth_credentials
+        creds = load_local_oauth_credentials()
+        if "openai-codex" in creds:
+            class DummyCodexSeat:
+                provider = "codex-wire"
+                model = "gpt-5.6-sol"
+                api_key = None
+                endpoint = ""
+            return create_wire_model_provider(DummyCodexSeat())
+        elif "xai-oauth" in creds:
+            class DummyGrokSeat:
+                provider = "grok-wire"
+                model = "grok-4.5"
+                api_key = None
+                endpoint = ""
+            return create_wire_model_provider(DummyGrokSeat())
+    except Exception:
+        pass
+
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
         return GeminiModelProvider()
     elif shutil.which("codex"):
