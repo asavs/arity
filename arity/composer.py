@@ -33,10 +33,16 @@ APTITUDE_MATRIX: dict[str, list[str]] = {
 
 
 class CastingComposer:
-    """Composes seat availability, quota expiration, and role aptitudes to cast seats."""
+    """Composes seat availability, quota expiration, scorecard standings, and skills to cast seats."""
 
-    def __init__(self, ledger: SeatLedger, aptitude_matrix: Optional[dict[str, list[str]]] = None):
+    def __init__(
+        self,
+        ledger: SeatLedger,
+        scorecard: Optional[Any] = None,
+        aptitude_matrix: Optional[dict[str, list[str]]] = None,
+    ):
         self.ledger = ledger
+        self.scorecard = scorecard
         self.aptitudes = aptitude_matrix or APTITUDE_MATRIX
 
     def cast(
@@ -46,39 +52,67 @@ class CastingComposer:
         candidates_count: int = 1,
         now: Optional[float] = None,
     ) -> CastingDecision:
-        """Select the best seat(s) for a role and task."""
+        """Select the best candidate seat(s) for a role and task based on empirical evidence and quota math."""
         curr_time = now if now is not None else time.time()
         available_seats = self.ledger.list_available(now=curr_time, exclude_presence=True)
 
         if not available_seats:
             raise RuntimeError("No available seats found in ledger (all exhausted or presence-locked).")
 
-        preferred_models = self.aptitudes.get(role.name.lower(), ["*"])
+        def evaluate_seat(seat: Seat) -> float:
+            """Higher score is better."""
+            # 1. Empirical Scorecard Standing (Axiom 9 & 3)
+            standing_score = 10.0
+            if self.scorecard and hasattr(self.scorecard, "get_standing"):
+                standing_score = self.scorecard.get_standing(role.name, seat.model)
+                if hasattr(role, "skills") and role.skills:
+                    for sk in role.skills:
+                        standing_score += (self.scorecard.get_standing(f"skill:{sk}", seat.model) - 10.0)
 
-        def rank_key(seat: Seat) -> tuple[int, float, float]:
-            # 1. Aptitude score (lower is better; index in preferred list)
-            aptitude_rank = 99
-            for idx, pattern in enumerate(preferred_models):
-                if pattern == "*" or pattern.lower() in seat.model.lower() or pattern.lower() in seat.provider.lower():
-                    aptitude_rank = idx
+            # 2. Economic Opportunity ($C_eff near 0 gives bonus for expiring subscriptions)
+            eff_cost = seat.effective_cost(curr_time)
+            cost_penalty = eff_cost * 2.0  # Penalize high metered dollar cost
+
+            # 3. Urgency bonus for expiring subscription quota
+            urgency_bonus = 0.0
+            if seat.kind == "quota":
+                time_left = seat.time_to_reset(curr_time)
+                if time_left < 3600:  # < 1 hour left
+                    urgency_bonus = 3.0
+                elif time_left < 14400:  # < 4 hours left
+                    urgency_bonus = 1.5
+
+            return standing_score - cost_penalty + urgency_bonus
+
+        # Sort all available seats by score descending
+        ranked_seats = sorted(available_seats, key=evaluate_seat, reverse=True)
+
+        # Select candidates, prioritizing provider diversity for A/B trials
+        top_candidates: list[Seat] = []
+        seen_providers: set[str] = set()
+
+        # First pass: pick best seat per distinct provider
+        for seat in ranked_seats:
+            if seat.provider not in seen_providers:
+                top_candidates.append(seat)
+                seen_providers.add(seat.provider)
+                if len(top_candidates) >= candidates_count:
                     break
 
-            # 2. Effective cost (lower is better; expiring quota approaches 0)
-            eff_cost = seat.effective_cost(curr_time)
+        # Second pass: fill remaining candidate slots if needed
+        if len(top_candidates) < candidates_count:
+            for seat in ranked_seats:
+                if seat not in top_candidates:
+                    top_candidates.append(seat)
+                    if len(top_candidates) >= candidates_count:
+                        break
 
-            # 3. Quota priority: quota seats dying sooner sort earlier
-            time_to_expire = seat.time_to_reset(curr_time) if seat.kind == "quota" else 999999.0
-
-            return (aptitude_rank, eff_cost, time_to_expire)
-
-        ranked_seats = sorted(available_seats, key=rank_key)
-        top_candidates = ranked_seats[:max(1, candidates_count)]
         primary = top_candidates[0]
-
         reason = (
             f"Cast '{primary.id}' ({primary.model}) for role '{role.name}'. "
+            f"Scorecard standing: {self.scorecard.get_standing(role.name, primary.model) if self.scorecard else 10.0:.1f} pts, "
             f"Effective cost: ${primary.effective_cost(curr_time):.4f}/M, "
-            f"Reset in: {primary.time_to_reset(curr_time):.0f}s"
+            f"Expiring in: {primary.time_to_reset(curr_time):.0f}s"
         )
 
         return CastingDecision(
