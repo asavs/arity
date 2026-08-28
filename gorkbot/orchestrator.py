@@ -72,7 +72,7 @@ class GorkbotOrchestrator:
         self.compiler = compiler or BriefCompiler()
         self.scorecard = scorecard or Scorecard(store=self.store)
         self.archivist = archivist or ImpartialArchivist(scorecard=self.scorecard, store=self.store)
-        self.composer = CastingComposer(ledger=self.ledger)
+        self.composer = CastingComposer(ledger=self.ledger, scorecard=self.scorecard)
         self.pulse = pulse or PulseEngine()
         self.inbox = inbox or RedphoneInbox(store=self.store)
         self.transport = transport or ConsoleTransport()
