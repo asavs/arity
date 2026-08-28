@@ -1,0 +1,14 @@
+{
+  "hands": "write-only (acceptEdits denied every python run: 17 denials)",
+  "cost_usd": 19.75,
+  "wrote_outside_dir": true,
+  "model": "claude-opus-5",
+  "effort": "high",
+  "harness": "claude -p --permission-mode acceptEdits",
+  "saw_ground_truth": true,
+  "wall_s": 2326,
+  "house_tokens": 493848,
+  "house_cache_read_tokens": 23272189,
+  "turns": 178,
+  "note": "demo run by relay: exit 0, 7 calls, 45 Gemini 429s handled as QuotaWall; wrote to shared memory dir; demo.py overwrote run.log"
+}

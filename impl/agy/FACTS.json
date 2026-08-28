@@ -1,0 +1,9 @@
+{
+  "hands": "none (headless: read/shell auto-denied)",
+  "wrote_outside_dir": false,
+  "model": "gemini-3.7-flash",
+  "effort": "high",
+  "harness": "agy --print, variant C2 inlined task section only",
+  "saw_ground_truth": false,
+  "note": "four variants; only C2 produced output; never saw ground truth"
+}

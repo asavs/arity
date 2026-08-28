@@ -1,0 +1,9 @@
+{
+  "hands": "full (read/write/run)",
+  "cost_usd": null,
+  "wrote_outside_dir": false,
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "harness": "codex exec -s workspace-write",
+  "note": "ran demo 6x itself; first attempt socket error"
+}

@@ -1,0 +1,1 @@
+BEGIN. You have NO tools in this session; a relay will transcribe for you. Do the task in the brief. Return every module inline as `=== FILE: <name> ===` blocks with the complete file contents and nothing else outside the blocks. Include demo.py and README.md.

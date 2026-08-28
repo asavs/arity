@@ -1,0 +1,176 @@
+Part 3 of 3:
+    D[kernel.die] --> WR[kernel.write_report]
+    WR --> RES[ledger.reserve: one report turn]
+    WR --> K[the kernel, one last turn, no tools]
+    K --> R[report: intent, believed changes, open, advice]
+    R --> TW[tiers.write — own account]
+    R --> AE[archivist reads it next]
+```
+
+**Rung 1 — English.** The kernel's own account, in its own words, before it goes. `die`
+reserves one turn's worth of quota first so a quota wall can't take the kernel and the report
+in the same breath. Then the kernel gets a single prompt with no tools: what were you trying
+to do, what do you believe you changed and why, what's still open, what's the last thing you
+know is safe, and what would you tell whoever's next. It's first person and it's short — the
+archivist will do the verifying, so the report doesn't have to prove anything, it has to say
+what it *meant*. It's stamped with the identity tuple so the archivist can match it to the
+envelope. If the turn fails — eviction mid-sentence — whatever came back is kept as a partial
+and marked so.
+
+**Rung 2 — pseudocode**
+
+```
+write_report(k, reason):
+    if not ledger.reserve(k.seat, REPORT_TURN_TOKENS): return ABSENT("no quota for report")
+    try:
+        text = k.turn(REPORT_PROMPT(reason), tools=[], max_tokens=REPORT_TURN_TOKENS)
+    except Death as d:
+        return PARTIAL(d.partial_text, reason=str(d))
+    return Report(kernel=k.id, identity=k.identity, at=now(), body=parse(text), trigger=reason)
+
+REPORT_PROMPT = "You're being visited one last time. No tools. In a few lines: what you were
+doing, what you believe you changed and why, what's open, the last thing you know is safe,
+and one piece of advice for whoever picks this up."
+```
+
+---
+
+## 6. `scorecard.rank(role, task_class) → [models]`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    CA[cast] --> SR[scorecard.rank]
+    SR --> EV[(evidence store: trials, judge scores, deterministic cols)]
+    SR --> ST[(standing: per role × model × task shape)]
+    SR --> AP[role.aptitude_wanted]
+    SR --> OUT[ordered models, with a confidence and a reason]
+```
+
+**Rung 1 — English.** Given a role and the kind of task, which models should hold it, in what
+order. It reads the evidence store — the blind-judged scores and the deterministic columns from
+past runs of this role — and the standing table, which is the part that remembers being wrong:
+a model caught inventing a P1 on this task shape is pushed down until it earns its way back. It
+weighs those against what the role says it wants (citation discipline, speed, cheapness) and
+returns an ordered list, each with a confidence and a one-line reason so the Voice can answer
+"why did the builder change?" with evidence instead of vibes. If there's no evidence for a
+role yet, it says so and falls back to the role's declared wants — and that first run becomes
+the evidence. Tonight this method ran by hand: Codex 21.6, Antigravity 15.8, Codex holds the
+role.
+
+**Rung 2 — pseudocode**
+
+```
+rank(role, task_class):
+    rows = evidence.for(role, task_class)                     # [{model, judge_mean, first_attempt_rate, stale_names, ...}]
+    if not rows: return fallback(role.aptitude_wanted, reason="no evidence yet")
+    scored = []
+    for m in models_seen(rows):
+        s = weighted(rows[m], weights=role.aptitude_wanted)   # quality, reliability, speed, cost
+        s *= standing.factor(role, m, task_class)             # <1 if caught wrong recently; recovers with clean runs
+        scored.append((m, s, reason=top_two_factors(rows[m])))
+    scored.sort(desc)
+    return [ {model, confidence=s/scored[0].s, reason} for (model, s, reason) in scored ]
+```
+
+---
+
+## What these six add to the picture
+
+- Two of them (`cold_cost`, `predict`) are just arithmetic over a table and a list of gaps.
+  They're their own methods because the table and the list change, not because they're hard.
+- `probe` is the one that's genuinely messy: it's five unreliable sources and a confidence.
+  Everything about quota rests on a guess, and the system should always know it's guessing.
+- `write_report` and `write_entry` are the two halves of axiom 9, and the order matters:
+  reserve quota, then the kernel speaks, then the archivist checks it against the artifacts.
+- `rank` is where "getting worse on record" lives. Standing is a multiplier under 1, and it
+  recovers. That one line is the whole difference between a router and a staff.
+
+
+<!-- ===== .wiki/methods.md ===== -->
+
+# Methods
+
+Every distinct operation the system performs across the thirteen story machinery sections, deduped to one name each, with the component that owns it and the stories that demand it. Apps (pi, omp, Slack, carriers) do not appear; these are what the system does.
+
+## Inventory
+
+| Method | Component | Demanded by stories | One-line English | Rung |
+|---|---|---|---|---|
+| `redphone.post(channel, msg)` | 1 | S1 S2 S3 S4 S7 S9 S11 S12 S13 | Put a message in a channel — from a human, a transport, a kernel, the pulse, or a peer's staff posting to a public channel. | 2 |
+| `transport.egress(channel, msg)` | 1 | S1 S2 S3 S6 S7 S9 S11 S12 S13 | Deliver a channel message outward on whatever wire the recipient is on: SMS/MMS, synthesized call audio, public reply, email. | 0 |
+| `transport.ingress(payload) → msg` | 1 | S1 S2 S3 S4 S9 S10 S12 S13 | Turn an arriving thing — MMS, call audio (STT, turn detection, barge-in), webhook, HTTP form, peer request — into a posted message with sender and thread; queue at the carrier while the brain is down. | 0 |
+| `redphone.dm(role, msg)` | 1 | S1 S2 S3 S4 S7 S10 S11 S12 | Address whichever kernel currently holds a role; the phone number is a DM to the Voice. | 2 |
+| `redphone.handoff(from, to_role, TaskRecord)` | 1 | S1 S4 S6 S7 S8 S9 S11 S13 | Bot-to-bot delegation as a structured record — who, what, evidence, tier, budget, depth — posted to a queue the router watches. | 2 |
+| `voice.brief_asa(records) → sentence` | 1 | S1 S3 S4 S6 S7 S9 S11 S12 S13 | The Voice reads a channel or an archivist entry and compresses it to one phone-sized line, keeping the caveat that matters. | 1 |
+| `redphone.escalate(problem, level)` | 1 | S8 S9 S11 S13 | When a kernel can't proceed, hand the problem up: leaf → dispatcher → red phone → Asa by email, and say so in the channel. | 1 |
+| `redphone.triage(problem)` | 1 | S9 S11 S12 S13 | Admit a public submission (proof-of-work or signed), build a problem record with a state machine, match it to a role, and drive it to Resolved or Escalated. | 1 |
+| `redphone.transfer_floor(from_role, to_role, convo)` | 1 | S4 | Move the live conversational turn to another bot with a signed envelope (request, relevant exchange, permissions, return route); suspend the caller's kernel warm; return. | 0 |
+| `roles.enforce(kernel, action)` | 2 | S1 S4 S8 S9 S11 S12 S13 | Check an action, path, host, channel, or handoff edge against the role's explicit allow/deny set; refuse anything not allowed; enforced by OS user and sandbox where possible. | 1 |
+| `roles.resolve(name_or_task) → role` | 2 | S1 S2 S4 S8 S9 S11 | Look a role up by name (a number resolves to the Voice) or pick one by aptitude for a problem template. | 1 |
+| `cast(task, role, convo) → kernel` | 3 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | Per prompt, choose provider, model, and effort together: keep a warm kernel if switching isn't worth the cache; else pick the fitting seat that dies soonest and spawn. | 2 |
+| `cache.cold_cost(kernel)` | 3 | S1 S2 S3 S4 S6 S7 S11 | Price what dying costs — provider window, write multiplier, storage, cold-vs-warm penalty on the current prefix — so cast and lifecycle can weigh it. | 1 |
+| `cache.identity(kernel) → tuple` | 3 | S1 S3 S6 S7 S10 S11 | Compute `provider+endpoint+model+boundary+session+prefix`; say which seat swaps stay inside it and which would break lineage. | 1 |
+| `cast.recast(bot, packet) → kernel` | 3 | S2 S3 S4 S6 S7 S10 | Move a persistent bot to a fresh kernel: take the old kernel's report at a checkpoint, kill it, spawn cold with both accounts, disclose reconstruction if it affects confidence. | 0 |
+| `cadence.predict(convo) → p(gap)` | 3 | S1 S2 S3 S4 S8 S9 | From the person's real inter-message history and current signals, estimate the next-turn gap; sporadic conversations are not cast on a five-minute window. | 1 |
+| `casting.policy.update(proposal)` | 3 | S5 | Apply a versioned routing change from evidence: thresholds, canary slice, stop conditions, one-step rollback; role name and memory untouched. | 0 |
+| `ledger.probe(seat) → observation` | 4 | S1 S3 S5 S6 S8 S9 S10 S11 S12 | Learn a seat's remaining allowance, reset clock, kind (quota or API), and boundary from APIs, account pages, headers, throttles, and past cycles, with source and confidence; verify a reset rather than assume it. | 1 |
+| `ledger.dying_soonest(candidates) → seats` | 4 | S1 S3 S6 S8 S9 S11 S12 S13 | Rank spendable seats by what expires first, within the cache boundary the task allows. | 1 |
+| `ledger.meter(kernel, usage)` | 4 | S6 S11 S12 S13 | Charge each kernel's tokens, cache reads/writes, and quota units to its seat so the day can be accounted for and a peer's cost can be bounded. | 0 |
+| `ledger.reserve(amount, purpose)` | 4 | S7 S11 S13 | Hold quota back for a purpose — a final report-only turn, a chain's spend budget and recursion depth, a peer's rate limit. | 0 |
+| `seats.proxy(call)` | 4 | S12 | Route a sandboxed kernel's model calls through a local proxy that injects the key, checks quota, and caps spend, so the guest never holds a secret. | 0 |
+| `kernel.spawn(seat, role, brief, effort) → k` | 5 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | Start one model runtime with an identity tuple, the role's tools and OS user, and the compiled brief; it wakes cold. | 2 |
+| `kernel.turn(msg)` | 5 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | One inference step against the kernel's context; tool calls happen inside it. | 2 |
+| `kernel.die(reason)` | 5 | S1 S2 S3 S4 S6 S7 S8 S9 S10 S11 S12 S13 | Block new tool calls, freeze the tree, solicit the report, then end the runtime and enqueue the archivist with the evidence envelope and reason. | 2 |
+| `kernel.write_report() → report` | 5 | S1 S2 S3 S4 S6 S7 S8 S9 S10 S11 S12 | First-person, compact: intent, believed changes, why, open questions, last safe artifact, advice to successor, trigger and identity hash. | 1 |
+| `kernel.trace() → envelope` | 5 | S1 S2 S5 S6 S7 S8 S9 S11 S12 | Capture transcript, tool log, diffs, tests, timings, casting metadata, quota telemetry, and termination event out-of-band, immutably, with secrets as audit handles. | 0 |
+| `lifecycle.predict_death(kernel)` | 5 | S3 S4 S6 S7 S10 | Watch cache age, provider signals, quota, context limit, and harness state; before an identity break, reserve a report-only turn and call die. | 0 |
+| `kernel.checkpoint()` | 5 | S6 S7 S10 | Reach an atomic safe point — committed patch, closed transaction, unopened document — before yielding the role; never sever mid-step. | 0 |
+| `harness.sandbox(spec) → env` | 5 | S5 S8 S12 | Provision an isolated environment (pinned snapshot, scoped directory, no secrets, NAT only) a kernel runs in, and tear it down. | 0 |
+| `tiers.assemble(role, task) → brief` | 6 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | Compile universal facts plus the tiers the role may have (biograph, project, task), the predecessor's two accounts, and any scoped disclosure capsule; refuse if anything crosses a denial. | 1 |
+| `tiers.write(tier, record)` | 6 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | Land a typed, signed record (`kernel_self_report`, `archivist_entry`, `self_report_absence`, event) in the tier the kernel belonged to. | 1 |
+| `tiers.redact(record, boundary)` | 6 | S5 S7 S8 S9 S13 | Strip what may not cross a boundary — identity, paths, location, secrets — producing a scrubbed payload for a leaf, a public outbox, or a peer. | 0 |
+| `tiers.retrieve(tier, query) → records` | 6 | S1 S2 S3 S4 S7 S13 | Search a tier for what a cold kernel needs now (a shorthand like "brokie", "where were we"), returning attributed records not dumped history. | 0 |
+| `store.migrate(inventory)` | 6 | S10 | Drain kernels, checksum the tiers/records/evidence/keys/config, move them, verify, reconnect transports, and log a system-level lineage entry. | 0 |
+| `archivist.write_entry(dead_kernel)` | 7 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 | Read the evidence envelope, compare claims to artifacts, write a third-person source-linked entry into the right tier; if the report is absent, say so explicitly; never continue the work. | 1 |
+| `scorecard.rank(role, task) → models` | 8 | S1 S2 S3 S4 S5 S6 S8 S9 S11 S12 S13 | Give cast the ordered candidate models for this role and prompt class from accumulated trial results and standing. | 1 |
+| `scorecard.record(result)` | 8 | S5 S6 S10 S12 | Fold a trial, canary, terrarium run, or caught error into the durable evidence store; standing goes down when a model is caught wrong. | 1 |
+| `evidence.trial(candidate, sample) → outputs` | 8 | S2 S5 S6 S12 | Run candidate and incumbents on the same frozen packets with equivalent tools, pinned snapshots, fixed budgets; the terrarium is the task-less form. | 1 |
+| `evidence.freeze_sample(role, n) → packets` | 8 | S2 S5 S6 | Select recurring, replayable tasks by a rule fixed before results are seen, capped per family, exclusions recorded. | 1 |
+| `evidence.judge(outputs) → scores` | 8 | S2 S5 S6 | Deterministic checks first, then blinded rubric scoring by a judge from a third house; keep disagreements and severity, don't average away failures. | 1 |
+| `evidence.discover(feeds) → candidate` | 8 | S5 | Watch release channels and sentiment; extract claims with provenance, labeled maker-claimed or sentiment, and turn complaints into probes. | 1 |
+| `pulse.tick(now)` | 9 | S3 S6 S12 | On a fixed cadence: scan warm kernels for keepalive-or-die, scan the ledger for seats about to expire, and wake sleeping sandboxes. | 2 |
+| `pulse.keepalive(kernel)` | 9 | S4 S9 | While a return is likelier than not and cheaper than going cold, ping the warm kernel; otherwise let it die. | 1 |
+
+## Methods no story demands
+
+From `components.md` pseudocode or English, exercised by no story's machinery:
+
+- `ledger.presence(seat)` / `.drop(presence.asa_live_on)` — "never fan out on a seat Asa is typing on." No story has Asa in a live session on a seat the router is choosing from.
+- `k.turn(post(friction, ...))` — a kernel posting a one-liner to a private friction channel mid-task. Kernels in the stories yield, hand off, or escalate; none posts friction.
+- `archivist.promote(friction → rule)` — promoting recurring friction into rules. No story shows a second occurrence of anything.
+- `pulse` idle post — `post(dm(voice), "{now}. nothing asked.")` funded by expiring quota. S12's cron wakeups and S6's clock scan are ticks, but nobody receives the "hi luv u."
+- `channel.visibility = private` for a project channel — every project exchange in the stories is a handoff record or a DM; only the public channel (S9, S12, S13) has an explicit visibility.
+
+Each should get a story or be cut.
+
+## Stories that demand a method nobody named
+
+- **S2** — `transport.barge_in(convo)`: cancel queued synthesis and playback, keep the interrupted draft as hidden state, resume listening. Folded into `transport.ingress` above but is its own operation on a live call.
+- **S4** — `tiers.watch(claim, trigger)`: a watched claim keyed to source fragments that re-evaluates the entry, not just reports a change.
+- **S7** — `kernel.verify_world()`: a successor must check files, tests, external state, and locks before treating either account as authority over the repository.
+- **S9** — `redphone.admit(submission)`: the spam gate (proof-of-work or signed identity) that precedes triage; and `archivist.publish(entry, public)`: the public/private split of an entry into `redphone.com/asas/history`.
+- **S10** — `store.audit_egress()`: a local traffic inspector that permits only pinned provider endpoints and flags any telemetry leaving the machine.
+- **S12** — `evidence.observe_temperament(run)`: turn a task-less run's shell history, DNS, and red-phone contact into aptitude vectors for `scorecard.record`.
+- **S13** — `redphone.handshake(peer, budget)`: negotiate rate limit and pre-compiled context so one staff can't run up another's seats; and `ledger` cross-reference by shared commit hash and transaction id.
+- **S1** — `voice.clarify(ambiguity)`: decide when an uncertain read (glare on a whiteboard) warrants one narrow question versus a reversible worker assumption. Possibly a role behavior, not a method.
+
+## The five that everything depends on
+
+1. **`redphone.post`** — every part either posts to a channel or is addressed through one; transports, kernels, the pulse, and peers all enter here, which is why the red phone is the spine and not the Voice.
+2. **`cast`** — the only place the three axes (seat, model, effort), the cache math, the cadence guess, and the scorecard are weighed together; every kernel in every story exists because it returned.
+3. **`kernel.spawn`** — the moment a role, a brief, a seat, and an identity tuple become one runtime; roles, tiers, and the ledger all converge on its arguments.
+4. **`kernel.die`** — the one transition that produces both accounts; it calls `write_report`, enqueues `archivist.write_entry`, and lands both via `tiers.write`, so lineage, memory, and evidence all hang off it.
+5. **`tiers.assemble`** — the compiler that makes axiom 8 real: it decides what each kernel knows, refuses on denial, and carries the predecessor's two accounts across a cold wake, which is what lets a bot outlive its kernel.
+

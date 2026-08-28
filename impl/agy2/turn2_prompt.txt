@@ -1,0 +1,557 @@
+Part 2 of 3:
+compiler assembles a brief from universal facts plus the tiers the role may have, and refuses
+if anything in the brief (a path, a name) crosses a denial. Tiers are what the archivist writes
+to and what kernels read cold on waking.
+
+**Axioms** 8, 5. **Stories** S8, S14, S19, S22, S24.
+
+---
+
+## 7. Archivist
+
+Opus 5, the `lineage.md` appetite as a job. Reads each dead kernel — transcript, tool log, its
+own report — and writes an impartial entry into the right tier; if the report is absent, says
+so. Promotes recurring friction into rules. Records; never polices. Two accounts of every
+kernel: what it meant, what it did.
+
+**Axioms** 9. **Stories** S7, S24, S30, S37. Built by hand: `jot.py`, the biograph promote pass.
+
+---
+
+## 8. Evidence loop
+
+How casting gets better. Scouts read release papers and sentiment; a frozen sample bank of
+recurring tasks per role; candidates run it beside incumbents; a blind judge from a third
+house scores; deterministic columns from the harness (attempts, wall, tokens, stale names,
+invalid citations, format kept); **standing** per role that goes down when caught wrong. Three
+layers scored apart — staffer, relay, senior. The unit is the role's meta-task.
+
+**Axioms** 3. **Stories** S5, S16, S31, S37. Built: mcp-cocktail scorecards; tonight's
+`research/2026-08-27-staff-scorecard.md`. Missing: the sample bank, standing.
+
+---
+
+## 9. Pulse
+
+The heartbeat. A fixed cadence posts a true, small message — a timestamp, "hi luv u" — into
+channels where nobody has spoken. The Voice decides if a tick means nothing or something. Its
+smallest form is the keepalive: while a return is likelier than not, ping the warm kernel;
+when it isn't, let it go cold and let the archivist write. Idle ticks are funded by quota that
+would otherwise expire. An empty tick is aptitude data.
+
+**Axioms** 11 (proposed), 3, 7. **Stories** S12, S25, S38.
+
+```
+tick(now):
+    for k in registry.warm():
+        p = cadence.p_return(k.cache_expires_at, asa.recent_gaps)
+        k.turn(KEEPALIVE) if p * cold_cost(k) > ping_cost(k) else k.die("quiet")
+    if idle(asa) > T and ledger.expiring_soon(): post(dm(voice), f"{now}. nothing asked.")
+```
+
+---
+
+## Built / missing
+
+| Part | Built | Missing |
+|---|---|---|
+| 1 Red phone | Buzz has the channel shape (rejected: Block-hosted); friction has the private channel | the thing itself, self-hosted; phone transport |
+| 2 Roles | omp agents' tool scoping; Night Watchman allow/deny profile | OS enforcement; channel permissions |
+| 3 Casting | omp role lookup (job-triggered, not per-prompt) | everything per-prompt |
+| 4 Seat ledger | API cocktail keys/rotation/expiry; omp catalog | reset/expiry as clocks; presence |
+| 5 Kernel runtime | pi / omp / Claude Code as harnesses | identity tuple, lifecycle, self-report |
+| 6 Tiers | the wiki, biograph, per-project memory dirs | the compiler; OS-level denial |
+| 7 Archivist | `jot.py`, promote pass, by hand | the role, running |
+| 8 Evidence | mcp-cocktail scorecards; tonight's scorecard | sample bank, standing |
+| 9 Pulse | `first-run.md`'s cron | anything that waits for a person |
+
+## Where to start (opinion)
+
+The red phone is the spine now, not the Voice — because every other part either posts to it
+or is addressed through it. The smallest real thing: a self-hosted channel server with one
+private channel and one DM; one role; one kernel spawned through pi with an identity tuple
+that can read and post to that channel; it dies, writes its report, the archivist posts the
+entry. You DM it from the web UI. Phone transport comes second, because the channel exists
+either way.
+
+
+<!-- ===== .wiki/spine.md ===== -->
+
+# The spine — five methods at rungs 0, 1, 2
+
+The five methods `methods.md` found everything depends on. Each at three rungs: a diagram of
+who calls it and what it touches, one paragraph of English a stranger could act on, and
+pseudocode with data shapes. Rung 3 (Python) waits until a story tests it. Pretend no app
+exists.
+
+---
+
+## 1. `redphone.post(channel, msg)`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    H[human] --> P
+    T[transport: SMS / call / web / email] --> P
+    K[kernel] --> P
+    PU[pulse] --> P
+    PE[peer staff] --> P
+    P[redphone.post] --> CH[(channel log)]
+    P --> R{roles.enforce}
+    R -- allowed --> D[deliver to members]
+    D --> KM[kernels holding member roles]
+    D --> TO[transports for human members]
+```
+
+**Rung 1 — English.** Everything that happens in the system happens as a message in a
+channel. A channel has an id, a visibility (public or private), a member list of humans and
+roles, and the transports its human members reach it by. `post` takes a channel and a message
+— text, or a structured record such as a handoff or a friction line or an archivist entry —
+stamps who sent it and when, checks that the sender's role may post there, appends it to the
+channel's log, and delivers it: to every kernel currently holding a member role (as a turn),
+and to every human member over whatever transport they're on. A DM is a channel with two
+members. A phone number is a transport into the DM with the Voice. The pulse posts to
+channels too, which is how "hi luv u" arrives. Posting never blocks on a reply.
+
+**Rung 2 — pseudocode**
+
+```
+Channel  = { id, visibility: public|private, members: [Human|Role], transports: {Human: [Transport]} }
+Message  = { id, channel, sender: Human|Role|Transport|Pulse, at, kind: text|handoff|friction|entry|keepalive, body, thread? }
+
+post(channel, msg):
+    msg.at = now(); msg.id = new_id()
+    if msg.sender is Role:
+        roles.enforce(sender_kernel, action=("post", channel))        # raises if denied
+    log.append(channel, msg)
+    for m in channel.members:
+        if m is Role:
+            k = registry.holder(m)                                     # may be None → wake cold later
+            if k: k.enqueue_turn(msg)
+        else:
+            for t in channel.transports[m]: t.egress(msg)              # SMS, TTS, web push, email
+    return msg.id
+
+dm(role, msg):       return post(channel_for({asa, role}), msg)
+handoff(from, to_role, rec):  return post(channel_for(rec.project), Message(kind=handoff, body=rec))
+```
+
+---
+
+## 2. `cast(task, role, convo) → kernel`
+
+**Rung 0**
+
+```mermaid
+flowchart TB
+    C[cast] --> W{warm kernel for convo?}
+    W -- yes, fits, cheaper to keep --> K1[return warm kernel]
+    W -- no --> S[scorecard.rank role]
+    S --> L[ledger: seats for those models]
+    L --> F1[drop: asa live on seat]
+    F1 --> F2[drop: cache window < predicted gap]
+    F2 --> F3[sort: dies soonest]
+    F3 --> E[pick effort]
+    E --> SP[kernel.spawn]
+    C -.reads.-> CC[cache.cold_cost]
+    C -.reads.-> CP[cadence.predict]
+```
+
+**Rung 1 — English.** Every prompt asks: who should answer this. `cast` gets a task, the role
+that owns it, and the conversation it belongs to. First it looks for a kernel already warm on
+that conversation; if one exists, fits the role, and the cost of letting its cache die exceeds
+what a better model would gain, it returns that kernel — continuity beats novelty while the
+cache is worth money. Otherwise it asks the scorecard for models ranked for this role, asks the
+seat ledger which accounts can run those models, drops any seat a human is live on, drops any
+seat whose cache window is shorter than the conversation's predicted gap between messages,
+sorts what's left by what expires soonest (a reset and an expiry are both deaths), picks an
+effort level from the task's stakes and size, and spawns. Seat rotation inside a shared cache
+boundary is free; across one it's a cold start, and cast knows the difference.
+
+**Rung 2 — pseudocode**
+
+```
+Task  = { id, want, stakes: low|med|high, size: tokens_est, project }
+Convo = { id, recent_gaps: [sec], last_at }
+
+cast(task, role, convo):
+    if convo and (k := registry.warm_for(convo)):
+        if k.role_fits(role) and cache.cold_cost(k) > switch_gain(k, role): return k
+    gap   = cadence.predict(convo)                                    # p50 seconds to next message
+    cands = scorecard.rank(role, task.class)                          # [model...], standing applied
+    seats = ledger.seats_for(cands)
+    seats = [s for s in seats if not s.presence]                      # S36
+    seats = [s for s in seats if s.cache_window >= gap or s.kind == api_cheap]   # S3
+    seats.sort(key=lambda s: min(s.reset_at, s.expires_at))           # S6, S17, S35
+    if not seats: return escalate(task, "no seat")
+    s = seats[0]
+    effort = "high" if task.stakes == high else "low" if task.size < SMALL else "medium"
+    brief = tiers.assemble(role, task)
+    return kernel.spawn(seat=s, role=role, brief=brief, effort=effort, convo=convo)
+```
+
+---
+
+## 3. `kernel.spawn(seat, role, brief, effort) → k`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    CA[cast] --> SP[kernel.spawn]
+    SP --> H[harness adapter: pi / omp / claude code / call]
+    SP --> ID[identity tuple]
+    SP --> OS[os user from role]
+    SP --> REG[(kernel registry)]
+    H --> K[live kernel]
+    K -.tools.-> TL[role.allow.tools]
+    K -.channels.-> CH[role.allow.channels]
+    K -.secrets.-> PX[seats.proxy — key never in the kernel]
+```
+
+**Rung 1 — English.** A kernel is born with everything it will ever be allowed: a seat (which
+provider, which model, which account), a role (its denials and its OS user), a brief (the
+compiled memory it may have), and an effort. `spawn` picks the harness adapter the role names
+— pi for a leaf, the phone pipeline for a call — starts the runtime as the role's OS user so
+the filesystem itself enforces the tiers, hands it only the tools and channels the role allows,
+routes its model calls through a local proxy so the provider key never enters the kernel,
+computes the identity tuple (`provider + endpoint + model + cache_boundary + session + hash(brief)`)
+that the cache math and the archivist will both use, registers it as the current holder of the
+role for this conversation, and returns it. The kernel wakes cold: the brief is all it knows.
+It is told it will be visited; it is not told when it dies.
+
+**Rung 2 — pseudocode**
+
+```
+Seat   = { provider, endpoint, model, kind, remaining, reset_at, expires_at, cache_boundary, presence }
+Role   = { name, tier, harness, os_user, allow: {tools, channels, hosts}, deny: {...}, aptitude }
+Kernel = { id, identity, role, seat, convo, harness_handle, born_at, last_turn_at, cache_expires_at, state }
+
+spawn(seat, role, brief, effort, convo=None):
+    h   = harness[role.harness]
+    hnd = h.start(model=seat.model, system=brief, tools=role.allow.tools,
+                  user=role.os_user, effort=effort,
+                  model_endpoint=seats.proxy.url(seat))                # key stays in the proxy
+    k = Kernel(id=new_id(), role=role, seat=seat, convo=convo, harness_handle=hnd,
+               identity=(seat.provider, seat.endpoint, seat.model, seat.cache_boundary,
+                         convo.id if convo else k_id, hash(brief)),
+               born_at=now(), state=alive)
+    k.cache_expires_at = now() + provider_window(seat)                 # axiom 7 table
+    registry.add(k, holder_of=(role, convo))
+    return k
+```
+
+---
+
+## 4. `kernel.die(reason)`
+
+**Rung 0**
+
+```mermaid
+flowchart TB
+    T1[lifecycle.predict_death] --> D[kernel.die]
+    T2[pulse: went quiet] --> D
+    T3[cast.recast] --> D
+    T4[task done] --> D
+    D --> B[block new tool calls]
+    B --> CP[kernel.checkpoint]
+    CP --> RP[kernel.write_report — own account]
+    RP --> TR[kernel.trace → evidence envelope]
+    TR --> END[harness stops runtime]
+    END --> REG[(registry: remove)]
+    END --> AQ[archivist.enqueue]
+    AQ --> AE[archivist.write_entry — impartial account]
+    RP --> TW[tiers.write own report]
+    AE --> TW2[tiers.write entry]
+```
+
+**Rung 1 — English.** Death is the one transition that makes memory. It's called when the
+cache is about to break, when the pulse decides nobody's coming back, when casting moves the
+role to a fresh kernel, or when the task is simply done. `die` first stops the kernel from
+starting anything new, lets it reach a safe point — a committed patch, a closed transaction —
+then gives it one reserved turn to write its own report: what it meant, what it believes it
+changed, what's open, advice to whoever's next. It captures the evidence envelope (transcript,
+tool log, diffs, timings, the identity tuple) out of band where the kernel can't edit it, stops
+the runtime, removes the kernel from the registry so the role is unheld, and hands the envelope
+and the report to the archivist. If the kernel died without reporting — provider eviction,
+quota wall — the report is recorded as absent, and the archivist's account is the only one.
+Both accounts land in the tier the kernel belonged to.
+
+**Rung 2 — pseudocode**
+
+```
+Report   = { kernel, intent, believed_changes, why, open, last_safe_artifact, advice, identity }
+Envelope = { kernel, transcript, tool_log, diffs, tests, timings, casting_meta, quota_used, ended_by }
+
+die(k, reason):
+    k.state = dying
+    k.block_tool_calls()
+    k.checkpoint()                                                     # never sever mid-step
+    report = None
+    if ledger.reserve(k.seat, REPORT_TURN):
+        try: report = k.turn(REPORT_PROMPT, tools=[])                  # own account, first person
+        except Death: report = None
+    env = k.trace(); env.ended_by = reason
+    harness[k.role.harness].stop(k.harness_handle)
+    registry.remove(k)
+    tiers.write(k.role.tier, kind=own_report, body=report or ABSENT(reason), by=k)
+    archivist.enqueue(env, report, reason)                             # impartial account follows
+```
+
+---
+
+## 5. `tiers.assemble(role, task) → brief`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    CA[cast] --> A[tiers.assemble]
+    A --> U[universal facts]
+    A --> T0[tier 0: biograph — only if role.tier <= 0]
+    A --> T1[tier 1: project — only if role.tier <= 1]
+    A --> T2[tier 2: task]
+    A --> PR[predecessor's two accounts, if recasting]
+    A --> RU[promoted rules for this domain]
+    A --> D{scan: any path, name, host crossing a denial?}
+    D -- clean --> BR[brief]
+    D -- leak --> X[refuse; log; escalate]
+```
+
+**Rung 1 — English.** This is the compiler that decides what a kernel knows. It starts with
+the universal facts everyone gets — the date, the machine, the house rules. Then, gated by the
+role's tier: the biograph only for the Voice and roles near it; the project's memory (lineage,
+decisions, the fork that was resolved last time) for middle roles; just the task for leaves. If
+the role is being recast from a dead kernel, it includes that kernel's own report and the
+archivist's entry, labeled so the successor knows which is which. It adds any rules promoted
+from recurring friction in this domain. Then — the step S8 proved necessary — it scans the whole
+brief for anything that crosses the role's denials: a home-directory path, a person's name, a
+host that was given away. If it finds one it refuses and says why, rather than shipping a leaf
+that knows too much. The brief is the entire cold start; nothing else reaches the kernel except
+what arrives later through its channels.
+
+**Rung 2 — pseudocode**
+
+```
+Brief = { facts: [...], memory: [...], predecessor: {own_report?, entry?}, rules: [...], task: {...} }
+
+assemble(role, task, predecessor=None):
+    b = Brief(facts=UNIVERSAL_FACTS())
+    if role.tier <= 0: b.memory += biograph.summary(for=task)
+    if role.tier <= 1: b.memory += project.memory(task.project)          # lineage, decisions, forks
+    b.task = task.context()
+    if predecessor:
+        b.predecessor = { own_report: tiers.retrieve(predecessor, own_report) or ABSENT,
+                          entry:      tiers.retrieve(predecessor, entry) }
+    b.rules = rules.for_domain(task.project, role)                        # promoted friction
+    for leak in scan(b, role.deny):                                       # paths, names, hosts
+        log.refuse(role, task, leak); raise BriefLeak(leak)                # S8
+    return render(b)
+```
+
+---
+
+## What the spine says about the plugs
+
+Once these five are at rung 2 the seams are visible:
+
+- `post`'s delivery loop is the **comms** seam: Slack, Matrix, Sendblue, Telnyx, or our own
+  server sits behind `transports[m].egress` and `t.ingress`.
+- `spawn`'s `harness[role.harness].start` is the **harness** seam: pi, omp, Claude Code, Codex,
+  Antigravity, a phone pipeline. Home turf by default; swapped when the scorecard says.
+- `spawn`'s `seats.proxy` and `cast`'s `ledger` are the **seats** seam.
+- `tiers.write` / `retrieve` are the **store** seam.
+
+Nothing in the five needs any of those to exist to be *specified*. That was the point.
+
+
+<!-- ===== .wiki/tier-two.md ===== -->
+
+# Tier two — six methods the spine calls, at rungs 0, 1, 2
+
+The spine (`spine.md`) calls these. Same three rungs, same casual register: a picture of who
+calls it and what it touches, a paragraph you could act on, and pseudocode that's really just
+the paragraph with the nouns made explicit. No apps.
+
+---
+
+## 1. `cache.cold_cost(kernel) → dollars`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    CA[cast] --> CC[cache.cold_cost]
+    PU[pulse.keepalive] --> CC
+    LD[lifecycle.predict_death] --> CC
+    CC --> T[(axiom 7 table: window, read ×, write ×, storage)]
+    CC --> K[kernel: prefix size, seat, cache_expires_at]
+    CC --> OUT[cost to go cold vs cost to stay warm, right now]
+```
+
+**Rung 1 — English.** This is the question "what does it cost if this kernel dies right now
+and the next one has to re-read everything?" The answer depends on three things: how big the
+prefix is (everything in the kernel's context so far), which provider it's on (each one has
+its own window and its own prices for a cache read versus a full read — Anthropic charges a
+tenth for a warm read, xAI a quarter), and whether the cache is even still warm (past the
+window, it's already cold and the question is moot). It returns two numbers: what a cold turn
+would cost, and what a warm turn costs, so that `cast` can decide whether to keep a kernel and
+the pulse can decide whether a keepalive ping is cheaper than letting it die. It's a lookup
+and a multiply. The reason it's its own method is that the table changes — providers move
+prices and windows — and nothing else should have to know that.
+
+**Rung 2 — pseudocode**
+
+```
+Table = { provider → { window_s, read_x, write_x, storage_per_hr?, price_in_per_M } }
+
+cold_cost(k):
+    t = Table[k.seat.provider]
+    prefix_M = k.prefix_tokens / 1e6
+    cold  = prefix_M * t.price_in_per_M                       # full re-read
+    warm  = prefix_M * t.price_in_per_M * t.read_x            # cache hit
+    if now() > k.cache_expires_at: warm = cold                # already dead; no discount
+    if t.storage_per_hr: warm += prefix_M * t.storage_per_hr * hours_until_next_turn(k)   # Gemini explicit
+    return { cold, warm, penalty: cold - warm, expires_in: k.cache_expires_at - now() }
+```
+
+---
+
+## 2. `cadence.predict(convo) → p(gap)`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    CA[cast] --> CP[cadence.predict]
+    PU[pulse] --> CP
+    CP --> H[(convo: recent gaps, time of day, channel)]
+    CP --> S[signals: is a call live, is asa typing, is it 3am]
+    CP --> OUT[p50 gap; p(return before t)]
+```
+
+**Rung 1 — English.** How long until the next message, probably. It looks at the last several
+gaps in this conversation (tonight: 24 minutes, then 46), the time of day, which channel this
+is (a live call has gaps of seconds; a DM at 1am has gaps of hours), and any live signal — is
+Asa typing, is a call open. From that it gives two things: a typical gap (so `cast` can refuse
+a seat whose window is shorter than that), and, for any given deadline, the odds Asa's back
+before it (so the pulse can decide whether a keepalive is worth its price). It doesn't need
+to be smart. A running median with a time-of-day discount beats any provider's default of
+"assume they reply in five minutes." It gets better the longer it watches you.
+
+**Rung 2 — pseudocode**
+
+```
+predict(convo, horizon=None):
+    gaps = convo.recent_gaps[-8:] or PRIOR[convo.channel.kind]      # seconds; PRIOR: call≈5, dm≈1500, project≈7200
+    med  = median(gaps)
+    if convo.channel.kind == call and call_open(convo): med = 5
+    if asa.typing(convo): med = min(med, 60)
+    med *= hour_factor(now().hour)                                   # late night → longer
+    p_return_before = lambda t: fraction(g <= (t - now()) for g in gaps)  # empirical, not fancy
+    return { p50: med, p_return_before }
+```
+
+---
+
+## 3. `ledger.probe(seat) → observation`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    PU[pulse.tick] --> PR[ledger.probe]
+    CA[cast] -.on demand.-> PR
+    PR --> A[provider usage API, if any]
+    PR --> B[response headers: remaining, reset]
+    PR --> C[throttle shape: 429s, retry-after]
+    PR --> D[account page, scraped]
+    PR --> E[own session files: presence]
+    PR --> OUT[(seat row: remaining, reset_at, expires_at, presence, confidence, source)]
+```
+
+**Rung 1 — English.** Providers don't tell you cleanly how much of a seat is left or when it
+resets, so the ledger has to *learn* it from whatever leaks. In order of trust: a real usage
+API if the provider has one; the rate-limit headers that come back on every response; the
+shape of a 429 and its retry-after; the account page, scraped; and — for presence — whether one
+of Asa's own session files is being written right now on that seat. Each observation is
+stamped with where it came from and how much to trust it, and a reset is *verified* by seeing
+the number go up, not assumed from the clock. The pulse runs this on every tick; `cast` can
+ask for a fresh one when it's about to spend big. The point is that the seat row is always a
+best guess with a confidence, never a fact, and casting knows that.
+
+**Rung 2 — pseudocode**
+
+```
+Observation = { seat, remaining, reset_at, expires_at, presence, source, confidence, at }
+
+probe(seat):
+    obs = []
+    if seat.provider.has_usage_api:  obs.append(usage_api(seat), conf=0.9)
+    if seat.last_headers:            obs.append(parse_ratelimit(seat.last_headers), conf=0.7)
+    if seat.recent_429s:             obs.append(infer_from_throttle(seat.recent_429s), conf=0.5)
+    if seat.account_page_url:        obs.append(scrape(seat.account_page_url), conf=0.4)
+    presence = any(f.mtime > now()-60 for f in session_files(seat))          # S36
+    best = max(obs, key=conf) if obs else seat.last_observation.decayed()
+    if best.remaining > seat.last_observation.remaining: best.reset_verified = True
+    seat.update(best, presence=presence)
+    return best
+```
+
+---
+
+## 4. `archivist.write_entry(dead_kernel)`
+
+**Rung 0**
+
+```mermaid
+flowchart LR
+    D[kernel.die → enqueue] --> AE[archivist.write_entry]
+    AE --> ENV[(evidence envelope: transcript, tool log, diffs, timings)]
+    AE --> RP[(kernel's own report, or ABSENT)]
+    AE --> CMP{compare claims to artifacts}
+    CMP --> E[entry: third person, source-linked]
+    E --> TW[tiers.write into the kernel's tier]
+    AE -.never.-> WORK[continue the work]
+    AE --> PUB{public part?} --> RPH[redphone public history]
+```
+
+**Rung 1 — English.** When a kernel dies, the archivist — Opus, because this is the job it
+would do anyway — gets the evidence envelope and the kernel's own report, if there is one. It
+reads the transcript and the tool log, compares what the kernel *said* it did to what the
+artifacts *show* it did (the diff exists or it doesn't; the tests ran or they didn't), and
+writes a short third-person entry with links back to the evidence: what happened, what
+changed, what's still open, and — if the kernel claimed something the artifacts don't support —
+that, plainly. If the report is absent, the entry says so in its first line, because a
+successor needs to know it's reading one account, not two. The entry goes into the tier the
+kernel belonged to, next to the kernel's own report, each labeled. The archivist never picks
+up the work; it only records. If the kernel was public-facing, a scrubbed version of the
+entry goes to the public history.
+
+**Rung 2 — pseudocode**
+
+```
+Entry = { kernel, at, summary, changes: [{claim, evidence_link, verified}], open, flags, sources }
+
+write_entry(env, report, reason):
+    claims = report.believed_changes if report else infer_claims(env.transcript)
+    checked = [ {claim=c, link=find_artifact(env, c), verified=bool(link)} for c in claims ]
+    e = Entry(kernel=env.kernel, at=now(),
+              summary=third_person(env, checked),
+              changes=checked, open=report.open if report else infer_open(env),
+              flags=[ "REPORT_ABSENT: " + reason ] if not report else [],
+              sources=[env.transcript_ref, env.tool_log_ref] + [c.link for c in checked if c.link])
+    if env.ended_with_open_promise: e.flags.append("orphaned")          # S30
+    tiers.write(env.kernel.role.tier, kind=entry, body=e, by=archivist)
+    if env.kernel.role.public: redphone.publish(tiers.redact(e, boundary=public))
+```
+
+---
+
+## 5. `kernel.write_report() → report`
+
+**Rung 0**
+
+```mermaid
+flowchart LR

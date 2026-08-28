@@ -1,0 +1,10 @@
+{
+  "hands": "relay (Sonnet transcribes + runs, never edits)",
+  "wrote_outside_dir": false,
+  "model": "gemini-3.7-flash",
+  "effort": "high",
+  "harness": "agy --continue x6 via Sonnet relay",
+  "saw_ground_truth": true,
+  "wall_s": 643,
+  "note": "brief in 3 chunks (acked); 2 impl rounds; each --continue re-bills the conversation"
+}
