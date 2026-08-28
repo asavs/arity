@@ -24,39 +24,179 @@ from .types import CallModel, ModelCompleted, ModelFailed
 # -----------------------------------------------------------------------------
 
 def load_local_oauth_credentials() -> dict[str, dict[str, Any]]:
-    """Discover active OAuth subscription credentials from local storage.
+    """Discover active OAuth subscription credentials from TokenStore (standalone + external)."""
+    try:
+        from .auth import TokenStore
+        store = TokenStore()
+        return store.load_all() or store.discover_external_credentials()
+    except Exception:
+        return {}
 
-    Checks ~/.gorkbot/auth.json first, then imports from ~/.omp/agent/agent.db.
-    """
-    creds: dict[str, dict[str, Any]] = {}
 
-    # 1. Check standalone gorkbot auth store
-    gorkbot_auth_file = Path.home() / ".gorkbot" / "auth.json"
-    if gorkbot_auth_file.exists():
+# -----------------------------------------------------------------------------
+# 1.1 Direct Google Antigravity Wire Provider (Gemini 3 & Claude on GCP)
+# -----------------------------------------------------------------------------
+
+@dataclass
+class AntigravityWireProvider:
+    """Direct HTTPS wire caller for Google Cloud Code Assist (Antigravity)."""
+    access_token: str
+    project_id: str
+    model: str = "gemini-3-flash-agent"
+    timeout: float = 60.0
+
+    def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
+        import uuid
+        import time
+
+        # 1. Attempt token auto-refresh if available
         try:
-            creds.update(json.loads(gorkbot_auth_file.read_text(encoding="utf-8")))
+            from .auth import TokenStore
+            store = TokenStore()
+            refreshed = store.refresh_if_needed("google-antigravity")
+            if refreshed and refreshed.get("access"):
+                self.access_token = refreshed["access"]
+                if refreshed.get("projectId"):
+                    self.project_id = refreshed["projectId"]
         except Exception:
             pass
 
-    # 2. Check local OMP SQLite store
-    omp_db = Path.home() / ".omp" / "agent" / "agent.db"
-    if omp_db.exists():
+        endpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.access_token}",
+            "User-Agent": "antigravity/hub/2.8.0 (aidev_client; os_type=windows; arch=x64; cl=963137146)",
+            "Accept": "application/json",
+        }
+
+        # Map model IDs to Antigravity wire configurations
+        wire_model = self.model
+        model_enum = None
+        is_claude = "claude" in self.model.lower()
+
+        if "flash" in self.model.lower():
+            wire_model = "gemini-3-flash-agent"
+            model_enum = "MODEL_PLACEHOLDER_M132"
+        elif "pro" in self.model.lower() and not is_claude:
+            wire_model = "gemini-3.1-pro-low"
+            model_enum = "MODEL_PLACEHOLDER_M36"
+        elif is_claude:
+            wire_model = "claude-sonnet-4-6" if "sonnet" in self.model.lower() else "claude-opus-4-6-thinking"
+
+        session_id = f"-{int(time.time() * 1000)}"
+        request_id = f"agent/main/{int(time.time() * 1000)}/{str(uuid.uuid4())}/1"
+
+        contents: list[dict[str, Any]] = []
+        system_instruction: Optional[dict[str, Any]] = None
+
+        for msg in effect.messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "system":
+                system_instruction = {
+                    "role": "user",
+                    "parts": [{"text": str(content)}],
+                }
+            elif role == "assistant":
+                contents.append({
+                    "role": "model",
+                    "parts": [{"text": str(content)}],
+                })
+            else:  # "user" or "tool"
+                contents.append({
+                    "role": "user",
+                    "parts": [{"text": str(content)}],
+                })
+
+        inner_request: dict[str, Any] = {
+            "sessionId": session_id,
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": 64000 if is_claude else 65536,
+                "temperature": effect.temperature,
+            },
+        }
+
+        if system_instruction:
+            inner_request["systemInstruction"] = system_instruction
+
+        if model_enum:
+            inner_request["labels"] = {"model_enum": model_enum}
+
+        if is_claude:
+            inner_request["toolConfig"] = {
+                "functionCallingConfig": {
+                    "mode": "VALIDATED",
+                }
+            }
+
+        payload = {
+            "project": self.project_id,
+            "requestId": request_id,
+            "model": wire_model,
+            "userAgent": "antigravity",
+            "requestType": "agent",
+            "request": inner_request,
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+
         try:
-            conn = sqlite3.connect(str(omp_db), timeout=2.0)
-            cur = conn.cursor()
-            cur.execute("SELECT provider, data FROM auth_credentials WHERE disabled_cause IS NULL")
-            for provider, raw_data in cur.fetchall():
-                if provider not in creds and raw_data:
-                    try:
-                        creds[provider] = json.loads(raw_data)
-                    except Exception:
-                        continue
-            conn.close()
-        except Exception:
-            pass
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                candidates = res.get("response", {}).get("candidates", [])
+                if not candidates:
+                    candidates = res.get("candidates", [])
 
-    return creds
+                content_text = ""
+                tool_calls: list[dict[str, Any]] = []
 
+                if candidates:
+                    first_cand = candidates[0]
+                    parts = first_cand.get("content", {}).get("parts", [])
+                    for p in parts:
+                        if "text" in p:
+                            content_text += p["text"]
+                        if "functionCall" in p:
+                            fc = p["functionCall"]
+                            tool_calls.append({
+                                "id": f"call_{uuid.uuid4().hex[:8]}",
+                                "type": "function",
+                                "function": {
+                                    "name": fc.get("name"),
+                                    "arguments": json.dumps(fc.get("args", {})),
+                                },
+                            })
+
+                usage_meta = res.get("response", {}).get("usageMetadata", {})
+                usage = {
+                    "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+                    "total_tokens": usage_meta.get("totalTokenCount", 0),
+                }
+
+                return ModelCompleted(
+                    content=content_text,
+                    tool_calls=tool_calls,
+                    usage=usage,
+                    finish_reason="stop",
+                    seat_id=f"wire:antigravity:{wire_model}",
+                )
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            retryable = e.code in (401, 403, 429, 500, 502, 503)
+            return ModelFailed(
+                error=f"Antigravity wire HTTP {e.code}: {err_body}",
+                seat_id=f"wire:antigravity:{wire_model}",
+                retryable=retryable,
+            )
+        except Exception as e:
+            return ModelFailed(
+                error=f"Antigravity wire request failed: {str(e)}",
+                seat_id=f"wire:antigravity:{wire_model}",
+                retryable=True,
+            )
 
 # -----------------------------------------------------------------------------
 # 2. Direct OpenAI Codex Wire Provider (ChatGPT Subscription)
@@ -326,7 +466,28 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
 
     creds = load_local_oauth_credentials()
 
-    if provider == "codex-wire":
+    if provider in ("google-antigravity", "antigravity-wire", "gemini-wire", "claude-wire") or provider.startswith(("antigravity-wire:", "claude-wire:")):
+        from .auth import TokenStore
+        store = TokenStore()
+        
+        account_key = "google-antigravity"
+        if ":" in provider:
+            account_key = provider.split(":", 1)[1]
+            
+        agy_data = creds.get(account_key) or store.get_credential(account_key) or {}
+        token = agy_data.get("access")
+        proj_id = agy_data.get("projectId") or agy_data.get("project_id", "")
+        if token and proj_id:
+            wire = AntigravityWireProvider(
+                access_token=token,
+                project_id=proj_id,
+                model=model or ("claude-sonnet-4-6" if "claude" in provider else "gemini-3-flash-agent"),
+            )
+            fallback_harness = "claude" if "claude" in provider else "omp"
+            cli = CLIModelProvider(harness=fallback_harness, model=model or "default")
+            return FallbackModelProvider(primary=wire, fallback=cli, name=f"agy-wire+{fallback_harness}")
+        return CLIModelProvider(harness="omp", model=model or "gemini-3.6-flash")
+    elif provider == "codex-wire":
         codex_data = creds.get("openai-codex", {})
         token = codex_data.get("access")
         account_id = codex_data.get("accountId") or codex_data.get("account_id")

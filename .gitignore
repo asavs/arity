@@ -17,3 +17,13 @@ impl/blind/
 impl/glean.json
 impl/*/probe_*
 impl/*/hello.txt
+
+.pytest_cache/
+*.pyc
+*.sqlite
+*.sqlite3
+*.db
+auth.json
+.env
+.env.*
+*.local

@@ -122,8 +122,68 @@ class SeatLedger:
 
         # 0. Direct OAuth Subscription Wire Seats (ChatGPT Codex & SuperGrok)
         try:
-            from .wire import load_local_oauth_credentials
-            creds = load_local_oauth_credentials()
+            from .auth import TokenStore
+            store = TokenStore()
+            agy_accounts = store.get_all_for_provider("google-antigravity")
+            if agy_accounts:
+                # Primary default seats
+                self.register(
+                    Seat(
+                        id="gemini-wire",
+                        provider="antigravity-wire",
+                        endpoint="wire://google/antigravity/gemini",
+                        model="gemini-3.6-flash",
+                        kind="quota",
+                        total_allowance=2_000_000 * len(agy_accounts),
+                        remaining=2_000_000 * len(agy_accounts),
+                        reset_deadline=default_reset,
+                        base_price_per_m=0.0001,
+                    )
+                )
+                self.register(
+                    Seat(
+                        id="claude-wire",
+                        provider="claude-wire",
+                        endpoint="wire://google/antigravity/claude",
+                        model="claude-sonnet-4-6",
+                        kind="quota",
+                        total_allowance=2_000_000 * len(agy_accounts),
+                        remaining=2_000_000 * len(agy_accounts),
+                        reset_deadline=default_reset,
+                        base_price_per_m=0.0001,
+                    )
+                )
+                # Account-specific seats for parallel routing / A-B testing
+                for key, acc in agy_accounts:
+                    email = acc.get("email", "")
+                    slug = email.split("@")[0] if "@" in email else (acc.get("projectId") or key)
+                    slug_clean = "".join(c for c in slug if c.isalnum() or c in "-_")
+                    self.register(
+                        Seat(
+                            id=f"gemini-wire-{slug_clean}",
+                            provider=f"antigravity-wire:{key}",
+                            endpoint=f"wire://google/antigravity/{slug_clean}",
+                            model="gemini-3.6-flash",
+                            kind="quota",
+                            total_allowance=2_000_000,
+                            remaining=2_000_000,
+                            reset_deadline=default_reset,
+                            base_price_per_m=0.0001,
+                        )
+                    )
+                    self.register(
+                        Seat(
+                            id=f"claude-wire-{slug_clean}",
+                            provider=f"claude-wire:{key}",
+                            endpoint=f"wire://google/antigravity/{slug_clean}/claude",
+                            model="claude-sonnet-4-6",
+                            kind="quota",
+                            total_allowance=2_000_000,
+                            remaining=2_000_000,
+                            reset_deadline=default_reset,
+                            base_price_per_m=0.0001,
+                        )
+                    )
             if "openai-codex" in creds:
                 self.register(
                     Seat(
