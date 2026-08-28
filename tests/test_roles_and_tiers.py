@@ -27,14 +27,13 @@ class TestRolesAndDenialSets(unittest.TestCase):
 
     def test_role_resolution(self):
         voice = self.registry.resolve("voice")
-        self.assertEqual(voice.name, "voice")
+        self.assertEqual(voice.name, "secretary")
         self.assertEqual(voice.tier, TierLevel.TIER_0)
 
         # Semantic resolution
         builder = self.registry.resolve("implement a new database schema")
-        self.assertEqual(builder.name, "builder")
+        self.assertEqual(builder.name, "python_developer")
         self.assertEqual(builder.tier, TierLevel.TIER_2)
-
         reviewer = self.registry.resolve("audit code and check PR")
         self.assertEqual(reviewer.name, "reviewer")
 

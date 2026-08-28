@@ -100,7 +100,7 @@ class TestArchivistAndScorecard(unittest.TestCase):
         self.assertIn("missing.sql", entry.discrepancy_details or "")
 
         # Scorecard standing should have dropped
-        self.assertLess(self.scorecard.get_standing("builder", "nvidia/nemotron"), 10.0)
+        self.assertLess(self.scorecard.get_standing(res.role.name, "nvidia/nemotron"), 10.0)
 
     def test_evaluate_trial_picks_verified_winner(self):
         # Candidate A: Created verified file
