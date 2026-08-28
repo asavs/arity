@@ -233,14 +233,58 @@ def show_redphone():
         print(f"  \033[1;33m[{ts}] [{ch}]\033[0m \033[1m{sender}\033[0m: {text}")
     print("\n\033[1;35m====================================================\033[0m\n")
 
+def show_skills():
+    """List all registered and discovered skills."""
+    from .skills import SkillRegistry
+    registry = SkillRegistry()
+    print("\033[1;36m====================================================\033[0m")
+    print("\033[1;36m             Registered arity Skills              \033[0m")
+    print("\033[1;36m====================================================\033[0m\n")
+    for sk in registry.list_skills():
+        tags_str = f"[{', '.join(sk.tags)}]" if sk.tags else ""
+        print(f"  \033[1;33m• {sk.name:30}\033[0m {tags_str}")
+        print(f"    {sk.description}\n")
+    print("\033[1;36m====================================================\033[0m\n")
+
+
+def show_roles():
+    """List all registered roles, tiers, permissions, and skills."""
+    from .roles import RoleRegistry
+    registry = RoleRegistry()
+    print("\033[1;35m====================================================\033[0m")
+    print("\033[1;35m             Registered Staff Roles & Tiers         \033[0m")
+    print("\033[1;35m====================================================\033[0m\n")
+    for role in sorted(set(registry._roles.values()), key=lambda r: r.tier):
+        print(f"  \033[1;33m• {role.name:20}\033[0m (Tier {role.tier})")
+        print(f"    Description: {role.description}")
+        if role.skills:
+            print(f"    Skills:      {', '.join(role.skills)}")
+        if role.allowed_tools:
+            print(f"    Tools:       {', '.join(role.allowed_tools)}")
+        if role.denial_set.denied_tools:
+            print(f"    Denied Tools:{', '.join(role.denial_set.denied_tools)}")
+        if role.denial_set.denied_paths:
+            print(f"    Denied Paths:{', '.join(role.denial_set.denied_paths)}")
+        print()
+    print("\033[1;35m====================================================\033[0m\n")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="arity 0.0.1 CLI")
+    parser = argparse.ArgumentParser(description="arity 0.1.2 CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("demo", help="Run the architectural demo")
-    subparsers.add_parser("chat", help="Start an interactive chat session with The Voice")
+    subparsers.add_parser("chat", help="Start an interactive chat session with The Secretary")
     subparsers.add_parser("status", help="Show seat health, scorecard, and wire status")
+    subparsers.add_parser("skills", help="List active and discovered skills")
+    subparsers.add_parser("roles", help="List staff roles, capabilities, and denial sets")
     subparsers.add_parser("redphone", help="Inspect Red Phone channels")
+
+    lock_parser = subparsers.add_parser("lock", help="Lock human presence on a seat")
+    lock_parser.add_argument("seat_id", type=str, help="Seat ID to presence-lock")
+
+    unlock_parser = subparsers.add_parser("unlock", help="Release human presence on a seat")
+    unlock_parser.add_argument("seat_id", type=str, help="Seat ID to unlock")
 
     run_parser = subparsers.add_parser("run", help="Run a single prompt through the orchestrator")
     run_parser.add_argument("prompt", type=str, help="Prompt text")
@@ -253,6 +297,18 @@ def main():
         interactive_chat()
     elif args.command == "status":
         show_status()
+    elif args.command == "skills":
+        show_skills()
+    elif args.command == "roles":
+        show_roles()
+    elif args.command == "lock":
+        orchestrator = ArityOrchestrator()
+        orchestrator.ledger.set_presence(args.seat_id, True)
+        print(f"\033[1;33m[Presence Lock]\033[0m Seat '{args.seat_id}' is now locked for human use.")
+    elif args.command == "unlock":
+        orchestrator = ArityOrchestrator()
+        orchestrator.ledger.set_presence(args.seat_id, False)
+        print(f"\033[1;32m[Presence Unlock]\033[0m Seat '{args.seat_id}' released for autonomous bot casting.")
     elif args.command == "redphone":
         show_redphone()
     elif args.command == "run":
