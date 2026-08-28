@@ -12,11 +12,24 @@ from .handlers import (
 from .roles import (
     ARCHITECT_ROLE,
     BUILDER_ROLE,
+    ENGINEER_ROLE,
+    PYTHON_DEVELOPER_ROLE,
     REVIEWER_ROLE,
+    SCOUT_ROLE,
+    SECRETARY_ROLE,
+    TESTER_ROLE,
     VOICE_ROLE,
     DenialSet,
     Role,
     RoleRegistry,
+)
+from .skills import (
+    FIRECRAWL_SKILL,
+    PYTHON_DEVELOPER_SKILL,
+    PYTEST_TDD_SKILL,
+    SCOUT_RECON_SKILL,
+    Skill,
+    SkillRegistry,
 )
 from .tiers import (
     BriefCompiler,
@@ -72,7 +85,7 @@ from .types import (
     UserMessage,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     # Core types
