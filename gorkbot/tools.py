@@ -48,17 +48,20 @@ class SandboxToolRunner(ToolRunner):
         role: Optional[Role] = None,
         timeout: int = 30,
         custom_tools: Optional[dict[str, Callable[..., str]]] = None,
+        message_router: Optional[Callable[[str, str], str]] = None,
     ):
         self.workspace_root = (Path(workspace_root) if workspace_root else Path.cwd()).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.role = role
         self.timeout = timeout
+        self.message_router = message_router
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_default_tools()
         if custom_tools:
             for name, func in custom_tools.items():
                 self._custom_tools[name] = func
+
     def register(
         self,
         name: str,
@@ -383,23 +386,33 @@ class SandboxToolRunner(ToolRunner):
             func=fetch_url,
         )
 
-        def web_search(query: str, limit: int = 5) -> str:
-            return smart_web_search(query, limit)
+        def message_tool(to: str, text: str) -> str:
+            target = to.lower().strip()
+            if target in ("user", "human", "asa"):
+                return f"[Delivered to Asa]: {text}"
+            if self.message_router:
+                return self.message_router(target, text)
+            return f"[Message queued for {target}]: {text}"
 
         self.register(
-            name="web_search",
-            description="Search the web and GitHub for repositories, skills, and documentation.",
+            name="message",
+            description="Send a message to the user ('user') or consult a peer agent ('scout', 'engineer', 'python_developer', 'reviewer').",
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query terms"},
-                    "limit": {"type": "integer", "description": "Max results to return", "default": 5},
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient: 'user' to message Asa, or peer role (e.g. 'scout', 'engineer', 'python_developer', 'reviewer')",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message content, question, or task brief",
+                    },
                 },
-                "required": ["query"],
+                "required": ["to", "text"],
             },
-            func=web_search,
+            func=message_tool,
         )
-
 
 # -----------------------------------------------------------------------------
 # Smart Tool Routing & Pluggable Providers (The Tool Seam)

@@ -268,17 +268,17 @@ def show_skills():
 
 
 def show_roles():
-    """List all registered staff roles, tiers, skills, and dynamically granted tools."""
+    """List all registered staff roles, skills, and dynamically granted tools."""
     from .roles import RoleRegistry
     from .tools import SandboxToolRunner
     registry = RoleRegistry()
     print("\033[1;35m====================================================\033[0m")
-    print("\033[1;35m             Registered Staff Roles & Tiers         \033[0m")
+    print("\033[1;35m                 Registered Staff Roles             \033[0m")
     print("\033[1;35m====================================================\033[0m\n")
-    for role in sorted(set(registry._roles.values()), key=lambda r: r.tier):
+    for role in sorted(set(registry._roles.values()), key=lambda r: r.name):
         runner = SandboxToolRunner(role=role)
         granted_tools = [s["function"]["name"] for s in runner.get_schemas() if s.get("function", {}).get("name") != "search"]
-        print(f"  \033[1;33m• {role.name:20}\033[0m (Tier {role.tier})")
+        print(f"  \033[1;33m• {role.name:20}\033[0m")
         print(f"    Description:   {role.description}")
         if role.skills:
             print(f"    Skills:        {', '.join(role.skills)}")

@@ -1,7 +1,6 @@
 ---
 name: secretary
 description: The trusted front desk switchboard who talks directly with Asa.
-tier: 0
 skills: []
 denied_tools:
   - write_file

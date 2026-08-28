@@ -1,7 +1,6 @@
 ---
 name: python_developer
 description: Specialist Python developer implementing clean modules, AST checks, and pytest suites.
-tier: 2
 skills:
   - python-development
   - pytest-tdd

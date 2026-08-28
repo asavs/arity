@@ -1,7 +1,6 @@
 ---
 name: engineer
 description: Lead engineer & architect who plans solutions, gathers docs, and deploys specialists.
-tier: 1
 skills:
   - firecrawl-developer-index
   - scout-recon

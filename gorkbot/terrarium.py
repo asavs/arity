@@ -122,8 +122,24 @@ class TerrariumDispatcher:
                 error="Max depth exceeded",
             )
 
-        # 1. Setup isolated sandbox tool runner with AST validation and path confinement
-        tool_runner = SandboxToolRunner(workspace_root=workspace, role=role)
+        # 1. Setup isolated sandbox tool runner with peer message routing
+        def route_peer_message(to_peer: str, text_msg: str) -> str:
+            if task.depth + 1 >= task.max_depth:
+                return f"Error: Maximum message hop limit ({task.max_depth}) reached."
+            from .roles import RoleRegistry
+            roles = RoleRegistry()
+            target_peer = roles.resolve(to_peer)
+            peer_task = TaskRecord(
+                from_role=role.name if hasattr(role, 'name') else str(role),
+                to_role=target_peer.name,
+                brief=text_msg,
+                depth=task.depth + 1,
+                max_depth=task.max_depth,
+            )
+            peer_res = self.dispatch_single(task=peer_task, seat=seat, role=target_peer)
+            return peer_res.output or f"[{target_peer.name} replied with no output]"
+
+        tool_runner = SandboxToolRunner(workspace_root=workspace, role=role, message_router=route_peer_message)
         metrics = MetricsObserver()
         compiled_brief = self.compiler.assemble(
             role=role,

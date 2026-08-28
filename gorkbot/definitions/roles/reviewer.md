@@ -1,7 +1,6 @@
 ---
 name: reviewer
 description: Read-only code auditor and test verifier.
-tier: 3
 skills:
   - pytest-tdd
 denied_tools:
