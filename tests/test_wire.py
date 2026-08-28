@@ -80,25 +80,25 @@ class TestWireProviders(unittest.TestCase):
             self.assertEqual(res.seat_id, "wire:antigravity:gemini-3-flash-agent")
             self.assertEqual(res.usage["total_tokens"], 14)
 
-    def test_antigravity_wire_provider_claude(self):
+    def test_antigravity_wire_provider_gemini_pro(self):
         provider = AntigravityWireProvider(
             access_token="mock_token",
             project_id="mock_proj",
-            model="claude-sonnet-4-6",
+            model="gemini-3.1-pro",
         )
         effect = CallModel(
             messages=[{"role": "user", "content": "hello"}],
         )
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Claude via AGY!"}]}}], "usageMetadata": {"totalTokenCount": 20}}}'
+        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Gemini Pro via AGY!"}]}}], "usageMetadata": {"totalTokenCount": 20}}}'
         mock_resp.__enter__.return_value = mock_resp
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             res = provider.call(effect)
             self.assertIsInstance(res, ModelCompleted)
-            self.assertEqual(res.content, "Hello from Claude via AGY!")
-            self.assertEqual(res.seat_id, "wire:antigravity:claude-sonnet-4-6")
+            self.assertEqual(res.content, "Hello from Gemini Pro via AGY!")
+            self.assertEqual(res.seat_id, "wire:antigravity:gemini-3.1-pro-low")
     def test_fallback_provider_swaps_on_failure(self):
         primary = MagicMock()
         primary.call.return_value = ModelFailed(error="HTTP 401 Unauthorized", seat_id="primary", retryable=True)

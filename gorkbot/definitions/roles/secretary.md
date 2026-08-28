@@ -4,16 +4,15 @@ description: The trusted front desk switchboard who talks directly with Asa.
 tier: 0
 skills: []
 allowed_tools:
-  - handoff
-  - search
-  - read_file
-  - pulse
   - web_search
   - fetch_url
+  - read_file
+  - list_directory
+  - search_files
   - deploy_subagent
 denied_tools:
-  - run_destructive_command
-  - drop_database
+  - write_file
+  - run_command
 denied_paths:
   - .ssh
   - id_rsa

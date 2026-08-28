@@ -155,16 +155,31 @@ def run_demo():
 
 
 def interactive_chat():
-    """Run an interactive console chat with the full GorkbotOrchestrator."""
-    print("\033[1;36m=== gorkbot 0.0.1 Interactive Session (The Voice & Terrarium) ===\033[0m")
-    print("Direct conversation with The Voice. Delegations automatically spawn Terrarium trials.\n")
+    """Run a clean, responsive console chat with The Secretary and live cache warmth indicator."""
+    print("\033[1;36m=== Gorkbot Switchboard (The Secretary) ===\033[0m")
     print("Type your message (or 'exit' / 'quit' to stop).\n")
 
     orchestrator = GorkbotOrchestrator()
+    last_turn_time: Optional[float] = None
+    current_model = "gemini-3.6-flash"
+    warm_window = 300.0  # 5-minute sliding cache window (Axiom 7)
 
     while True:
+        # Calculate remaining cache warmth
+        now = time.time()
+        if last_turn_time is None:
+            cache_tag = "\033[1;30m[Cache: Cold Start]\033[0m"
+        else:
+            elapsed = now - last_turn_time
+            remaining = int(warm_window - elapsed)
+            if remaining > 0:
+                mins, secs = divmod(remaining, 60)
+                cache_tag = f"\033[1;32m[Cache Hot: {mins}m {secs:02d}s | {current_model}]\033[0m"
+            else:
+                cache_tag = f"\033[1;31m[Cache Evicted | {current_model}]\033[0m"
+
         try:
-            user_input = input("\033[1;33mAsa:\033[0m ").strip()
+            user_input = input(f"{cache_tag}\n\033[1;33mAsa:\033[0m ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
@@ -172,16 +187,20 @@ def interactive_chat():
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
 
+        start_t = time.time()
         resp = orchestrator.handle_message(user_text=user_input, sender="Asa")
+        latency = time.time() - start_t
+        last_turn_time = time.time()
+
         if resp.delegated_task and resp.winning_candidate:
-            print(f"\n\033[1;35m[Delegation]\033[0m Task routed to \033[1m{resp.delegated_task.to_role}\033[0m on seat \033[1m{resp.winning_candidate.seat.id}\033[0m")
-            print(f"\033[1;32m[Archivist]\033[0m Verdict: {resp.archivist_entries[0].verdict.upper()} ({resp.archivist_entries[0].details})")
+            role_name = resp.delegated_task.to_role
+            model_used = resp.winning_candidate.seat.model
+            verdict = resp.archivist_entries[0].verdict.upper() if resp.archivist_entries else "OK"
+            print(f"\n\033[1;35m[{role_name} on {model_used} | {latency:.2f}s | Archivist: {verdict}]\033[0m")
             if resp.winning_candidate.output:
-                print(f"\033[1;36m[Output]\033[0m\n{resp.winning_candidate.output}\n")
+                print(f"{resp.winning_candidate.output}\n")
         elif resp.reply_text:
-            print(f"\n\033[1;36m[The Voice]\033[0m {resp.reply_text}\n")
-
-
+            print(f"\n\033[1;36m[The Secretary | {latency:.2f}s]\033[0m\n{resp.reply_text}\n")
 def show_status():
     """Display real-time seat health, wire latency, and scorecard standings."""
     orchestrator = GorkbotOrchestrator()
@@ -189,11 +208,12 @@ def show_status():
     print("\033[1;36m            gorkbot System Health & Status          \033[0m")
     print("\033[1;36m====================================================\033[0m\n")
 
-    print("\033[1;33m[1. Active Seats & Wire Status]\033[0m")
+    print("\033[1;33m[1. Active Seats: Provider | Model | Fallback Harness]\033[0m")
     for s in orchestrator.ledger.list_seats():
         status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
-        print(f"  • {s.id:15} | {s.provider:12} | {s.model:25} | {status_str} | ${s.base_price_per_m:.4f}/M")
-
+        acc_str = f" ({s.account.split('@')[0]})" if s.account else ""
+        prov_str = f"{s.provider}{acc_str}"
+        print(f"  • {prov_str:25} | {s.model:24} | harness: {s.harness:8} | {status_str} | ${s.base_price_per_m:.4f}/M")
     print("\n\033[1;33m[2. Empirical Scorecard Standings (Axiom 9)]\033[0m")
     standings = getattr(orchestrator.scorecard, "_standings", {})
     if standings:
@@ -325,6 +345,7 @@ def handle_auth_command(args: argparse.Namespace) -> None:
         print()
 
     elif action == "login":
+        from .auth import login_anthropic
         provider = (getattr(args, "provider", "") or "").lower()
         if provider in ("google", "agy", "antigravity"):
             login_google_antigravity()
@@ -332,8 +353,10 @@ def handle_auth_command(args: argparse.Namespace) -> None:
             login_openai_codex()
         elif provider in ("xai", "grok"):
             login_xai_grok()
+        elif provider in ("anthropic", "claude"):
+            login_anthropic()
         else:
-            print(f"\033[1;31m[Error]\033[0m Unknown provider '{provider}'. Choose from: google, openai, xai.")
+            print(f"\033[1;31m[Error]\033[0m Unknown provider '{provider}'. Choose from: google, openai, xai, anthropic.")
 
     elif action == "logout":
         provider = (getattr(args, "provider", "") or "").lower()
@@ -378,8 +401,7 @@ def main():
     auth_subparsers.add_parser("import", help="Auto-import active sessions from OMP and Codex")
     
     login_cmd = auth_subparsers.add_parser("login", help="Authenticate with a provider")
-    login_cmd.add_argument("provider", type=str, choices=["google", "agy", "openai", "codex", "xai", "grok"], help="Provider to authenticate")
-    
+    login_cmd.add_argument("provider", type=str, choices=["google", "agy", "openai", "codex", "xai", "grok", "anthropic", "claude"], help="Provider to authenticate")
     logout_cmd = auth_subparsers.add_parser("logout", help="Log out from a provider")
     logout_cmd.add_argument("provider", type=str, help="Provider to remove")
 

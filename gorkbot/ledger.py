@@ -15,28 +15,38 @@ from typing import Any, Optional
 
 @dataclass
 class Seat:
-    """A model endpoint capacity slice with quota, pricing, and presence state."""
-    id: str
-    provider: str
-    endpoint: str
-    model: str
-    kind: str = "quota"  # "quota" (subscription window) | "metered_api" (pay-per-token)
-    total_allowance: float = 1_000_000.0  # Total tokens per reset cycle
-    remaining: float = 1_000_000.0
-    cycle_seconds: float = 86400.0  # 24h cycle or 5h sliding window
-    reset_deadline: float = 0.0  # Unix timestamp when quota resets
-    base_price_per_m: float = 1.0  # Reference price in USD per 1M tokens
-    warm_window_seconds: float = 300.0  # Assured warm cache TTL
-    presence: bool = False  # True if human or active session is currently typing here
+    """A model capacity slice: provider, model, harness, and quota state."""
+    provider: str                      # "google", "openai", "xai", "anthropic", "nvidia"
+    model: str                         # "gemini-3.6-flash", "gpt-5.6-sol", "grok-4.5", "claude-3-7-sonnet"
+    harness: str = "gorkbot"           # Fallback harness: "omp", "claude", "codex", "grok", "gorkbot"
+    account: Optional[str] = None      # Optional account email (e.g. for multi-account Google)
+    endpoint: str = ""                 # Optional base URL / endpoint
+    kind: str = "quota"                # "quota" (subscription window) | "metered_api" (pay-per-token)
+    total_allowance: float = 2_000_000.0
+    remaining: float = 2_000_000.0
+    cycle_seconds: float = 86400.0     # 24h cycle
+    reset_deadline: float = 0.0        # Unix timestamp when quota resets
+    base_price_per_m: float = 0.0001   # Reference cost per 1M tokens
+    warm_window_seconds: float = 300.0 # Assured warm cache TTL
+    presence: bool = False             # True if human or active session is currently typing here
     workspace_boundary: str = "default"
     api_key: Optional[str] = None
+    id: Optional[str] = None
 
+    def __post_init__(self):
+        if not self.id:
+            if self.account:
+                slug = self.account.split("@")[0] if "@" in self.account else self.account
+                slug_clean = "".join(c for c in slug if c.isalnum() or c in "-_")
+                self.id = f"{self.provider}:{slug_clean}:{self.model}"
+            else:
+                self.id = f"{self.provider}:{self.model}"
     def time_to_reset(self, now: float) -> float:
         """Seconds remaining until quota reset deadline."""
         return max(0.0, self.reset_deadline - now)
 
     def effective_cost(self, now: float) -> float:
-        """Calculate dynamic effective cost weight (Axiom 3 / Survey).
+        """Calculate dynamic effective cost weight (Axiom 3).
 
         If subscription tokens are about to reset and remain unused,
         their opportunity cost drops to 0 ("use it or lose it").
@@ -51,7 +61,6 @@ class Seat:
         fraction_time_left = max(0.01, time_left / self.cycle_seconds)
         fraction_quota_remaining = max(0.0, self.remaining / max(1.0, self.total_allowance))
 
-        # Urgency ratio: if remaining quota exceeds remaining time ratio, cost decays to 0
         urgency = fraction_quota_remaining / fraction_time_left
         decay_factor = min(0.999, urgency * 0.5)
         return max(0.0001, self.base_price_per_m * (1.0 - decay_factor))
@@ -95,9 +104,6 @@ class SeatLedger:
         pool = candidates if candidates is not None else self.list_available(now=curr_time)
 
         def sort_key(s: Seat) -> tuple[int, float, float]:
-            # Priority 1: Quota seats (0) before metered API seats (1)
-            # Priority 2: Earliest reset deadline
-            # Priority 3: Lowest effective cost
             kind_order = 0 if s.kind == "quota" else 1
             reset_in = s.time_to_reset(curr_time) if s.kind == "quota" else 999999.0
             return (kind_order, reset_in, s.effective_cost(curr_time))
@@ -120,194 +126,105 @@ class SeatLedger:
         now = time.time()
         default_reset = now + 86400.0  # 24h from now
 
-        # 0. Direct OAuth Subscription Wire Seats (ChatGPT Codex & SuperGrok)
         try:
             from .auth import TokenStore
             store = TokenStore()
+
+            # 1. Google (Antigravity backend with OMP fallback)
             agy_accounts = store.get_all_for_provider("google-antigravity")
-            if agy_accounts:
-                # Primary default seats
+            for key, acc in agy_accounts:
+                email = acc.get("email", "")
                 self.register(
                     Seat(
-                        id="gemini-wire",
-                        provider="antigravity-wire",
-                        endpoint="wire://google/antigravity/gemini",
+                        provider="google",
                         model="gemini-3.6-flash",
-                        kind="quota",
-                        total_allowance=2_000_000 * len(agy_accounts),
-                        remaining=2_000_000 * len(agy_accounts),
+                        harness="omp",
+                        account=email,
                         reset_deadline=default_reset,
-                        base_price_per_m=0.0001,
                     )
                 )
+
+            # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
+            codex_creds = store.get_credential("openai-codex")
+            if codex_creds:
                 self.register(
                     Seat(
-                        id="claude-wire",
-                        provider="claude-wire",
-                        endpoint="wire://google/antigravity/claude",
-                        model="claude-sonnet-4-6",
-                        kind="quota",
-                        total_allowance=2_000_000 * len(agy_accounts),
-                        remaining=2_000_000 * len(agy_accounts),
-                        reset_deadline=default_reset,
-                        base_price_per_m=0.0001,
-                    )
-                )
-                # Account-specific seats for parallel routing / A-B testing
-                for key, acc in agy_accounts:
-                    email = acc.get("email", "")
-                    slug = email.split("@")[0] if "@" in email else (acc.get("projectId") or key)
-                    slug_clean = "".join(c for c in slug if c.isalnum() or c in "-_")
-                    self.register(
-                        Seat(
-                            id=f"gemini-wire-{slug_clean}",
-                            provider=f"antigravity-wire:{key}",
-                            endpoint=f"wire://google/antigravity/{slug_clean}",
-                            model="gemini-3.6-flash",
-                            kind="quota",
-                            total_allowance=2_000_000,
-                            remaining=2_000_000,
-                            reset_deadline=default_reset,
-                            base_price_per_m=0.0001,
-                        )
-                    )
-                    self.register(
-                        Seat(
-                            id=f"claude-wire-{slug_clean}",
-                            provider=f"claude-wire:{key}",
-                            endpoint=f"wire://google/antigravity/{slug_clean}/claude",
-                            model="claude-sonnet-4-6",
-                            kind="quota",
-                            total_allowance=2_000_000,
-                            remaining=2_000_000,
-                            reset_deadline=default_reset,
-                            base_price_per_m=0.0001,
-                        )
-                    )
-            if "openai-codex" in creds:
-                self.register(
-                    Seat(
-                        id="codex-wire",
-                        provider="codex-wire",
-                        endpoint="wire://chatgpt/codex",
+                        provider="openai",
                         model="gpt-5.6-sol",
-                        kind="quota",
-                        total_allowance=2_000_000,
-                        remaining=2_000_000,
+                        harness="codex",
                         reset_deadline=default_reset,
-                        base_price_per_m=0.0001,  # Fast direct wire
                     )
                 )
-            if "xai-oauth" in creds:
+
+            # 3. xAI (Grok backend with Grok build fallback)
+            xai_creds = store.get_credential("xai-oauth")
+            if xai_creds:
                 self.register(
                     Seat(
-                        id="grok-wire",
-                        provider="grok-wire",
-                        endpoint="wire://xai/grok",
+                        provider="xai",
                         model="grok-4.5",
-                        kind="quota",
-                        total_allowance=2_000_000,
-                        remaining=2_000_000,
+                        harness="grok",
                         reset_deadline=default_reset,
-                        base_price_per_m=0.0001,  # Fast direct wire
+                    )
+                )
+
+            # 4. Anthropic (Claude Code harness)
+            if shutil.which("claude") or store.get_credential("anthropic"):
+                self.register(
+                    Seat(
+                        provider="anthropic",
+                        model="claude-3-7-sonnet",
+                        harness="claude",
+                        reset_deadline=default_reset,
                     )
                 )
         except Exception:
             pass
 
-        # 1. Codex CLI Harness Seat
-        if shutil.which("codex"):
+        # 5. Fallback CLI Harnesses if not already mounted
+        if shutil.which("codex") and "openai:gpt-5.6-sol" not in self._seats:
             self.register(
                 Seat(
-                    id="codex-sol",
-                    provider="codex",
-                    endpoint="cli://codex",
+                    provider="openai",
                     model="gpt-5.6-sol",
-                    kind="quota",
-                    total_allowance=2_000_000,
-                    remaining=2_000_000,
+                    harness="codex",
                     reset_deadline=default_reset,
-                    base_price_per_m=0.001,
                 )
             )
 
-        # 2. Claude Code CLI Harness Seat
-        if shutil.which("claude"):
+        if shutil.which("omp") and not any(s.provider == "google" for s in self._seats.values()):
             self.register(
                 Seat(
-                    id="claude-sonnet",
-                    provider="claude",
-                    endpoint="cli://claude",
-                    model="claude-3-7-sonnet",
-                    kind="quota",
-                    total_allowance=2_000_000,
-                    remaining=2_000_000,
+                    provider="google",
+                    model="gemini-3.6-flash",
+                    harness="omp",
                     reset_deadline=default_reset,
-                    base_price_per_m=0.001,
                 )
             )
-        # 3. Gemini API
+
+        # 6. Metered APIs
         gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if gemini_key:
             self.register(
                 Seat(
-                    id="gemini-flash",
-                    provider="gemini",
-                    endpoint="https://generativelanguage.googleapis.com/v1beta",
+                    provider="google-api",
                     model="gemini-3.6-flash",
-                    kind="quota",
-                    total_allowance=1_000_000,
-                    remaining=1_000_000,
-                    reset_deadline=default_reset,
+                    harness="gorkbot",
+                    kind="metered_api",
                     base_price_per_m=0.10,
                     api_key=gemini_key,
                 )
             )
 
-        # 4. NVIDIA NIM
-        nim_key = os.environ.get("NVIDIA_NIM_API_KEY")
+        nim_key = os.environ.get("NVIDIA_API_KEY") or os.environ.get("NVIDIA_NIM_API_KEY")
         if nim_key:
             self.register(
                 Seat(
-                    id="nim-nemotron",
-                    provider="nim",
-                    endpoint="https://integrate.api.nvidia.com/v1",
+                    provider="nvidia",
                     model="nvidia/nemotron-3-nano-30b-a3b",
-                    kind="quota",
-                    total_allowance=500_000,
-                    remaining=500_000,
-                    reset_deadline=default_reset,
+                    harness="gorkbot",
+                    kind="metered_api",
                     base_price_per_m=0.05,
                     api_key=nim_key,
-                )
-            )
-
-        # 5. OpenRouter
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if openrouter_key:
-            self.register(
-                Seat(
-                    id="openrouter-llama",
-                    provider="openrouter",
-                    endpoint="https://openrouter.ai/api/v1",
-                    model="meta-llama/llama-3.3-70b-instruct",
-                    kind="metered_api",
-                    base_price_per_m=0.40,
-                    api_key=openrouter_key,
-                )
-            )
-
-        # 6. OpenAI API Key (Metered)
-        openai_key = os.environ.get("OPENAI_API_KEY")
-        if openai_key:
-            self.register(
-                Seat(
-                    id="openai-gpt4o",
-                    provider="openai",
-                    endpoint="https://api.openai.com/v1",
-                    model="gpt-4o",
-                    kind="metered_api",
-                    base_price_per_m=2.50,
-                    api_key=openai_key,
                 )
             )

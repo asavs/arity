@@ -75,9 +75,11 @@ class BriefCompiler:
         tier0_context: str = "Asa: Creator of gorkbot. Working on autonomous agent statecharts.",
         tier1_context: str = "Project gorkbot: Composable statechart agent chassis with 5 explicit seams.",
         skills_registry: Optional[Any] = None,
+        scorecard: Optional[Any] = None,
     ):
         self.tier0_context = tier0_context
         self.tier1_context = tier1_context
+        self.scorecard = scorecard
         if skills_registry is None:
             try:
                 from .skills import SkillRegistry
@@ -86,6 +88,7 @@ class BriefCompiler:
                 self.skills = None
         else:
             self.skills = skills_registry
+
 
     def assemble(
         self,
@@ -114,7 +117,10 @@ class BriefCompiler:
 
         # Layer 3: Tiered Memory by Distance from Asa (Axiom 8)
         if role.tier == TierLevel.TIER_0:
-            layers.append(f"# Personal Memory (Tier 0)\n{self.tier0_context}\n\n# Project Context (Tier 1)\n{self.tier1_context}")
+            scorecard_txt = ""
+            if self.scorecard and hasattr(self.scorecard, "get_summary"):
+                scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
+            layers.append(f"# Personal Memory (Tier 0)\n{self.tier0_context}\n\n# Project Context (Tier 1)\n{self.tier1_context}{scorecard_txt}")
         elif role.tier == TierLevel.TIER_1:
             layers.append(f"# Project Context (Tier 1)\n{self.tier1_context}")
         elif role.tier == TierLevel.TIER_2:

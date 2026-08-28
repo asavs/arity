@@ -781,3 +781,140 @@ def login_openai_codex(
     store.save_credential("openai-codex", cred_data)
     print(f"\033[1;32m[OpenAI Codex Auth]\033[0m Successfully authenticated ChatGPT Codex subscription.")
     return cred_data
+
+
+# -----------------------------------------------------------------------------
+# 6. Anthropic Claude Native Login Flow (PKCE Loopback)
+# -----------------------------------------------------------------------------
+
+ANTHROPIC_CLIENT_ID = os.environ.get("ARITY_ANTHROPIC_CLIENT_ID", "")
+ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
+ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+ANTHROPIC_CALLBACK_PORT = 54545
+ANTHROPIC_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+
+
+def login_anthropic(
+    port: int = ANTHROPIC_CALLBACK_PORT,
+    open_browser: bool = True,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Execute native PKCE loopback authentication with Anthropic Claude."""
+    verifier, challenge = generate_pkce_pair()
+    state = secrets.token_urlsafe(32)
+    redirect_uri = f"http://localhost:{port}/callback"
+
+    auth_params = {
+        "client_id": ANROPIC_CLIENT_ID if "ANROPIC_CLIENT_ID" in locals() else ANTHROPIC_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": ANTHROPIC_SCOPES,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    full_auth_url = f"{ANTHROPIC_AUTHORIZE_URL}?{urllib.parse.urlencode(auth_params)}"
+
+    auth_code: Optional[str] = None
+    callback_error: Optional[str] = None
+    server_done = threading.Event()
+
+    class CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal auth_code, callback_error
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/callback":
+                qs = urllib.parse.parse_qs(parsed.query)
+                received_state = qs.get("state", [""])[0]
+                if received_state != state:
+                    callback_error = "State mismatch"
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"State mismatch error.")
+                elif "code" in qs:
+                    auth_code = qs["code"][0]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b"<html><body><h1>Claude Authentication Successful!</h1>"
+                        b"<p>You can close this tab and return to Gorkbot.</p></body></html>"
+                    )
+                else:
+                    callback_error = qs.get("error", ["Unknown OAuth error"])[0]
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(f"OAuth error: {callback_error}".encode("utf-8"))
+                server_done.set()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", port), CallbackHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    print(f"\n\033[1;36m[Anthropic Claude Auth]\033[0m Opening browser for authentication...")
+    print(f"If your browser doesn't open automatically, visit:\n{full_auth_url}\n")
+
+    if open_browser:
+        try:
+            webbrowser.open(full_auth_url)
+        except Exception:
+            pass
+
+    finished = server_done.wait(timeout=timeout)
+    server.shutdown()
+    server.server_close()
+
+    if not finished:
+        raise TimeoutError(f"Anthropic Authentication timed out after {timeout} seconds.")
+    if callback_error:
+        raise RuntimeError(f"Anthropic OAuth error: {callback_error}")
+    if not auth_code:
+        raise RuntimeError("No authorization code received.")
+
+    print("\033[1;33m[Anthropic Claude Auth]\033[0m Exchanging code for tokens...")
+    token_payload = {
+        "client_id": ANTHROPIC_CLIENT_ID,
+        "code": auth_code,
+        "code_verifier": verifier,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    data = json.dumps(token_payload).encode("utf-8")
+    req = urllib.request.Request(
+        ANTHROPIC_TOKEN_URL,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        token_res = json.loads(resp.read().decode("utf-8"))
+
+    access_token = token_res["access_token"]
+    refresh_token = token_res.get("refresh_token", "")
+    expires_in = token_res.get("expires_in", 3600)
+    expires_ms = int((time.time() + expires_in - 300) * 1000)
+    account = token_res.get("account", {})
+    email = account.get("email_address", "")
+    account_id = account.get("uuid", "")
+
+    cred_data = {
+        "access": access_token,
+        "refresh": refresh_token,
+        "expires": expires_ms,
+        "accountId": account_id,
+        "email": email,
+        "authorizedAt": int(time.time() * 1000),
+    }
+
+    store = TokenStore()
+    if email:
+        store.save_credential(f"anthropic:{email}", cred_data)
+    store.save_credential("anthropic", cred_data)
+    print(f"\033[1;32m[Anthropic Claude Auth]\033[0m Successfully authenticated Claude account \033[1m{email or 'user'}\033[0m.")
+    return cred_data

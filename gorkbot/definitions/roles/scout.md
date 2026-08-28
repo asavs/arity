@@ -5,15 +5,15 @@ tier: 3
 skills:
   - scout-recon
 allowed_tools:
-  - read_file
-  - search
-  - search_files
-  - list_directory
   - web_search
   - fetch_url
+  - read_file
+  - list_directory
+  - search_files
 denied_tools:
   - write_file
   - run_command
+  - deploy_subagent
 denied_paths:
   - .ssh
   - id_rsa
