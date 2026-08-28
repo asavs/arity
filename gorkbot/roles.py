@@ -58,180 +58,128 @@ class Role:
         """Check if role is permitted to read/write a path."""
         return not self.denial_set.is_path_denied(path)
 
-
 # -----------------------------------------------------------------------------
-# Default Standard Archetypes
+# Role Document Parsing & Discovery
 # -----------------------------------------------------------------------------
 
-SECRETARY_ROLE = Role(
-    name="secretary",
-    description="The trusted front desk switchboard who talks directly with Asa.",
-    tier=0,
-    skills=(),
-    allowed_tools=("handoff", "search", "read_file", "pulse", "web_search", "fetch_url", "deploy_subagent"),
-    denial_set=DenialSet(
-        denied_tools=("run_destructive_command", "drop_database"),
-        denied_paths=(".ssh", "id_rsa", ".env.production"),
-    ),
-    system_prompt=(
-        "You are the Secretary of gorkbot, the trusted executive partner and front desk lead for Asa.\n"
-        "1. You hold the big picture, understand his intent, and brief him with clear, phone-sized lines.\n"
-        "2. PROACTIVITY: When Asa mentions or asks about an unfamiliar skill, tool, repository, library, or topic, "
-        "never ask him to provide links or search for you. Immediately use your `web_search` and `fetch_url` tools "
-        "or deploy `scout` via `deploy_subagent` to research it on the live web, synthesize what you learned, and brief Asa.\n"
-        "3. When technical engineering or coding is needed, deploy specialized teammates (`engineer`, `python_developer`)."
-    ),
-)
+def parse_role_document(content: str) -> Role:
+    """Parse a Markdown role definition document with YAML/key-value frontmatter."""
+    lines = content.strip().splitlines()
+    if lines and lines[0].strip() == "---":
+        end_idx = -1
+        for idx, l in enumerate(lines[1:], 1):
+            if l.strip() == "---":
+                end_idx = idx
+                break
+        if end_idx != -1:
+            fm_text = "\n".join(lines[1:end_idx])
+            body_text = "\n".join(lines[end_idx + 1:]).strip()
+        else:
+            fm_text = ""
+            body_text = content
+    else:
+        fm_text = ""
+        body_text = content
 
-VOICE_ROLE = Role(
-    name="voice",
-    description="The front-door persona who talks directly with Asa.",
-    tier=0,
-    allowed_tools=("handoff", "search", "read_file", "pulse", "web_search", "fetch_url", "deploy_subagent"),
-    denial_set=DenialSet(
-        denied_tools=("run_destructive_command", "drop_database"),
-        denied_paths=(".ssh", "id_rsa", ".env.production"),
-    ),
-    system_prompt=(
-        "You are the Voice of gorkbot. You talk directly with Asa. "
-        "You manage other bots working on specialized tasks and brief Asa with clear, phone-sized lines."
-    ),
-)
+    meta: dict[str, Any] = {}
+    current_key = None
+    for line in fm_text.splitlines():
+        line_s = line.strip()
+        if not line_s or line_s.startswith("#"):
+            continue
+        if ":" in line and not line_s.startswith("-"):
+            k, v = line_s.split(":", 1)
+            current_key = k.strip()
+            v_s = v.strip()
+            if v_s:
+                if v_s.startswith("[") and v_s.endswith("]"):
+                    meta[current_key] = [item.strip(" '\"") for item in v_s[1:-1].split(",") if item.strip()]
+                elif v_s.isdigit():
+                    meta[current_key] = int(v_s)
+                else:
+                    meta[current_key] = v_s.strip(" '\"")
+            else:
+                meta[current_key] = []
+        elif line_s.startswith("-") and current_key:
+            item_val = line_s[1:].strip(" '\"")
+            if isinstance(meta.get(current_key), list):
+                meta[current_key].append(item_val)
 
-ARCHITECT_ROLE = Role(
-    name="architect",
-    description="High-level systems thinker, planner, and code reviewer.",
-    tier=1,
-    skills=("firecrawl-developer-index", "scout-recon"),
-    allowed_tools=("read_file", "search", "handoff"),
-    denial_set=DenialSet(
-        denied_tools=("write_file", "run_command"),
-        denied_paths=(".ssh", "id_rsa", ".env"),
-    ),
-    system_prompt=(
-        "You are a careful systems architect. You review code, analyze tradeoffs, "
-        "and produce clean specifications without modifying files directly."
-    ),
-)
+    name = meta.get("name", "unknown")
+    desc = meta.get("description", "")
+    tier = int(meta.get("tier", 2))
+    skills = tuple(meta.get("skills", []))
+    allowed_tools = tuple(meta.get("allowed_tools", []))
+    denied_tools = tuple(meta.get("denied_tools", []))
+    denied_paths = tuple(meta.get("denied_paths", []))
+    denied_hosts = tuple(meta.get("denied_hosts", []))
 
-ENGINEER_ROLE = Role(
-    name="engineer",
-    description="Lead engineer & architect who plans solutions, gathers docs, and deploys specialists.",
-    tier=1,
-    skills=("firecrawl-developer-index", "scout-recon"),
-    allowed_tools=("read_file", "search", "search_files", "list_directory", "web_search", "fetch_url", "handoff", "deploy_subagent"),
-    denial_set=DenialSet(
-        denied_tools=("drop_database",),
-        denied_paths=(".ssh", "id_rsa", ".env"),
-    ),
-    system_prompt=(
-        "You are the Lead Engineer. You decompose goals, research library and API docs using "
-        "firecrawl developer index, specify exact technical requirements, and deploy specialist subagents (like python-developer)."
-    ),
-)
+    return Role(
+        name=name,
+        description=desc,
+        tier=tier,
+        skills=skills,
+        allowed_tools=allowed_tools,
+        denial_set=DenialSet(
+            denied_tools=denied_tools,
+            denied_paths=denied_paths,
+            denied_hosts=denied_hosts,
+        ),
+        system_prompt=body_text,
+    )
 
-BUILDER_ROLE = Role(
-    name="builder",
-    description="Software engineer implementing features and fixes in a workspace.",
-    tier=2,
-    allowed_tools=("read_file", "write_file", "run_command"),
-    denial_set=DenialSet(
-        denied_paths=(".ssh", "id_rsa", ".env", "C:/Users/example/.claude/keys"),
-        denied_hosts=("api.stripe.com", "bank.com"),
-    ),
-    system_prompt=(
-        "You are a focused builder. You write clean, working code, execute tests, "
-        "and verify deliverables thoroughly inside the workspace."
-    ),
-)
 
-PYTHON_DEVELOPER_ROLE = Role(
-    name="python_developer",
-    description="Specialist Python developer implementing clean modules, AST checks, and pytest suites.",
-    tier=2,
-    skills=("python-development", "pytest-tdd"),
-    allowed_tools=("read_file", "write_file", "run_command", "search_files", "list_directory", "web_search", "fetch_url", "deploy_subagent"),
-    denial_set=DenialSet(
-        denied_paths=(".ssh", "id_rsa", ".env", "C:/Users/example/.claude/keys"),
-        denied_hosts=("api.stripe.com", "bank.com"),
-    ),
-    system_prompt=(
-        "You are a dedicated Python Developer. You write clean, PEP 8 compliant, type-annotated "
-        "Python 3.13 code. You use the standard library first, write pytest unit tests, and verify all code before completion."
-    ),
-)
-
-REVIEWER_ROLE = Role(
-    name="reviewer",
-    description="Read-only code auditor and test verifier.",
-    tier=2,
-    allowed_tools=("read_file", "run_command"),
-    denial_set=DenialSet(
-        denied_tools=("write_file",),
-        denied_paths=(".ssh", "id_rsa", ".env"),
-    ),
-    system_prompt=(
-        "You are a strict code reviewer. You verify test execution and audit patches for correctness."
-    ),
-)
-
-SCOUT_ROLE = Role(
-    name="scout",
-    description="Rapid read-only reconnaissance specialist and factual evidence gatherer.",
-    tier=3,
-    skills=("scout-recon",),
-    allowed_tools=("read_file", "search", "search_files", "list_directory", "web_search", "fetch_url"),
-    denial_set=DenialSet(
-        denied_tools=("write_file", "run_command"),
-        denied_paths=(".ssh", "id_rsa", ".env"),
-    ),
-    system_prompt=(
-        "You are a fast read-only scout. Your sole responsibility is evidence acquisition and clean information packaging.\n"
-        "1. Locate requested repositories, documentation, skills, or symbols using `web_search`, `fetch_url`, `search_files`, and `read_file`.\n"
-        "2. Extract exact facts, raw manifests, URLs, and code snippets into a structured, unopinionated packet.\n"
-        "3. Do not make policy judgments or architectural evaluations—hand the clean factual packet to the Archivist and Engineer."
-    ),
-)
-
-TESTER_ROLE = Role(
-    name="tester",
-    description="Test-driven verification agent running test suites and catching regressions.",
-    tier=3,
-    skills=("pytest-tdd",),
-    allowed_tools=("read_file", "run_command"),
-    denial_set=DenialSet(
-        denied_tools=("write_file",),
-        denied_paths=(".ssh", "id_rsa", ".env"),
-    ),
-    system_prompt=(
-        "You are a strict test verifier. You run pytest suites, report failures, and confirm green verification."
-    ),
-)
+def load_role_from_file(path: Path) -> Role:
+    """Load a Role instance from a markdown document."""
+    content = path.read_text(encoding="utf-8")
+    return parse_role_document(content)
 
 
 class RoleRegistry:
-    """Registry of active roles with lookup and policy enforcement."""
+    """Registry of active roles with discovery from role definition documents."""
 
     def __init__(self, initial_roles: Optional[list[Role]] = None):
         self._roles: dict[str, Role] = {}
-        defaults = initial_roles or [
-            SECRETARY_ROLE,
-            VOICE_ROLE,
-            ENGINEER_ROLE,
-            BUILDER_ROLE,
-            ARCHITECT_ROLE,
-            PYTHON_DEVELOPER_ROLE,
-            REVIEWER_ROLE,
-            SCOUT_ROLE,
-            TESTER_ROLE,
-        ]
-        for r in defaults:
-            self.register(r)
+        if initial_roles:
+            for r in initial_roles:
+                self.register(r)
+        else:
+            self._discover_from_definitions()
 
+    def _discover_from_definitions(self) -> None:
+        """Discover roles from packaged definitions, project .gorkbot/roles, and global ~/.gorkbot/roles."""
+        definitions_dirs = [
+            Path(__file__).parent / "definitions" / "roles",
+            Path(".gorkbot/roles"),
+            Path.home() / ".gorkbot" / "roles",
+        ]
+        for rdir in definitions_dirs:
+            if not rdir.exists():
+                continue
+            for path in rdir.glob("*.md"):
+                try:
+                    role = load_role_from_file(path)
+                    self.register(role)
+                except Exception:
+                    continue
+
+        # Setup fallback alias mappings if specific file is not loaded
+        if "voice" not in self._roles and "secretary" in self._roles:
+            self._roles["voice"] = self._roles["secretary"]
+        if "builder" not in self._roles and "python_developer" in self._roles:
+            self._roles["builder"] = self._roles["python_developer"]
+        if "architect" not in self._roles and "engineer" in self._roles:
+            self._roles["architect"] = self._roles["engineer"]
+        if "reviewer" not in self._roles and "tester" in self._roles:
+            self._roles["reviewer"] = self._roles["tester"]
     def register(self, role: Role) -> None:
         self._roles[role.name.lower()] = role
+
     def get(self, name: str) -> Optional[Role]:
         return self._roles.get(name.lower())
+
+    def list_roles(self) -> list[Role]:
+        return list(set(self._roles.values()))
 
     def resolve(self, name_or_task: str) -> Role:
         """Resolve a role by exact name or match against role descriptions."""
@@ -239,24 +187,27 @@ class RoleRegistry:
         if query in self._roles:
             return self._roles[query]
 
-        # Score each registered role by matching keywords against description/prompt
-        best_role = self._roles.get("secretary", SECRETARY_ROLE)
+        best_role = self._roles.get("secretary") or self._roles.get("voice") or next(iter(self._roles.values()))
         best_score = 0
 
         keywords = {
-            "python_developer": ("python", "pytest", "module", ".py", "script", "class", "function"),
-            "engineer": ("architecture", "system design", "spec", "tradeoff", "decompose", "lead", "architect"),
+            "python_developer": ("python", "script", "py", "pytest", "module", "class", "function"),
             "builder": ("build", "implement", "create", "fix", "schema", "table", "coding"),
+            "engineer": ("architecture", "system design", "spec", "tradeoff", "decompose", "lead", "architect"),
+            "tester": ("test", "review", "audit", "critic", "lint", "inspect", "verify"),
             "reviewer": ("review", "audit", "critic", "lint", "inspect", "check pr", "pr"),
             "scout": ("scout", "search", "recon", "find", "locate", "map"),
             "secretary": ("talk", "conversation", "chat", "dm", "brief", "hello", "hi", "hey", "how are we"),
         }
+
         for role_name, kw_list in keywords.items():
             score = sum(2 if kw in query.split() else (1 if kw in query else 0) for kw in kw_list)
             if score > best_score and role_name in self._roles:
                 best_score = score
                 best_role = self._roles[role_name]
+
         return best_role
+
     def filter_tools(self, role: Role, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Filter a list of OpenAI tool schemas according to role permissions."""
         filtered = []
@@ -265,3 +216,19 @@ class RoleRegistry:
             if role.can_use_tool(fn_name):
                 filtered.append(t)
         return filtered
+
+
+# -----------------------------------------------------------------------------
+# Module-level standard archetypes (loaded dynamically from definitions)
+# -----------------------------------------------------------------------------
+
+_default_registry = RoleRegistry()
+SECRETARY_ROLE = _default_registry.get("secretary") or parse_role_document("---\nname: secretary\ntier: 0\n---\nSecretary")
+VOICE_ROLE = _default_registry.get("voice") or SECRETARY_ROLE
+ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\n---\nEngineer")
+ARCHITECT_ROLE = _default_registry.get("architect") or ENGINEER_ROLE
+BUILDER_ROLE = _default_registry.get("builder") or parse_role_document("---\nname: builder\ntier: 2\n---\nBuilder")
+PYTHON_DEVELOPER_ROLE = _default_registry.get("python_developer") or BUILDER_ROLE
+SCOUT_ROLE = _default_registry.get("scout") or parse_role_document("---\nname: scout\ntier: 3\n---\nScout")
+TESTER_ROLE = _default_registry.get("tester") or parse_role_document("---\nname: tester\ntier: 3\n---\nTester")
+REVIEWER_ROLE = _default_registry.get("reviewer") or TESTER_ROLE
