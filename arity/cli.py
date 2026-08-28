@@ -268,23 +268,23 @@ def show_skills():
 
 
 def show_roles():
-    """List all registered roles, tiers, permissions, and skills."""
+    """List all registered staff roles, tiers, skills, and dynamically granted tools."""
     from .roles import RoleRegistry
+    from .tools import SandboxToolRunner
     registry = RoleRegistry()
     print("\033[1;35m====================================================\033[0m")
     print("\033[1;35m             Registered Staff Roles & Tiers         \033[0m")
     print("\033[1;35m====================================================\033[0m\n")
     for role in sorted(set(registry._roles.values()), key=lambda r: r.tier):
+        runner = SandboxToolRunner(role=role)
+        granted_tools = [s["function"]["name"] for s in runner.get_schemas() if s.get("function", {}).get("name") != "search"]
         print(f"  \033[1;33m• {role.name:20}\033[0m (Tier {role.tier})")
-        print(f"    Description: {role.description}")
+        print(f"    Description:   {role.description}")
         if role.skills:
-            print(f"    Skills:      {', '.join(role.skills)}")
-        if role.allowed_tools:
-            print(f"    Tools:       {', '.join(role.allowed_tools)}")
-        if role.denial_set.denied_tools:
-            print(f"    Denied Tools:{', '.join(role.denial_set.denied_tools)}")
+            print(f"    Skills:        {', '.join(role.skills)}")
+        print(f"    Granted Tools: \033[1;32m{', '.join(granted_tools)}\033[0m")
         if role.denial_set.denied_paths:
-            print(f"    Denied Paths:{', '.join(role.denial_set.denied_paths)}")
+            print(f"    Path Locks:    {', '.join(role.denial_set.denied_paths)}")
         print()
     print("\033[1;35m====================================================\033[0m\n")
 

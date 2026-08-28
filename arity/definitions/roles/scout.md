@@ -4,12 +4,6 @@ description: Rapid read-only reconnaissance specialist and factual evidence gath
 tier: 3
 skills:
   - scout-recon
-allowed_tools:
-  - web_search
-  - fetch_url
-  - read_file
-  - list_directory
-  - search_files
 denied_tools:
   - write_file
   - run_command
