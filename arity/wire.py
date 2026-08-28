@@ -73,15 +73,18 @@ class AntigravityWireProvider:
         wire_model = self.model
         model_enum = None
         is_claude = "claude" in self.model.lower()
+        is_oss = "gpt-oss" in self.model.lower() or "oss" in self.model.lower()
 
-        if "flash" in self.model.lower():
-            wire_model = "gemini-3-flash-agent"
-            model_enum = "MODEL_PLACEHOLDER_M132"
-        elif "pro" in self.model.lower() and not is_claude:
+        if is_oss:
+            wire_model = "gpt-oss-120b-medium"
+        elif is_claude:
+            wire_model = "claude-opus-4-6-thinking" if "opus" in self.model.lower() else "claude-sonnet-4-6"
+        elif "pro" in self.model.lower():
             wire_model = "gemini-3.1-pro-low"
             model_enum = "MODEL_PLACEHOLDER_M36"
-        elif is_claude:
-            wire_model = "claude-sonnet-4-6" if "sonnet" in self.model.lower() else "claude-opus-4-6-thinking"
+        elif "flash" in self.model.lower():
+            wire_model = "gemini-3-flash-agent"
+            model_enum = "MODEL_PLACEHOLDER_M132"
 
         session_id = f"-{int(time.time() * 1000)}"
         request_id = f"agent/main/{int(time.time() * 1000)}/{str(uuid.uuid4())}/1"
@@ -461,19 +464,18 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
     """Create a high-speed Wire Provider with automatic CLI harness fallback."""
     provider = getattr(seat, "provider", "").lower()
     model = getattr(seat, "model", "")
+    account = getattr(seat, "account", None)
+    harness = getattr(seat, "harness", "arity")
     api_key = getattr(seat, "api_key", None)
     endpoint = getattr(seat, "endpoint", "")
 
     creds = load_local_oauth_credentials()
+    from .auth import TokenStore
+    store = TokenStore()
 
-    if provider in ("google-antigravity", "antigravity-wire", "gemini-wire", "claude-wire") or provider.startswith(("antigravity-wire:", "claude-wire:")):
-        from .auth import TokenStore
-        store = TokenStore()
-        
-        account_key = "google-antigravity"
-        if ":" in provider:
-            account_key = provider.split(":", 1)[1]
-            
+    # 1. Google (Antigravity backend with OMP fallback)
+    if provider in ("google", "antigravity"):
+        account_key = f"google-antigravity:{account}" if account else "google-antigravity"
         agy_data = creds.get(account_key) or store.get_credential(account_key) or {}
         token = agy_data.get("access")
         proj_id = agy_data.get("projectId") or agy_data.get("project_id", "")
@@ -481,33 +483,52 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
             wire = AntigravityWireProvider(
                 access_token=token,
                 project_id=proj_id,
-                model=model or ("claude-sonnet-4-6" if "claude" in provider else "gemini-3-flash-agent"),
+                model=model or "gemini-3.6-flash",
             )
-            fallback_harness = "claude" if "claude" in provider else "omp"
-            cli = CLIModelProvider(harness=fallback_harness, model=model or "default")
-            return FallbackModelProvider(primary=wire, fallback=cli, name=f"agy-wire+{fallback_harness}")
+            fallback_harness = harness if harness in ("omp", "claude", "codex", "grok") else "omp"
+            cli = CLIModelProvider(harness=fallback_harness, model=model or "gemini-3.6-flash")
+            return FallbackModelProvider(primary=wire, fallback=cli, name=f"google+{fallback_harness}")
         return CLIModelProvider(harness="omp", model=model or "gemini-3.6-flash")
-    elif provider == "codex-wire":
-        codex_data = creds.get("openai-codex", {})
+
+    # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
+    elif provider in ("openai", "codex", "codex-direct"):
+        codex_data = creds.get("openai-codex") or store.get_credential("openai-codex") or {}
         token = codex_data.get("access")
         account_id = codex_data.get("accountId") or codex_data.get("account_id")
         if token and account_id:
             wire = CodexWireProvider(access_token=token, account_id=str(account_id), model=model or "gpt-5.6-sol")
-            cli = CLIModelProvider(harness="codex", model=model or "gpt-5.6-sol")
-            return FallbackModelProvider(primary=wire, fallback=cli, name="codex-wire+cli")
+            fallback_harness = harness if harness in ("codex", "omp", "claude") else "codex"
+            cli = CLIModelProvider(harness=fallback_harness, model=model or "gpt-5.6-sol")
+            return FallbackModelProvider(primary=wire, fallback=cli, name=f"openai+{fallback_harness}")
         return CLIModelProvider(harness="codex", model=model or "gpt-5.6-sol")
 
-    elif provider == "grok-wire":
-        xai_data = creds.get("xai-oauth", {})
+    # 3. xAI (Grok backend with Grok build fallback)
+    elif provider in ("xai", "grok", "grok-direct"):
+        xai_data = creds.get("xai-oauth") or store.get_credential("xai-oauth") or {}
         token = xai_data.get("access")
         if token:
             wire = GrokWireProvider(access_token=token, model=model or "grok-4.5")
-            return wire
+            fallback_harness = harness if harness in ("grok", "omp") else "grok"
+            cli = CLIModelProvider(harness=fallback_harness, model=model or "grok-4.5")
+            return FallbackModelProvider(primary=wire, fallback=cli, name=f"xai+{fallback_harness}")
+        return CLIModelProvider(harness="grok", model=model or "grok-4.5")
 
-    elif provider == "gemini":
+    # 4. Anthropic (Claude Code harness)
+    elif provider in ("anthropic", "claude"):
+        return CLIModelProvider(harness="claude", model=model or "claude-3-7-sonnet")
+
+    # 5. Metered API Providers
+    elif provider in ("gemini", "google-api"):
         return GeminiModelProvider(api_key=api_key, model=model or "gemini-3.6-flash")
+    elif provider == "nvidia":
+        return OpenAIModelProvider(
+            api_key=api_key,
+            base_url=endpoint or "https://integrate.api.nvidia.com/v1",
+            model=model or "nvidia/nemotron-3-nano-30b-a3b",
+        )
 
-    elif provider in ("codex", "claude", "omp", "cli"):
+    # Fallback to direct harness or OpenAI completions
+    elif provider in ("claude", "codex", "omp", "cli"):
         return CLIModelProvider(harness=provider, model=model or "default")
 
     return OpenAIModelProvider(
