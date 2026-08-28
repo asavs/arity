@@ -292,7 +292,90 @@ class SandboxToolRunner(ToolRunner):
             func=search_files,
         )
 
-# -----------------------------------------------------------------------------
+        def fetch_url(url: str, timeout: int = 15) -> str:
+            import urllib.request
+            from html.parser import HTMLParser
+
+            class SimpleHTMLTextExtractor(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.text = []
+                    self.in_script = False
+
+                def handle_starttag(self, tag, attrs):
+                    if tag in ('script', 'style', 'nav', 'footer', 'header'):
+                        self.in_script = True
+
+                def handle_endtag(self, tag):
+                    if tag in ('script', 'style', 'nav', 'footer', 'header'):
+                        self.in_script = False
+
+                def handle_data(self, data):
+                    if not self.in_script and data.strip():
+                        self.text.append(data.strip())
+
+                def get_text(self):
+                    return "\n".join(self.text)
+
+            req = urllib.request.Request(url, headers={"User-Agent": "gorkbot/0.1.2"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    raw = resp.read().decode("utf-8", errors="replace")
+                    if "text/html" in content_type:
+                        parser = SimpleHTMLTextExtractor()
+                        parser.feed(raw)
+                        return parser.get_text()[:4000]
+                    return raw[:4000]
+            except Exception as e:
+                return f"Error fetching URL '{url}': {e}"
+
+        self.register(
+            name="fetch_url",
+            description="Fetch text or markdown content from a web URL or raw GitHub file.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP/HTTPS URL to fetch"},
+                },
+                "required": ["url"],
+            },
+            func=fetch_url,
+        )
+
+        def web_search(query: str, limit: int = 5) -> str:
+            import urllib.request, urllib.parse, json
+            # GitHub repository search first for skills/repos
+            url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
+            req = urllib.request.Request(url, headers={"User-Agent": "gorkbot/0.1.2"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    items = data.get("items", [])[:limit]
+                    results = []
+                    for idx, it in enumerate(items):
+                        results.append(
+                            f"{idx+1}. **{it['full_name']}** (⭐ {it['stargazers_count']})\n"
+                            f"   {it.get('description', '')}\n"
+                            f"   URL: {it['html_url']}"
+                        )
+                    return "\n\n".join(results) or f"No results found for '{query}'."
+            except Exception as e:
+                return f"Search error for '{query}': {e}"
+
+        self.register(
+            name="web_search",
+            description="Search the web and GitHub for repositories, skills, and documentation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query terms"},
+                    "limit": {"type": "integer", "description": "Max results to return", "default": 5},
+                },
+                "required": ["query"],
+            },
+            func=web_search,
+        )
 # MCP (Model Context Protocol) Tool Adapter
 # -----------------------------------------------------------------------------
 
