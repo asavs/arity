@@ -19,7 +19,7 @@ from .handlers import (
     JsonlRecordStore,
     LocalToolRunner,
     MetricsObserver,
-    OpenAIModelProvider,
+    create_model_provider,
 )
 from .ledger import Seat, SeatLedger
 from .roles import Role
@@ -92,11 +92,7 @@ class TerrariumDispatcher:
         self._model_factory = model_factory or self._default_model_factory
 
     def _default_model_factory(self, seat: Seat) -> ModelProvider:
-        return OpenAIModelProvider(
-            api_key=seat.api_key,
-            base_url=seat.endpoint,
-            model=seat.model,
-        )
+        return create_model_provider(seat)
 
     def dispatch_single(
         self,
