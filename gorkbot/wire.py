@@ -239,19 +239,29 @@ class FallbackModelProvider:
     primary: ModelProvider
     fallback: ModelProvider
     name: str = "wire_with_fallback"
+    fallback_count: int = 0
+    total_calls: int = 0
+    last_latency_seconds: float = 0.0
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
+        import time
+        self.total_calls += 1
+        start_t = time.time()
+
         try:
             result = self.primary.call(effect)
+            self.last_latency_seconds = time.time() - start_t
             if isinstance(result, ModelCompleted):
                 return result
             # Primary failed, attempt fallback
-            print(f"\033[1;33m[Seam Fallback]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {result.error}. Shifting to fallback harness...")
+            self.fallback_count += 1
+            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {result.error}. Shifting to fallback harness...")
         except Exception as e:
-            print(f"\033[1;33m[Seam Fallback]\033[0m Primary exception: {e}. Shifting to fallback harness...")
+            self.fallback_count += 1
+            self.last_latency_seconds = time.time() - start_t
+            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary exception: {e}. Shifting to fallback harness...")
 
         return self.fallback.call(effect)
-
 
 # -----------------------------------------------------------------------------
 # 5. Master Factory for Wire Providers with Fallback
