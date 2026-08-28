@@ -68,15 +68,24 @@ def compute_identity(
 
 
 class BriefCompiler:
-    """Compiles briefs with distance-based memory tiers and prefix cache preservation."""
+    """Compiles briefs with distance-based memory tiers, skill injection, and prefix cache preservation."""
 
     def __init__(
         self,
         tier0_context: str = "Asa: Creator of gorkbot. Working on autonomous agent statecharts.",
         tier1_context: str = "Project gorkbot: Composable statechart agent chassis with 5 explicit seams.",
+        skills_registry: Optional[Any] = None,
     ):
         self.tier0_context = tier0_context
         self.tier1_context = tier1_context
+        if skills_registry is None:
+            try:
+                from .skills import SkillRegistry
+                self.skills = SkillRegistry()
+            except Exception:
+                self.skills = None
+        else:
+            self.skills = skills_registry
 
     def assemble(
         self,
@@ -97,25 +106,29 @@ class BriefCompiler:
         # Layer 1: Universal Base Facts & Role Persona (STABLE Breakpoint 1)
         layers.append(f"# Role: {role.name.upper()}\n{role.system_prompt}")
 
-        # Layer 2: Tiered Memory by Distance from Asa (Axiom 8)
+        # Layer 2: Skills Prompt Injection
+        if getattr(role, "skills", None) and self.skills:
+            skills_section = self.skills.compile_prompt(list(role.skills))
+            if skills_section:
+                layers.append(skills_section)
+
+        # Layer 3: Tiered Memory by Distance from Asa (Axiom 8)
         if role.tier == TierLevel.TIER_0:
             layers.append(f"# Personal Memory (Tier 0)\n{self.tier0_context}\n\n# Project Context (Tier 1)\n{self.tier1_context}")
         elif role.tier == TierLevel.TIER_1:
             layers.append(f"# Project Context (Tier 1)\n{self.tier1_context}")
-        else:
-            # Tier 2 (Leaf): knows only task and scratchpad
+        elif role.tier == TierLevel.TIER_2:
             layers.append("# Operational Scope (Tier 2)\nYou are a sandboxed worker. Focus strictly on the assigned task.")
-
-        # Layer 3: Task Context (if any static reference material exists)
-        if task_context:
-            layers.append(f"# Task Context\n{task_context}")
+        else:  # Tier 3
+            layers.append("# Operational Scope (Tier 3)\nYou are a task-scoped leaf worker. Focus strictly on the assigned brief.")
 
         # Layer 4: Predecessor Accounts (Axiom 9)
-        if predecessor and (predecessor.self_report or predecessor.archivist_entry):
-            layers.append(f"# Lineage & Predecessor Context\n{predecessor.render()}")
+        if predecessor:
+            rendered_pred = predecessor.render()
+            if rendered_pred:
+                layers.append(rendered_pred)
 
         full_system_prompt = "\n\n---\n\n".join(layers)
-
         # Refusal check: ensure no denied paths, hosts, or names leaked into the brief
         self._enforce_denial_set(role, full_system_prompt, task)
 

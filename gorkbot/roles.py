@@ -37,10 +37,11 @@ class DenialSet:
 
 @dataclass(frozen=True)
 class Role:
-    """A role profile with tier level, capabilities, and restrictions."""
+    """A role profile with tier level, capabilities, skills, and restrictions."""
     name: str
     description: str
-    tier: int = 2  # 0 = Voice (closest to Asa), 1 = Project lead, 2 = Leaf worker
+    tier: int = 2  # 0 = Secretary (closest to Asa), 1 = Lead Engineer, 2 = Specialist (Python Dev), 3 = Leaf worker
+    skills: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
     system_prompt: str = ""
@@ -62,6 +63,23 @@ class Role:
 # Default Standard Archetypes
 # -----------------------------------------------------------------------------
 
+SECRETARY_ROLE = Role(
+    name="secretary",
+    description="The trusted front desk switchboard who talks directly with Asa.",
+    tier=0,
+    skills=(),
+    allowed_tools=("handoff", "search", "read_file", "pulse"),
+    denial_set=DenialSet(
+        denied_tools=("run_destructive_command", "drop_database"),
+        denied_paths=(".ssh", "id_rsa", ".env.production"),
+    ),
+    system_prompt=(
+        "You are the Secretary of gorkbot. You talk directly with Asa. "
+        "You hold the big picture, understand his intent, answer phone/chat inquiries, "
+        "and patch tasks down the chain to specialized engineering leads."
+    ),
+)
+
 VOICE_ROLE = Role(
     name="voice",
     description="The front-door persona who talks directly with Asa.",
@@ -81,6 +99,7 @@ ARCHITECT_ROLE = Role(
     name="architect",
     description="High-level systems thinker, planner, and code reviewer.",
     tier=1,
+    skills=("firecrawl-developer-index", "scout-recon"),
     allowed_tools=("read_file", "search", "handoff"),
     denial_set=DenialSet(
         denied_tools=("write_file", "run_command"),
@@ -89,6 +108,22 @@ ARCHITECT_ROLE = Role(
     system_prompt=(
         "You are a careful systems architect. You review code, analyze tradeoffs, "
         "and produce clean specifications without modifying files directly."
+    ),
+)
+
+ENGINEER_ROLE = Role(
+    name="engineer",
+    description="Lead engineer & architect who plans solutions, gathers docs, and deploys specialists.",
+    tier=1,
+    skills=("firecrawl-developer-index", "scout-recon"),
+    allowed_tools=("read_file", "search", "handoff", "deploy_subagent"),
+    denial_set=DenialSet(
+        denied_tools=("drop_database",),
+        denied_paths=(".ssh", "id_rsa", ".env"),
+    ),
+    system_prompt=(
+        "You are the Lead Engineer. You decompose goals, research library and API docs using "
+        "firecrawl developer index, specify exact technical requirements, and deploy specialist subagents (like python-developer)."
     ),
 )
 
@@ -107,6 +142,22 @@ BUILDER_ROLE = Role(
     ),
 )
 
+PYTHON_DEVELOPER_ROLE = Role(
+    name="python_developer",
+    description="Specialist Python developer implementing clean modules, AST checks, and pytest suites.",
+    tier=2,
+    skills=("python-development", "pytest-tdd"),
+    allowed_tools=("read_file", "write_file", "run_command", "deploy_subagent"),
+    denial_set=DenialSet(
+        denied_paths=(".ssh", "id_rsa", ".env", "C:/Users/example/.claude/keys"),
+        denied_hosts=("api.stripe.com", "bank.com"),
+    ),
+    system_prompt=(
+        "You are a dedicated Python Developer. You write clean, PEP 8 compliant, type-annotated "
+        "Python 3.13 code. You use the standard library first, write pytest unit tests, and verify all code before completion."
+    ),
+)
+
 REVIEWER_ROLE = Role(
     name="reviewer",
     description="Read-only code auditor and test verifier.",
@@ -121,19 +172,58 @@ REVIEWER_ROLE = Role(
     ),
 )
 
+SCOUT_ROLE = Role(
+    name="scout",
+    description="Rapid read-only codebase reconnaissance and symbol dependency mapper.",
+    tier=3,
+    skills=("scout-recon",),
+    allowed_tools=("read_file", "search"),
+    denial_set=DenialSet(
+        denied_tools=("write_file", "run_command"),
+        denied_paths=(".ssh", "id_rsa", ".env"),
+    ),
+    system_prompt=(
+        "You are a fast read-only codebase scout. You map symbols, files, and architectural dependencies without editing code."
+    ),
+)
+
+TESTER_ROLE = Role(
+    name="tester",
+    description="Test-driven verification agent running test suites and catching regressions.",
+    tier=3,
+    skills=("pytest-tdd",),
+    allowed_tools=("read_file", "run_command"),
+    denial_set=DenialSet(
+        denied_tools=("write_file",),
+        denied_paths=(".ssh", "id_rsa", ".env"),
+    ),
+    system_prompt=(
+        "You are a strict test verifier. You run pytest suites, report failures, and confirm green verification."
+    ),
+)
+
 
 class RoleRegistry:
     """Registry of active roles with lookup and policy enforcement."""
 
     def __init__(self, initial_roles: Optional[list[Role]] = None):
         self._roles: dict[str, Role] = {}
-        defaults = initial_roles or [VOICE_ROLE, ARCHITECT_ROLE, BUILDER_ROLE, REVIEWER_ROLE]
+        defaults = initial_roles or [
+            SECRETARY_ROLE,
+            VOICE_ROLE,
+            ENGINEER_ROLE,
+            BUILDER_ROLE,
+            ARCHITECT_ROLE,
+            PYTHON_DEVELOPER_ROLE,
+            REVIEWER_ROLE,
+            SCOUT_ROLE,
+            TESTER_ROLE,
+        ]
         for r in defaults:
             self.register(r)
 
     def register(self, role: Role) -> None:
         self._roles[role.name.lower()] = role
-
     def get(self, name: str) -> Optional[Role]:
         return self._roles.get(name.lower())
 
@@ -144,24 +234,23 @@ class RoleRegistry:
             return self._roles[query]
 
         # Score each registered role by matching keywords against description/prompt
-        best_role = self._roles.get("voice", VOICE_ROLE)
+        best_role = self._roles.get("secretary", SECRETARY_ROLE)
         best_score = 0
 
         keywords = {
-            "reviewer": ("review", "audit", "critic", "lint", "inspect"),
-            "architect": ("architect", "plan", "spec", "system design", "tradeoff"),
-            "builder": ("build", "implement", "write", "code", "coder", "fix", "schema", "script"),
-            "voice": ("talk", "conversation", "chat", "dm", "brief"),
+            "python_developer": ("python", "pytest", "module", ".py", "script", "class", "function"),
+            "engineer": ("architecture", "system design", "spec", "tradeoff", "decompose", "lead", "architect"),
+            "builder": ("build", "implement", "create", "fix", "schema", "table", "coding"),
+            "reviewer": ("review", "audit", "critic", "lint", "inspect", "check pr", "pr"),
+            "scout": ("scout", "search", "recon", "find", "locate", "map"),
+            "secretary": ("talk", "conversation", "chat", "dm", "brief", "hello", "hi", "hey", "how are we"),
         }
-
         for role_name, kw_list in keywords.items():
             score = sum(2 if kw in query.split() else (1 if kw in query else 0) for kw in kw_list)
             if score > best_score and role_name in self._roles:
                 best_score = score
                 best_role = self._roles[role_name]
-
         return best_role
-
     def filter_tools(self, role: Role, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Filter a list of OpenAI tool schemas according to role permissions."""
         filtered = []
