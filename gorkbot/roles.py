@@ -28,8 +28,12 @@ class DenialSet:
                 return True
         return False
 
-    def is_host_denied(self, host: str) -> bool:
-        return host.lower() in (h.lower() for h in self.denied_hosts)
+    def is_host_denied(self, host_or_url: str) -> bool:
+        low = host_or_url.lower()
+        for h in self.denied_hosts:
+            if h.lower() in low:
+                return True
+        return False
 
     def is_name_denied(self, name: str) -> bool:
         return name.lower() in (n.lower() for n in self.denied_names)
@@ -57,6 +61,10 @@ class Role:
     def can_access_path(self, path: str) -> bool:
         """Check if role is permitted to read/write a path."""
         return not self.denial_set.is_path_denied(path)
+
+    def can_access_host(self, host_or_url: str) -> bool:
+        """Check if role is permitted to access a host or URL."""
+        return not self.denial_set.is_host_denied(host_or_url)
 
 # -----------------------------------------------------------------------------
 # Role Document Parsing & Discovery
