@@ -110,6 +110,28 @@ class SandboxToolRunner(ToolRunner):
                     is_error=True,
                 )
 
+        # 3. Check host denial for network tools
+        if self.role and "url" in effect.arguments:
+            req_url = str(effect.arguments["url"])
+            if not self.role.can_access_host(req_url):
+                return ToolCompleted(
+                    call_id=effect.call_id,
+                    tool_name=effect.name,
+                    output=f"Security Denial: Role '{self.role.name}' is denied network access to host in '{req_url}'",
+                    is_error=True,
+                )
+
+        # 4. Check command denial for shell execution
+        if self.role and "command" in effect.arguments:
+            cmd = str(effect.arguments["command"])
+            for dp in self.role.denial_set.denied_paths:
+                if dp and dp.lower() in cmd.lower():
+                    return ToolCompleted(
+                        call_id=effect.call_id,
+                        tool_name=effect.name,
+                        output=f"Security Denial: Command attempts access to denied path '{dp}'",
+                        is_error=True,
+                    )
         # 3. Dispatch tool execution
         func = self._custom_tools.get(effect.name)
         if not func:

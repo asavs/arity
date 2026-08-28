@@ -99,20 +99,27 @@ class TestTiersAndBriefCompiler(unittest.TestCase):
         self.assertIn("I built the deal schema", brief.system_prompt)
 
     def test_brief_refusal_on_denial_set_violation(self):
-        # Attempting to ask builder to read a denied path (.ssh/id_rsa) must trigger BriefRefusalError
+        from arity.roles import DenialSet, Role
+        restricted_role = Role(
+            name="leaf_worker",
+            description="Sandboxed worker",
+            tier=3,
+            denial_set=DenialSet(denied_names=("secret_client_corp", "internal_classified_project")),
+        )
+        # Attempting to compile a brief leaking a denied entity name triggers BriefRefusalError (Axiom 8 DLP)
         with self.assertRaises(BriefRefusalError):
             self.compiler.assemble(
-                BUILDER_ROLE,
-                "Please read the key from C:/Users/example/.ssh/id_rsa",
+                restricted_role,
+                "Please research secret_client_corp data",
             )
 
-        # Attempting to ask builder to touch a denied host (api.stripe.com)
-        with self.assertRaises(BriefRefusalError):
-            self.compiler.assemble(
-                BUILDER_ROLE,
-                "Make a request to https://api.stripe.com/v1/charges",
-            )
-
+        # But ordinary coding prompts mentioning .env or ssh assemble cleanly without crashing
+        brief = self.compiler.assemble(
+            BUILDER_ROLE,
+            "Write a config loader that reads .env files and loads settings",
+        )
+        self.assertIsNotNone(brief)
+        self.assertIn(".env", brief.user_prompt)
     def test_identity_tuple_computation(self):
         identity = compute_identity(
             provider="openai",
