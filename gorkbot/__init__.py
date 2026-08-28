@@ -29,6 +29,13 @@ from .tiers import (
 from .ledger import Seat, SeatLedger
 from .composer import CastingComposer, CastingDecision
 from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .tools import (
+    McpToolAdapter,
+    PathTraversalError,
+    SandboxToolRunner,
+    SyntaxValidationError,
+    resolve_sandbox_path,
+)
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -123,4 +130,10 @@ __all__ = [
     "TaskRecord",
     "TerrariumCandidateResult",
     "TerrariumDispatcher",
+    # Tools & Sandbox
+    "SandboxToolRunner",
+    "McpToolAdapter",
+    "PathTraversalError",
+    "SyntaxValidationError",
+    "resolve_sandbox_path",
 ]
