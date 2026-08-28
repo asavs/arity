@@ -235,6 +235,62 @@ class SandboxToolRunner(ToolRunner):
             func=run_command,
         )
 
+        def list_directory(path: str = ".") -> str:
+            target = resolve_sandbox_path(self.workspace_root, path)
+            if not target.exists():
+                return f"Error: Directory '{path}' does not exist."
+            if not target.is_dir():
+                return f"Error: '{path}' is not a directory."
+            entries = []
+            for item in sorted(target.iterdir()):
+                prefix = "[DIR] " if item.is_dir() else "[FILE]"
+                entries.append(f"{prefix} {item.name}")
+            return "\n".join(entries) or "(empty directory)"
+
+        self.register(
+            name="list_directory",
+            description="List files and directories within a workspace folder.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative directory path", "default": "."},
+                },
+            },
+            func=list_directory,
+        )
+
+        def search_files(pattern: str, path: str = ".") -> str:
+            import re
+            target = resolve_sandbox_path(self.workspace_root, path)
+            if not target.exists():
+                return f"Error: Path '{path}' does not exist."
+            regex = re.compile(pattern, re.IGNORECASE)
+            matches = []
+            for p in target.rglob("*"):
+                if p.is_file() and not p.name.startswith("."):
+                    try:
+                        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                        for idx, line in enumerate(lines):
+                            if regex.search(line):
+                                rel_p = p.relative_to(self.workspace_root)
+                                matches.append(f"{rel_p}:{idx + 1}: {line.strip()}")
+                    except Exception:
+                        continue
+            return "\n".join(matches[:50]) or f"No matches found for '{pattern}'."
+
+        self.register(
+            name="search_files",
+            description="Search for regex pattern across files in the workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "path": {"type": "string", "description": "Starting relative path", "default": "."},
+                },
+                "required": ["pattern"],
+            },
+            func=search_files,
+        )
 
 # -----------------------------------------------------------------------------
 # MCP (Model Context Protocol) Tool Adapter
