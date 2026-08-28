@@ -1,2 +1,7 @@
 .arity/
 __pycache__/
+impl/*/__pycache__/
+impl/*/state/
+impl/*/workspace/
+impl/blind/
+impl/glean.json
