@@ -46,7 +46,6 @@ class OpenAIModelProvider:
             self.api_key = (
                 os.environ.get("OPENAI_API_KEY")
                 or os.environ.get("OPENROUTER_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
                 or ""
             )
 
@@ -106,6 +105,197 @@ class OpenAIModelProvider:
                 retryable=True,
             )
 
+
+@dataclass
+class GeminiModelProvider:
+    """Direct Google Generative AI provider over stdlib urllib."""
+    api_key: Optional[str] = None
+    model: str = "gemini-3.6-flash"
+    timeout: float = 60.0
+
+    def __post_init__(self):
+        if not self.api_key:
+            self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+
+    def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
+
+        system_parts: list[str] = []
+        contents: list[dict[str, Any]] = []
+
+        for msg in effect.messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "system":
+                if content:
+                    system_parts.append(content)
+            elif role in ("user", "assistant", "model"):
+                gemini_role = "user" if role == "user" else "model"
+                contents.append({
+                    "role": gemini_role,
+                    "parts": [{"text": str(content)}],
+                })
+
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": "Hello"}]})
+
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": effect.temperature,
+            },
+        }
+        if system_parts:
+            payload["systemInstruction"] = {
+                "parts": [{"text": "\n\n".join(system_parts)}]
+            }
+        if effect.max_tokens:
+            payload["generationConfig"]["maxOutputTokens"] = effect.max_tokens
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw_body = resp.read().decode("utf-8")
+                res = json.loads(raw_body)
+                candidates = res.get("candidates", [{}])
+                candidate = candidates[0] if candidates else {}
+                parts = candidate.get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts)
+
+                usage_meta = res.get("usageMetadata", {})
+                usage = {
+                    "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+                }
+
+                return ModelCompleted(
+                    content=text,
+                    tool_calls=[],
+                    usage=usage,
+                    finish_reason=candidate.get("finishReason", "STOP").lower(),
+                    seat_id=f"gemini:{self.model}",
+                )
+
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            retryable = e.code in (429, 500, 502, 503, 504)
+            return ModelFailed(
+                error=f"HTTP {e.code}: {err_body}",
+                seat_id=f"gemini:{self.model}",
+                retryable=retryable,
+            )
+        except Exception as e:
+            return ModelFailed(
+                error=f"Request failed: {str(e)}",
+                seat_id=f"gemini:{self.model}",
+                retryable=True,
+            )
+
+
+@dataclass
+class CLIModelProvider:
+    """Harness / ACP Provider that executes tasks through authenticated CLI subscriptions (codex, claude, omp)."""
+    harness: str = "codex"  # "codex" | "claude" | "omp"
+    model: str = "gpt-5.6-sol"
+    timeout: float = 120.0
+
+    def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
+        # Assemble full prompt from system + user messages
+        lines: list[str] = []
+        for msg in effect.messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "system" and content:
+                lines.append(f"[System Context]\n{content}\n")
+            elif role == "user" and content:
+                lines.append(f"{content}")
+            elif role == "assistant" and content:
+                lines.append(f"[Assistant]\n{content}")
+
+        full_prompt = "\n".join(lines).strip()
+
+        if self.harness == "codex":
+            cmd = ["codex", "exec", "--skip-git-repo-check", full_prompt]
+        elif self.harness == "claude":
+            cmd = ["claude", "-p", full_prompt]
+        else:
+            cmd = [self.harness, full_prompt]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                shell=True,
+            )
+            raw_output = proc.stdout or ""
+            if proc.returncode != 0 and not raw_output.strip():
+                return ModelFailed(
+                    error=f"CLI harness '{self.harness}' failed (exit code {proc.returncode}): {proc.stderr}",
+                    seat_id=f"{self.harness}:{self.model}",
+                    retryable=False,
+                )
+
+            # Clean output (strip harness banner if present)
+            output = raw_output.strip()
+            if self.harness == "codex" and "tokens used" in output:
+                # Extract content after token summary or raw lines
+                output_lines = [l for l in output.splitlines() if not l.startswith("2026-") and "rmcp::transport" not in l]
+                output = "\n".join(output_lines).strip()
+
+            return ModelCompleted(
+                content=output,
+                tool_calls=[],
+                usage={"prompt_tokens": len(full_prompt) // 4, "completion_tokens": len(output) // 4},
+                finish_reason="stop",
+                seat_id=f"{self.harness}:{self.model}",
+            )
+        except subprocess.TimeoutExpired:
+            return ModelFailed(
+                error=f"CLI harness '{self.harness}' timed out after {self.timeout}s",
+                seat_id=f"{self.harness}:{self.model}",
+                retryable=True,
+            )
+        except Exception as e:
+            return ModelFailed(
+                error=f"CLI execution failed: {str(e)}",
+                seat_id=f"{self.harness}:{self.model}",
+                retryable=True,
+            )
+
+
+def create_model_provider(seat: Any) -> ModelProvider:
+    """Factory creating the appropriate ModelProvider for any given Seat."""
+    provider = getattr(seat, "provider", "").lower()
+    model = getattr(seat, "model", "")
+    api_key = getattr(seat, "api_key", None)
+    endpoint = getattr(seat, "endpoint", "")
+
+    if provider == "gemini":
+        return GeminiModelProvider(api_key=api_key, model=model or "gemini-3.6-flash")
+    elif provider in ("codex", "claude", "omp", "cli"):
+        return CLIModelProvider(harness=provider, model=model or "default")
+    else:
+        return OpenAIModelProvider(
+            api_key=api_key,
+            base_url=endpoint or "https://api.openai.com/v1",
+            model=model or "gpt-4o",
+        )
+
+
+def create_default_model_provider() -> ModelProvider:
+    """Return the best available live ModelProvider based on environment and CLI availability."""
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return GeminiModelProvider()
+    elif shutil.which("codex"):
+        return CLIModelProvider(harness="codex")
+    elif shutil.which("claude"):
+        return CLIModelProvider(harness="claude")
+    return OpenAIModelProvider()
 
 # -----------------------------------------------------------------------------
 # 2. Local Tool Runner (Stdlib filesystem and command execution)
