@@ -1,6 +1,7 @@
 .gorkbot/
 .demo_workspace/
 .demo_records/
+.terrarium/
 __pycache__/
 impl/*/__pycache__/
 impl/*/state/

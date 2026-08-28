@@ -28,6 +28,7 @@ from .tiers import (
 )
 from .ledger import Seat, SeatLedger
 from .composer import CastingComposer, CastingDecision
+from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -118,4 +119,8 @@ __all__ = [
     "SeatLedger",
     "CastingComposer",
     "CastingDecision",
+    # Terrarium & Handoffs
+    "TaskRecord",
+    "TerrariumCandidateResult",
+    "TerrariumDispatcher",
 ]
