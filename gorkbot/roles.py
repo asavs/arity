@@ -182,32 +182,49 @@ class RoleRegistry:
         return list(set(self._roles.values()))
 
     def resolve(self, name_or_task: str) -> Role:
-        """Resolve a role by exact name or match against role descriptions."""
+        """Resolve a role by exact name or semantic task intent."""
         query = name_or_task.lower().strip()
+
+        # 1. Exact role name match
         if query in self._roles:
             return self._roles[query]
 
-        best_role = self._roles.get("secretary") or self._roles.get("voice") or next(iter(self._roles.values()))
+        # 2. Explicit @tag match (e.g. @builder, @scout, @engineer)
+        if query.startswith("@"):
+            tag = query[1:].split()[0]
+            if tag in self._roles:
+                return self._roles[tag]
+
+        secretary_role = self._roles.get("secretary") or self._roles.get("voice") or next(iter(self._roles.values()))
+
+        # 3. Conversational / Meta Queries stay with The Secretary (Axiom 1)
+        question_starters = (
+            "who ", "what ", "where ", "when ", "why ", "how ", "is ", "are ", "can ", "could ",
+            "tell me", "explain", "show me", "status", "hello", "hi", "hey"
+        )
+        if any(query.startswith(qs) for qs in question_starters) or query.endswith("?"):
+            return secretary_role
+
+        # 4. Actionable task intent matching
+        best_role = secretary_role
         best_score = 0
 
         keywords = {
-            "python_developer": ("python", "script", "py", "pytest", "module", "class", "function"),
-            "builder": ("build", "implement", "create", "fix", "schema", "table", "coding"),
-            "engineer": ("architecture", "system design", "spec", "tradeoff", "decompose", "lead", "architect"),
-            "tester": ("test", "review", "audit", "critic", "lint", "inspect", "verify"),
-            "reviewer": ("review", "audit", "critic", "lint", "inspect", "check pr", "pr"),
-            "scout": ("scout", "search", "recon", "find", "locate", "map"),
-            "secretary": ("talk", "conversation", "chat", "dm", "brief", "hello", "hi", "hey", "how are we"),
+            "python_developer": ("python", "pytest", "module", "class", "def "),
+            "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
+            "engineer": ("architecture", "system design", "spec", "decompose"),
+            "tester": ("verify tests", "run pytest", "check regression"),
+            "reviewer": ("audit code", "check pr", "code review"),
+            "scout": ("recon", "find repo", "locate docs"),
         }
 
         for role_name, kw_list in keywords.items():
-            score = sum(2 if kw in query.split() else (1 if kw in query else 0) for kw in kw_list)
+            score = sum(3 if f" {kw} " in f" {query} " else (1 if kw in query else 0) for kw in kw_list)
             if score > best_score and role_name in self._roles:
                 best_score = score
                 best_role = self._roles[role_name]
 
-        return best_role
-
+        return best_role if best_score >= 2 else secretary_role
     def filter_tools(self, role: Role, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Filter a list of OpenAI tool schemas according to role permissions."""
         filtered = []
