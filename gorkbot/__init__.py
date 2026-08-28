@@ -38,6 +38,7 @@ from .tools import (
 )
 from .scorecard import Scorecard, ScorecardRecord
 from .archivist import ArchivistEntry, ImpartialArchivist
+from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -143,4 +144,9 @@ __all__ = [
     "ScorecardRecord",
     "ArchivistEntry",
     "ImpartialArchivist",
+    # Pulse & Keepalive
+    "PulseEngine",
+    "PulseAction",
+    "CacheEconomics",
+    "CadenceModel",
 ]
