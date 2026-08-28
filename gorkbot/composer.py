@@ -25,10 +25,13 @@ class CastingDecision:
 
 # Default model aptitude preferences by role family
 APTITUDE_MATRIX: dict[str, list[str]] = {
-    "voice": ["gpt-4o", "claude-3-5-sonnet", "gemini-3.6-flash", "llama"],
-    "architect": ["claude-3-5-sonnet", "gpt-4o", "gemini-3.6-flash"],
-    "builder": ["gemini-3.6-flash", "gpt-4o", "nemotron", "llama"],
-    "reviewer": ["claude-3-5-sonnet", "gpt-4o", "gemini-3.6-flash"],
+    "secretary": ["gemini-3.6-flash", "gpt-4o", "claude-3-5-sonnet", "llama"],
+    "voice": ["gemini-3.6-flash", "gpt-4o", "claude-3-5-sonnet", "llama"],
+    "engineer": ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-5.6-sol", "gemini-3.1-pro"],
+    "python_developer": ["gpt-5.6-sol", "gemini-3.6-flash", "nemotron", "llama"],
+    "builder": ["gpt-5.6-sol", "gemini-3.6-flash", "nemotron", "llama"],
+    "reviewer": ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-5.6-sol", "gemini-3.6-flash"],
+    "scout": ["gemini-3.6-flash", "grok-4.5", "gpt-4o"],
 }
 
 
