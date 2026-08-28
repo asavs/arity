@@ -29,7 +29,8 @@ class RedphoneMessage:
 class RedphoneInbox:
     """Public address and multi-channel message queue (Axiom 10)."""
 
-    def __init__(self):
+    def __init__(self, store: Optional[Any] = None):
+        self.store = store
         self._channels: dict[str, list[RedphoneMessage]] = {}
 
     def post(
@@ -40,7 +41,7 @@ class RedphoneInbox:
         kind: str = "text",
         metadata: Optional[dict[str, Any]] = None,
     ) -> RedphoneMessage:
-        """Post a message into a channel queue."""
+        """Post a message into a channel queue and persist to record store."""
         msg = RedphoneMessage(
             channel=channel,
             sender=sender,
@@ -51,6 +52,27 @@ class RedphoneInbox:
         if channel not in self._channels:
             self._channels[channel] = []
         self._channels[channel].append(msg)
+
+        if self.store and hasattr(self.store, "append"):
+            try:
+                from .types import StoreRecord
+                self.store.append(
+                    StoreRecord(
+                        kind="redphone_message",
+                        record={
+                            "id": msg.id,
+                            "channel": msg.channel,
+                            "sender": msg.sender,
+                            "text": msg.text,
+                            "kind": msg.kind,
+                            "metadata": msg.metadata,
+                            "timestamp": msg.timestamp,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+
         return msg
 
     def drain(self, channel: str) -> list[RedphoneMessage]:
@@ -62,6 +84,14 @@ class RedphoneInbox:
     def peek(self, channel: str) -> list[RedphoneMessage]:
         """Inspect pending messages without consuming them."""
         return list(self._channels.get(channel, []))
+
+    def list_recent(self, channel: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
+        """Query recent historical messages across channels from persistent store."""
+        if self.store and hasattr(self.store, "query"):
+            filters = {"channel": channel} if channel else {}
+            records = self.store.query("redphone_message", **filters)
+            return records[-limit:]
+        return []
 
 
 class WebhookTransport(Transport):
