@@ -85,32 +85,72 @@ class CodexWireProvider:
 
         # Convert messages into Codex input items
         input_items: list[dict[str, Any]] = []
+        import uuid
         for msg in effect.messages:
             role = msg.get("role")
             content = msg.get("content", "")
-            if not content:
-                continue
-            codex_role = "user" if role in ("user", "system") else "assistant"
-            prefix = f"[{role.upper()}]\n" if role == "system" else ""
-            input_items.append({
-                "role": codex_role,
-                "content": [{"type": "input_text", "text": f"{prefix}{content}"}],
-            })
+            tool_calls = msg.get("tool_calls", [])
+
+            if role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id") or msg.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                    "output": str(content),
+                })
+            elif role == "assistant":
+                if content:
+                    input_items.append({
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": str(content)}],
+                    })
+                if tool_calls:
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        raw_args = fn.get("arguments", "{}")
+                        args_str = raw_args if isinstance(raw_args, str) else json.dumps(raw_args)
+                        input_items.append({
+                            "type": "function_call",
+                            "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                            "name": fn.get("name", "unknown"),
+                            "arguments": args_str,
+                        })
+            else:  # "user" or "system"
+                if content:
+                    prefix = f"[{role.upper()}]\n" if role == "system" else ""
+                    input_items.append({
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"{prefix}{content}"}],
+                    })
 
         if not input_items:
             input_items.append({"role": "user", "content": [{"type": "input_text", "text": "Hello"}]})
 
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": self.model or "gpt-5.6-sol",
             "input": input_items,
             "store": False,
             "stream": True,
         }
 
+        if effect.tools:
+            tools_payload = []
+            for t in effect.tools:
+                fn = t.get("function", {})
+                if fn:
+                    tools_payload.append({
+                        "type": "function",
+                        "name": fn.get("name"),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                    })
+            if tools_payload:
+                payload["tools"] = tools_payload
+
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
 
         collected_text: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
         prompt_tokens = 0
         completion_tokens = 0
 
@@ -128,6 +168,17 @@ class CodexWireProvider:
                         etype = event.get("type")
                         if etype == "response.output_text.delta":
                             collected_text.append(event.get("delta", ""))
+                        elif etype == "response.output_item.done":
+                            item = event.get("item", {})
+                            if item.get("type") == "function_call":
+                                tool_calls.append({
+                                    "id": item.get("call_id") or item.get("id"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments", "{}"),
+                                    },
+                                })
                         elif etype == "response.done":
                             res = event.get("response", {})
                             usage_raw = res.get("usage", {})
@@ -139,16 +190,15 @@ class CodexWireProvider:
 
             output_text = "".join(collected_text).strip()
             return ModelCompleted(
-                content=output_text,
-                tool_calls=[],
+                content=output_text or None,
+                tool_calls=tool_calls,
                 usage={
-                    "prompt_tokens": prompt_tokens or (sum(len(m.get("content", "")) for m in effect.messages) // 4),
-                    "completion_tokens": completion_tokens or (len(output_text) // 4),
+                    "prompt_tokens": prompt_tokens or (sum(len(str(m.get("content") or "")) for m in effect.messages) // 4),
+                    "completion_tokens": completion_tokens or (len(output_text) // 4 if output_text else 0),
                 },
-                finish_reason="stop",
+                finish_reason="tool_calls" if tool_calls else "stop",
                 seat_id=f"wire:codex:{self.model}",
             )
-
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
             retryable = e.code in (401, 403, 429, 500, 502, 503)

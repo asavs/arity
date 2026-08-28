@@ -19,7 +19,7 @@ from .composer import CastingComposer, CastingDecision
 from .handlers import ConsoleTransport, JsonlRecordStore
 from .ledger import Seat, SeatLedger
 from .pulse import PulseAction, PulseEngine
-from .roles import BUILDER_ROLE, Role, RoleRegistry, VOICE_ROLE
+from .roles import BUILDER_ROLE, Role, RoleRegistry, SECRETARY_ROLE, VOICE_ROLE
 from .runtime import Runtime
 from .scorecard import Scorecard
 from .seams import ModelProvider, RecordStore, Transport
@@ -158,29 +158,55 @@ class GorkbotOrchestrator:
                 archivist_entries=archivist_entries,
             )
 
-        # Otherwise, handle as direct conversation with the Voice (Tier 0)
+        # Otherwise, handle as direct conversation with The Secretary (Tier 0)
+        voice_tool_runner = SandboxToolRunner(role=SECRETARY_ROLE)
+
+        # Add deploy_subagent capability for The Secretary to dispatch specialists
+        def deploy_subagent(role_name: str, brief: str) -> str:
+            sub_role = self.roles.resolve(role_name)
+            sub_task = TaskRecord(from_role="secretary", to_role=sub_role.name, brief=brief)
+            casting = self.composer.cast(role=sub_role, task=brief, candidates_count=1, now=curr_time)
+            sub_res = self.terrarium.dispatch_single(task=sub_task, seat=casting.primary_seat, role=sub_role)
+            return sub_res.output or f"[{sub_role.name} completed]"
+
+        voice_tool_runner.register(
+            name="deploy_subagent",
+            description="Deploy a specialist agent (e.g. 'scout', 'engineer', 'python_developer') to run a task and report back.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "role_name": {"type": "string", "description": "Role to deploy (scout, engineer, python_developer)"},
+                    "brief": {"type": "string", "description": "Task brief for the specialist"},
+                },
+                "required": ["role_name", "brief"],
+            },
+            func=deploy_subagent,
+        )
+
         voice_brief = self.compiler.assemble(
-            role=VOICE_ROLE,
+            role=SECRETARY_ROLE,
             task=user_text,
             provider="openai",
             endpoint="https://api.openai.com/v1",
             model="gpt-4o",
             session_id="voice_main",
+            all_tools=voice_tool_runner.get_schemas(),
         )
 
         voice_runtime = Runtime(
+            tool_runner=voice_tool_runner,
             store=self.store,
             transport=self.transport,
         )
 
         voice_state = State(
             session_id="voice_main",
-            role="voice",
+            role="secretary",
             system_prompt=voice_brief.system_prompt,
+            active_tools=voice_brief.filtered_tools,
         )
         final_state = voice_runtime.run(voice_state, initial_event=UserMessage(text=user_text, sender=sender))
         self._last_voice_session = final_state
-
         return OrchestrationResponse(
             reply_text=final_state.output or "(no output)",
             voice_state=final_state,
