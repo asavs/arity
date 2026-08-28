@@ -11,7 +11,6 @@ allowed_tools:
   - read_file
   - list_directory
   - search_files
-  - deploy_subagent
 denied_tools:
   - write_file
   - run_command

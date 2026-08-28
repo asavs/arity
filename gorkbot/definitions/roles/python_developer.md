@@ -13,7 +13,6 @@ allowed_tools:
   - list_directory
   - web_search
   - fetch_url
-  - deploy_subagent
 denied_paths:
   - .ssh
   - id_rsa

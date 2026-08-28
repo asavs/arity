@@ -13,7 +13,6 @@ allowed_tools:
 denied_tools:
   - write_file
   - run_command
-  - deploy_subagent
 denied_paths:
   - .ssh
   - id_rsa

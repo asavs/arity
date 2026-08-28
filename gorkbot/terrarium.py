@@ -41,8 +41,8 @@ from .types import (
 class TaskRecord:
     """A structured task handoff record (Axiom 1 & Axiom 3)."""
     id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
-    from_role: str = "voice"
-    to_role: str = "builder"
+    from_role: str = "secretary"
+    to_role: str = "python_developer"
     brief: str = ""
     budget: float = 1.0  # USD or reference token budget
     depth: int = 0  # Recursion depth limit
@@ -125,37 +125,6 @@ class TerrariumDispatcher:
         # 1. Setup isolated sandbox tool runner with AST validation and path confinement
         tool_runner = SandboxToolRunner(workspace_root=workspace, role=role)
         metrics = MetricsObserver()
-
-        # Register deploy_subagent tool for multi-level delegation (depth bounded)
-        def deploy_subagent(role_name: str, brief: str) -> str:
-            if task.depth + 1 >= task.max_depth:
-                return f"Error: Maximum subagent depth limit ({task.max_depth}) reached."
-            from .roles import RoleRegistry
-            roles = RoleRegistry()
-            child_role = roles.resolve(role_name)
-            child_task = TaskRecord(
-                from_role=role.name,
-                to_role=child_role.name,
-                brief=brief,
-                depth=task.depth + 1,
-                max_depth=task.max_depth,
-            )
-            child_res = self.dispatch_single(task=child_task, seat=seat, role=child_role)
-            return child_res.output or f"[{child_role.name} completed with no output]"
-
-        tool_runner.register(
-            name="deploy_subagent",
-            description="Deploy a specialized subagent (e.g. 'scout', 'tester', 'python_developer') to run a scoped subtask.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "role_name": {"type": "string", "description": "Specialist role to spawn (e.g. scout, tester, python_developer)"},
-                    "brief": {"type": "string", "description": "Clear instruction brief for the subagent"},
-                },
-                "required": ["role_name", "brief"],
-            },
-            func=deploy_subagent,
-        )
         compiled_brief = self.compiler.assemble(
             role=role,
             task=task.brief,
