@@ -121,9 +121,10 @@ class ArityOrchestrator:
         )
 
         # 4. Multi-candidate trial or direct single-kernel turn
-        if candidates_per_task > 1 or target_role.tier > 0:
+        is_direct_chat = target_role.name in ("secretary", "voice") and candidates_per_task == 1
+        if not is_direct_chat:
             task_record = TaskRecord(
-                from_role="user" if target_role.tier == 0 else "secretary",
+                from_role="user" if target_role.name in ("secretary", "voice") else "secretary",
                 to_role=target_role.name,
                 brief=user_text,
                 predecessor=self._last_predecessors.get(target_role.name),
@@ -156,8 +157,15 @@ class ArityOrchestrator:
 
         # 5. Direct single conversational kernel (Tier 0)
         primary_seat = casting.primary_seat
-        tool_runner = SandboxToolRunner(role=target_role)
 
+        def route_peer_message(to_peer: str, text_msg: str) -> str:
+            peer_role = self.roles.resolve(to_peer)
+            peer_task = TaskRecord(from_role=target_role.name, to_role=peer_role.name, brief=text_msg)
+            peer_casting = self.composer.cast(role=peer_role, task=text_msg, candidates_count=1, now=curr_time)
+            peer_res = self.terrarium.dispatch_single(task=peer_task, seat=peer_casting.primary_seat, role=peer_role)
+            return peer_res.output or f"[{peer_role.name} replied with no output]"
+
+        tool_runner = SandboxToolRunner(role=target_role, message_router=route_peer_message)
         brief = self.compiler.assemble(
             role=target_role,
             task=user_text,

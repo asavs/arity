@@ -17,15 +17,13 @@ from .roles import Role, VOICE_ROLE
 
 class TierLevel(IntEnum):
     """Distance from Asa (Axiom 8)."""
-    TIER_0 = 0  # Voice: knows the biograph, user personal preferences, daily context
-    TIER_1 = 1  # Project: knows the repo architecture, roadmap, shared contracts
-    TIER_2 = 2  # Leaf: knows only the immediate task, input artifacts, scratchpad
-
-
+    TIER_0 = 0  # Secretary: knows personal context, biograph, switchboard
+    TIER_1 = 1  # Lead Engineer & Scout: project context, roadmap, general web/repo intelligence
+    TIER_2 = 2  # Python Developer: sandboxed implementation scope
+    TIER_3 = 3  # Reviewer: code auditor and regression verifier
 class BriefRefusalError(Exception):
     """Raised when an assembled brief violates a role's denial set."""
     pass
-
 
 @dataclass(frozen=True)
 class PredecessorAccounts:
@@ -115,19 +113,17 @@ class BriefCompiler:
             if skills_section:
                 layers.append(skills_section)
 
-        # Layer 3: Tiered Memory by Distance from Asa (Axiom 8)
-        if role.tier == TierLevel.TIER_0:
+        # Layer 3: Context by Role Profile (Axiom 8)
+        rname = role.name.lower()
+        if rname in ("secretary", "voice"):
             scorecard_txt = ""
             if self.scorecard and hasattr(self.scorecard, "get_summary"):
                 scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
-            layers.append(f"# Personal Memory (Tier 0)\n{self.tier0_context}\n\n# Project Context (Tier 1)\n{self.tier1_context}{scorecard_txt}")
-        elif role.tier == TierLevel.TIER_1:
-            layers.append(f"# Project Context (Tier 1)\n{self.tier1_context}")
-        elif role.tier == TierLevel.TIER_2:
-            layers.append("# Operational Scope (Tier 2)\nYou are a sandboxed worker. Focus strictly on the assigned task.")
-        else:  # Tier 3
-            layers.append("# Operational Scope (Tier 3)\nYou are a task-scoped leaf worker. Focus strictly on the assigned brief.")
-
+            layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
+        elif rname in ("engineer", "scout", "architect", "recon"):
+            layers.append(f"# Project Context\n{self.tier1_context}")
+        else:  # python_developer, reviewer, builder, etc.
+            layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
         # Layer 4: Predecessor Accounts (Axiom 9)
         if predecessor:
             rendered_pred = predecessor.render()

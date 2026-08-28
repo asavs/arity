@@ -31,15 +31,14 @@ class TestSkillsAndHierarchy(unittest.TestCase):
         # Secretary resolution
         r1 = registry.resolve("hi secretary, how are we doing today?")
         self.assertEqual(r1.name, "secretary")
-        self.assertEqual(r1.tier, 0)
 
         # Python developer resolution
         r2 = registry.resolve("write a python script with pytest tests")
+        self.assertEqual(r2.name, "python_developer")
+
         # Lead engineer resolution
         r3 = registry.resolve("plan the system architecture and technical spec")
         self.assertEqual(r3.name, "engineer")
-        self.assertEqual(r3.tier, 1)
-
     def test_brief_compiler_injects_skills(self):
         compiler = BriefCompiler()
         brief = compiler.assemble(

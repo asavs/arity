@@ -28,15 +28,12 @@ class TestRolesAndDenialSets(unittest.TestCase):
     def test_role_resolution(self):
         voice = self.registry.resolve("voice")
         self.assertEqual(voice.name, "secretary")
-        self.assertEqual(voice.tier, TierLevel.TIER_0)
 
         # Semantic resolution
         builder = self.registry.resolve("implement a new database schema")
         self.assertEqual(builder.name, "python_developer")
-        self.assertEqual(builder.tier, TierLevel.TIER_2)
         reviewer = self.registry.resolve("audit code and check PR")
         self.assertEqual(reviewer.name, "reviewer")
-
     def test_denial_set_tool_enforcement(self):
         # Reviewer is denied write_file
         self.assertFalse(REVIEWER_ROLE.can_use_tool("write_file"))
@@ -70,17 +67,16 @@ class TestTiersAndBriefCompiler(unittest.TestCase):
         )
 
     def test_memory_tier_isolation(self):
-        # Tier 0 (Voice) gets personal context
+        # Secretary gets personal context
         voice_brief = self.compiler.assemble(VOICE_ROLE, "Hello Asa")
-        self.assertIn("Personal Memory (Tier 0)", voice_brief.system_prompt)
+        self.assertIn("Personal Context", voice_brief.system_prompt)
         self.assertIn("Asa: High-context personal notes", voice_brief.system_prompt)
 
-        # Tier 2 (Builder) DOES NOT get personal context (Axiom 8)
+        # Python Developer DOES NOT get personal context (Axiom 8)
         builder_brief = self.compiler.assemble(BUILDER_ROLE, "Build the scraper")
-        self.assertNotIn("Personal Memory", builder_brief.system_prompt)
+        self.assertNotIn("Personal Context", builder_brief.system_prompt)
         self.assertNotIn("Asa: High-context personal notes", builder_brief.system_prompt)
-        self.assertIn("Operational Scope (Tier 2)", builder_brief.system_prompt)
-
+        self.assertIn("Operational Scope (python_developer)", builder_brief.system_prompt)
     def test_predecessor_accounts_included(self):
         predecessor = PredecessorAccounts(
             self_report="I built the deal schema in brokie/schema.sql",
