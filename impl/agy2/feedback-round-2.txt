@@ -1,0 +1,44 @@
+Relay report, round 2. Syntax: syntax ok. Demo output (last 60 lines, verbatim):
+============================================================
+GORKBOT v0 DEMO - PLAYING 5 STORIES
+============================================================
+
+--- STORY 1 (S1): Voice DM, Builder Handoff & Archivist Audit ---
+[Asa -> Voice]: make a tiny brokie schema: one table `deals` with name, vendor, free_tier, url. write it to brokie/schema.sql
+[Voice -> Builder Handoff]: Task status=done
+[Builder Self-Report]: * **What I was doing:** Creating the initial database schema file for the `brokie` project.
+* **What I changed and why:** Created `brokie/schema.sql` defining a single `deals` table (`name`, `vendor`, `free_tier`, `url`) to establish the requested minimal data structure for free tier deals.
+* **What's open:** Adding primary key/id columns, indexes, data migration tools, and populating initial seed data.
+* **Last known safe state:** `brokie/schema.sql` written with valid SQL table structure.
+* **Advice for next developer:** Add an `id INTEGER PRIMARY KEY` (or UUID) and timestamp columns before hooking this up to a backend API or ORM.
+[Archivist Entry Summary]: Kernel k_0001 (builder on gemini-3.6-flash) ended by 'task done'. Verified 1/1 changes.
+[Archivist Verified Changes]: [{'claim': 'write brokie/schema.sql', 'verified': True, 'on_disk': True, 'in_tool_log': True}]
+[Voice -> Asa Phone Brief]: "Builder wrote the brokie deals schema with 1 verified table in schema.sql."
+
+--- STORY 2 (S3): Sporadic Cadence Keeps Warm Kernel ---
+[Turn 1]: Spawned k_0002 on seat gemini-3.6-flash, cache_expires_in=299.8s
+[Turn 2]: Cast returned kernel k_0002. Warm kernel retained: True
+
+--- STORY 3 (S36): Seat Presence Live Avoidance ---
+[Presence Update]: Marked seat seat_0001 (gemini-3.6-flash) presence=True (Asa typing)
+[Fresh Cast]: Selected seat=seat_0002 (gemini-3.5-flash-lite), presence=False
+
+--- STORY 4 (S7): Normal Report vs Forced Quota Wall (ABSENT) & Standing Drop ---
+[Normal Die]: Report present=True, flags=['UNVERIFIED_CLAIM: brokie/schema.sql`.']
+[Quota Wall Die]: Report present=False, flags=['REPORT_ABSENT: quota wall hit']
+[Scorecard]: Initial scout standing=0.70
+[Archivist Audit of False Claim]: flags=['UNVERIFIED_CLAIM: phantom_unreal.py']
+[Scorecard]: Updated scout standing after false claim=0.49 (DROPPED)
+
+--- STORY 5 (S39): Pulse Heartbeat ('hi luv u') & Quiet Eviction ---
+[Pulse Tick 1 (Warm cache worth keeping)]: [{'kernel_id': 'k_0002', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'luv u too, standing by.'}, {'kernel_id': 'k_0003', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'Hello! Right back at you. How can I help you today?'}, {'kernel_id': 'k_0006', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'luv u too, standing by.'}, {'kernel_id': 'k_0007', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'Love you too! What are we diving into today?'}]
+[Pulse Tick 2 (Cache expired / cold)]: [{'kernel_id': 'k_0002', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'luv u too, standing by.'}, {'kernel_id': 'k_0003', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'Aww, thank you! How are you doing today? What can I help you with?'}, {'kernel_id': 'k_0006', 'action': 'keepalive', 'ping': 'hi luv u', 'reply': 'Hi! Ready whenever you are. How can I help with the task today?'}, {'kernel_id': 'k_0007', 'action': 'let_go', 'reason': 'quiet'}]
+
+============================================================
+DEMO EXECUTION COMPLETE
+Total Model Calls:     13
+Total Prompt Tokens:   1421
+Total Completion Tokens:570
+============================================================
+
+If anything is wrong, return ONLY the files that need to change as `=== FILE: <name> ===` blocks with complete contents. If the demo ran correctly end to end, reply exactly DONE.

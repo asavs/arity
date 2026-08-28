@@ -2,6 +2,12 @@
 __pycache__/
 impl/*/__pycache__/
 impl/*/state/
+impl/*/run/
 impl/*/workspace/
+impl/*/*.log
+impl/*/*.ts
+impl/*/turn-*.json
+impl/*/round-*.json
+impl/*/promptC.txt
 impl/blind/
 impl/glean.json
