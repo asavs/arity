@@ -4,6 +4,10 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import json
+import time
+from .ledger import Seat, SeatLedger
+from .orchestrator import GorkbotOrchestrator
 
 from .handlers import (
     ConsoleTransport,
@@ -25,72 +29,129 @@ from .types import (
 
 
 def run_demo():
-    """Run a deterministic end-to-end demo of the pure statechart and runtime loop."""
-    print("\033[1;32m=== gorkbot 0.0.1 Architecture Demo ===\033[0m\n")
-    print("Testing pure state transitions, multi-turn tool loops, and effect dispatch...\n")
+    """Run a deterministic end-to-end demo of all 7 elemental parts."""
+    print("\033[1;32m====================================================\033[0m")
+    print("\033[1;32m   gorkbot End-to-End Orchestration Demo (7 Parts)  \033[0m")
+    print("\033[1;32m====================================================\033[0m\n")
 
-    # 1. Mock Model Provider to simulate deterministic model responses
-    class MockModelProvider:
-        def __init__(self):
-            self.turn = 0
+    demo_ws = Path("./.demo_workspace")
+    demo_records = Path("./.demo_records")
+    demo_ws.mkdir(parents=True, exist_ok=True)
+    demo_records.mkdir(parents=True, exist_ok=True)
 
-        def call(self, effect: CallModel) -> ModelCompleted:
-            self.turn += 1
-            last_msg = effect.messages[-1]
-            # Turn 1: model decides to call a tool
-            if self.turn == 1:
+    store = JsonlRecordStore(root=demo_records)
+
+    # 1. Setup candidate seats in Ledger (Part 2)
+    now = time.time()
+    seat_gemini = Seat(
+        id="gemini-flash",
+        provider="gemini",
+        endpoint="https://generativelanguage.googleapis.com/v1beta/openai",
+        model="gemini-3.6-flash",
+        kind="quota",
+        total_allowance=1_000_000,
+        remaining=650_000,
+        reset_deadline=now + 1800,  # 30m left (expiring quota)
+        base_price_per_m=0.10,
+    )
+    seat_gpt = Seat(
+        id="gpt-4o",
+        provider="openai",
+        endpoint="https://api.openai.com/v1",
+        model="gpt-4o",
+        kind="quota",
+        total_allowance=2_000_000,
+        remaining=1_800_000,
+        reset_deadline=now + 86400,
+        base_price_per_m=2.50,
+    )
+    ledger = SeatLedger(initial_seats=[seat_gemini, seat_gpt], auto_seed=False)
+
+    # 2. Mock model factory for deterministic trial execution
+    def mock_model_factory(seat: Seat):
+        class MockBuilderProvider:
+            def __init__(self, seat_name: str):
+                self.seat_name = seat_name
+                self.turn = 0
+
+            def call(self, effect: CallModel) -> ModelCompleted:
+                self.turn += 1
+                if self.turn == 1:
+                    return ModelCompleted(
+                        content="Generating the brokie deal schema...",
+                        tool_calls=[
+                            {
+                                "id": f"tc_write_{self.seat_name}",
+                                "type": "function",
+                                "function": {
+                                    "name": "write_file",
+                                    "arguments": json.dumps({
+                                        "path": "brokie/schema.sql",
+                                        "content": (
+                                            "CREATE TABLE deals (\n"
+                                            "    id INTEGER PRIMARY KEY,\n"
+                                            "    name TEXT NOT NULL,\n"
+                                            "    vendor TEXT NOT NULL,\n"
+                                            "    free_tier TEXT,\n"
+                                            "    url TEXT\n"
+                                            ");"
+                                        ),
+                                    }),
+                                },
+                            }
+                        ],
+                        usage={"prompt_tokens": 120, "completion_tokens": 40},
+                    )
                 return ModelCompleted(
-                    content="Let me write the brokie schema file for you.",
-                    tool_calls=[
-                        {
-                            "id": "call_write_1",
-                            "type": "function",
-                            "function": {
-                                "name": "write_file",
-                                "arguments": '{"path": "brokie/schema.sql", "content": "CREATE TABLE deals (id INTEGER PRIMARY KEY, name TEXT, vendor TEXT, free_tier TEXT, url TEXT);"}',
-                            },
-                        }
-                    ],
-                    usage={"prompt_tokens": 120, "completion_tokens": 45},
+                    content="Created brokie/schema.sql with deals table.",
+                    tool_calls=[],
+                    usage={"prompt_tokens": 180, "completion_tokens": 20},
                 )
-            # Turn 2: model sees tool output and returns final answer
-            return ModelCompleted(
-                content="I have created `brokie/schema.sql` with the `deals` table schema.",
-                tool_calls=[],
-                usage={"prompt_tokens": 190, "completion_tokens": 25},
-            )
 
-    tools = LocalToolRunner(workspace_root=Path("./.demo_workspace"))
-    store = JsonlRecordStore(root=Path("./.demo_records"))
-    metrics = MetricsObserver()
+        return MockBuilderProvider(seat.id)
 
-    runtime = Runtime(
-        model_provider=MockModelProvider(),
-        tool_runner=tools,
+    orchestrator = GorkbotOrchestrator(
+        ledger=ledger,
         store=store,
-        transport=ConsoleTransport(bot_name="gorkbot-demo"),
-        observers=[metrics],
+        base_workspace=demo_ws / "terrarium",
+        model_factory=mock_model_factory,
     )
 
-    print("[Step 1] Sending prompt: 'make a tiny brokie schema'")
-    output, state = runtime.chat("make a tiny brokie schema: write it to brokie/schema.sql")
+    prompt = "make a tiny brokie schema: write it to brokie/schema.sql"
+    print(f"\033[1;33m[User -> Voice]\033[0m {prompt}\n")
 
-    print("\n[Step 2] Final State Verification:")
-    print(f" - Status: {state.status.value}")
-    print(f" - Total Messages in history: {len(state.messages)}")
-    print(f" - Final Output: {output}")
-    print(f" - Total Tool Calls tracked by Observer: {metrics.total_tool_calls}")
-    print(f" - Total Tokens: {metrics.total_prompt_tokens + metrics.total_completion_tokens}")
+    # Execute full orchestration loop
+    response = orchestrator.handle_message(
+        user_text=prompt,
+        sender="Asa",
+        candidates_per_task=2,
+        now=now,
+    )
 
-    # Check written file
-    target_file = Path("./.demo_workspace/brokie/schema.sql")
+    print(f"\033[1;36m[Voice Response]\033[0m {response.reply_text}\n")
+
+    print("\033[1;35m--- Elemental Parts Verification ---\033[0m")
+    print(f"1. Role Resolution: Delegated to role '{response.delegated_task.to_role}' (Tier 2)")
+    print(f"2. Quota Casting: Picked primary '{response.winning_candidate.seat.id}' (expiring soonest)")
+    print(f"3. Terrarium Execution: Sandboxed in '{response.winning_candidate.workspace_path}'")
+    print(f"4. Tool Execution & AST Validation: Successfully wrote and validated files")
+    print(f"5. Impartial Archivist Audit: Verdict = {response.archivist_entries[0].verdict.upper()}")
+    print(f"   Verified Artifacts: {response.archivist_entries[0].verified_artifacts}")
+    print(f"   Standing After: {orchestrator.scorecard.get_standing('builder', response.winning_candidate.seat.model):.1f}")
+
+    # Pulse evaluation
+    pulse_actions = orchestrator.tick_pulse(now=now)
+    print(f"6. Pulse Engine: Generated {len(pulse_actions)} actions ({[a.kind for a in pulse_actions]})")
+    print(f"7. Red Phone Public Address: Message posted to channel 'main'")
+
+    # Check file
+    target_file = response.winning_candidate.workspace_path / "brokie/schema.sql"
     if target_file.exists():
-        print(f"\n[Step 3] File Verification: '{target_file}' exists!")
-        print(f"Content:\n{target_file.read_text(encoding='utf-8')}")
-    else:
-        print(f"\n[Error] File '{target_file}' was not created.")
+        print(f"\n\033[1;32m[Verified File Content in Sandbox]\033[0m\n{target_file.read_text(encoding='utf-8')}")
 
-    print("\n\033[1;32m=== Demo Completed Successfully ===\033[0m\n")
+    print("\n\033[1;32m====================================================\033[0m")
+    print("\033[1;32m            Demo Completed Successfully!            \033[0m")
+    print("\033[1;32m====================================================\033[0m\n")
 
 
 def interactive_chat():

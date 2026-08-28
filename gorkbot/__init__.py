@@ -39,6 +39,8 @@ from .tools import (
 from .scorecard import Scorecard, ScorecardRecord
 from .archivist import ArchivistEntry, ImpartialArchivist
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
+from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
+from .orchestrator import GorkbotOrchestrator, OrchestrationResponse
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -149,4 +151,11 @@ __all__ = [
     "PulseAction",
     "CacheEconomics",
     "CadenceModel",
+    # Transports & Red Phone
+    "RedphoneInbox",
+    "RedphoneMessage",
+    "WebhookTransport",
+    # Orchestrator
+    "GorkbotOrchestrator",
+    "OrchestrationResponse",
 ]
