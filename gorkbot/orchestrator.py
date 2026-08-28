@@ -74,7 +74,7 @@ class GorkbotOrchestrator:
         self.archivist = archivist or ImpartialArchivist(scorecard=self.scorecard, store=self.store)
         self.composer = CastingComposer(ledger=self.ledger)
         self.pulse = pulse or PulseEngine()
-        self.inbox = inbox or RedphoneInbox()
+        self.inbox = inbox or RedphoneInbox(store=self.store)
         self.transport = transport or ConsoleTransport()
         self.base_workspace = Path(base_workspace) if base_workspace else Path(".terrarium")
 
