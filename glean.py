@@ -71,7 +71,7 @@ def adherence(d: Path) -> dict:
 def outcome(d: Path) -> dict:
     o: dict = dict(demo_ran=None, model_calls=None, demo_tokens=None, tracebacks=0, tool_results=0, tool_failures=0,
                    demo_attempts=0, wall_s=None, house_tokens=None, saw_ground_truth=None, empty_runs=0)
-    logs = list(d.glob("run*.log")) + list(d.glob("demo.log"))
+    logs = list(d.glob("run*.log")) + sorted(d.glob("demo*.log")) + sorted(d.glob("turn*.json")) + sorted(d.glob("round*.json"))
     text = ""
     for p in logs:
         t = p.read_text(encoding="utf-8", errors="replace"); text += "\n" + t
@@ -84,24 +84,30 @@ def outcome(d: Path) -> dict:
     o["tool_calls"] = len(re.findall(r"^exec$", text, re.M))
     m = re.search(r"tokens used\s*\n?\s*([\d,]+)", text)
     if m: o["house_tokens"] = int(m.group(1).replace(",", ""))
-    for p in d.glob("run*.log"):     # antigravity: one JSON object, possibly with a trailer after it
+    for p in list(d.glob("run*.log")) + list(d.glob("turn*.json")) + list(d.glob("round*.json")):   # antigravity: JSON with usage, maybe a trailer
         try:
             j, _ = json.JSONDecoder().raw_decode(p.read_text(encoding="utf-8", errors="replace").lstrip())
             u = j.get("usage") or {}
             tot = u.get("total_tokens") or u.get("total") or (int(u.get("input_tokens") or u.get("input") or 0) + int(u.get("output_tokens") or u.get("output") or 0))
             if tot: o["house_tokens"] = (o["house_tokens"] or 0) + int(tot)
         except Exception: pass
-    m = re.search(r"model_calls=(\d+)\s+tokens=(\d+)|(\d+) model calls,\s*(\d+) tokens", text)
-    if m:
-        o["demo_ran"] = True
-        o["model_calls"] = int(m.group(1) or m.group(3)); o["demo_tokens"] = int(m.group(2) or m.group(4))
-    elif (d / "demo.log").exists() or o["demo_attempts"]:
+    # the last demo log that printed a totals line wins; formats vary by house
+    finals = re.findall(r"model_calls=(\d+)\s+tokens=(\d+)|(\d+) model calls,\s*(\d+) tokens|Total Model Calls:\s*(\d+)[\s\S]{0,120}?Tokens:\s*(\d+)", text)
+    if finals:
+        g = finals[-1]; o["demo_ran"] = True
+        o["model_calls"] = int(g[0] or g[2] or g[4]); o["demo_tokens"] = int(g[1] or g[3] or g[5])
+    elif list(d.glob("demo*.log")) or o["demo_attempts"]:
         o["demo_ran"] = False
+    o["demo_attempts"] = o["demo_attempts"] or len(list(d.glob("demo-round*.log")))
+    # relay-observed wall clock: start/end .ts files are canonical; a RELAY.md wall column is the fallback
     ts = sorted(d.glob("start*.ts")), sorted(d.glob("end*.ts"))
     try:
         if ts[0] and ts[1]:
             s = float(ts[0][0].read_text().strip()); e = float(ts[1][-1].read_text().strip()); o["wall_s"] = round(e - s)
     except Exception: pass
+    if o["wall_s"] is None and (d / "RELAY.md").exists():
+        cells = re.findall(r"\|\s*([\d.]+)\s*\|\s*$", (d / "RELAY.md").read_text(encoding="utf-8", errors="replace"), re.M)
+        if cells: o["wall_s"] = round(sum(float(c) for c in cells)); o["wall_source"] = "RELAY.md"
     o["saw_ground_truth"] = "Ground truth" in text or "<!-- ===== .wiki" in text
     return o
 
