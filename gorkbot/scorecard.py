@@ -116,6 +116,14 @@ class Scorecard:
                 model_name = key[len(prefix):]
                 models.append((model_name, score))
         return sorted(models, key=lambda x: x[1], reverse=True)
+    def get_summary(self) -> str:
+        """Return a formatted summary of top-rated models by role and skill."""
+        if not self._standings:
+            return "No historical ratings recorded yet (all models at baseline 10.0 pts)."
+        lines = []
+        for k, v in sorted(self._standings.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"• {k}: {v:.1f} pts")
+        return "\n".join(lines[:8])
 
     def _load_from_store(self) -> None:
         """Replay past scorecard records to restore standing state."""

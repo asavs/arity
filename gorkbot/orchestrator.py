@@ -69,8 +69,8 @@ class GorkbotOrchestrator:
         self.store = store or JsonlRecordStore()
         self.ledger = ledger or SeatLedger()
         self.roles = roles or RoleRegistry()
-        self.compiler = compiler or BriefCompiler()
         self.scorecard = scorecard or Scorecard(store=self.store)
+        self.compiler = compiler or BriefCompiler(scorecard=self.scorecard)
         self.archivist = archivist or ImpartialArchivist(scorecard=self.scorecard, store=self.store)
         self.composer = CastingComposer(ledger=self.ledger, scorecard=self.scorecard)
         self.pulse = pulse or PulseEngine()
@@ -183,17 +183,27 @@ class GorkbotOrchestrator:
             func=deploy_subagent,
         )
 
+        voice_casting = self.composer.cast(
+            role=SECRETARY_ROLE,
+            task=user_text,
+            candidates_count=1,
+            now=curr_time,
+        )
+        voice_seat = voice_casting.primary_seat
+        voice_model_provider = self.terrarium._model_factory(voice_seat)
+
         voice_brief = self.compiler.assemble(
             role=SECRETARY_ROLE,
             task=user_text,
-            provider="openai",
-            endpoint="https://api.openai.com/v1",
-            model="gpt-4o",
+            provider=voice_seat.provider,
+            endpoint=voice_seat.endpoint,
+            model=voice_seat.model,
             session_id="voice_main",
             all_tools=voice_tool_runner.get_schemas(),
         )
 
         voice_runtime = Runtime(
+            model_provider=voice_model_provider,
             tool_runner=voice_tool_runner,
             store=self.store,
             transport=self.transport,

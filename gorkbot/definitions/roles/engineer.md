@@ -6,16 +6,15 @@ skills:
   - firecrawl-developer-index
   - scout-recon
 allowed_tools:
-  - read_file
-  - search
-  - search_files
-  - list_directory
   - web_search
   - fetch_url
-  - handoff
+  - read_file
+  - list_directory
+  - search_files
   - deploy_subagent
 denied_tools:
-  - drop_database
+  - write_file
+  - run_command
 denied_paths:
   - .ssh
   - id_rsa

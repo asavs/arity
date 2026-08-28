@@ -1,16 +1,17 @@
 ---
 name: reviewer
 description: Read-only code auditor and test verifier.
-tier: 2
+tier: 3
 skills:
   - pytest-tdd
 allowed_tools:
   - read_file
-  - run_command
-  - search_files
   - list_directory
+  - search_files
+  - run_command
 denied_tools:
   - write_file
+  - deploy_subagent
 denied_paths:
   - .ssh
   - id_rsa

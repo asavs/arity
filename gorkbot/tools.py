@@ -295,6 +295,21 @@ class SandboxToolRunner(ToolRunner):
             func=search_files,
         )
 
+        # Alias search -> search_files for seamless backward compatibility
+        self.register(
+            name="search",
+            description="Alias for search_files.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "path": {"type": "string", "description": "Starting relative path", "default": "."},
+                },
+                "required": ["pattern"],
+            },
+            func=search_files,
+        )
+
         def fetch_url(url: str, timeout: int = 15) -> str:
             import urllib.request
             from html.parser import HTMLParser

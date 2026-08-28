@@ -60,14 +60,13 @@ class TestModelProviders(unittest.TestCase):
         p1 = create_model_provider(seat_gemini)
         self.assertIsInstance(p1, GeminiModelProvider)
 
-        seat_codex = Seat(id="s2", provider="codex", endpoint="", model="gpt-5.6-sol")
-        p2 = create_model_provider(seat_codex)
+        seat_claude = Seat(id="s2", provider="claude", endpoint="", model="claude-3-7-sonnet")
+        p2 = create_model_provider(seat_claude)
         self.assertIsInstance(p2, CLIModelProvider)
 
-        seat_openai = Seat(id="s3", provider="openai", endpoint="https://api.openai.com/v1", model="gpt-4o")
-        p3 = create_model_provider(seat_openai)
+        seat_custom = Seat(id="s3", provider="custom-api", endpoint="https://api.openai.com/v1", model="gpt-4o")
+        p3 = create_model_provider(seat_custom)
         self.assertIsInstance(p3, OpenAIModelProvider)
-
 
 if __name__ == "__main__":
     unittest.main()
