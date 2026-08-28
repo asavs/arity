@@ -1,0 +1,326 @@
+"""Standard-library default handlers for gorkbot seams.
+
+Zero third-party dependencies. Built purely on Python 3.13 stdlib.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from .seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
+from .types import (
+    CallModel,
+    Effect,
+    EmitMessage,
+    Event,
+    ExecuteTool,
+    ModelCompleted,
+    ModelFailed,
+    State,
+    StoreRecord,
+    ToolCompleted,
+)
+
+
+# -----------------------------------------------------------------------------
+# 1. Model Provider (OpenAI-compatible /chat/completions over stdlib urllib)
+# -----------------------------------------------------------------------------
+
+@dataclass
+class OpenAIModelProvider:
+    """Calls any OpenAI-compatible /chat/completions endpoint using standard library urllib."""
+    api_key: Optional[str] = None
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
+    timeout: float = 60.0
+
+    def __post_init__(self):
+        if not self.api_key:
+            self.api_key = (
+                os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("OPENROUTER_API_KEY")
+                or os.environ.get("GEMINI_API_KEY")
+                or ""
+            )
+
+    def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "gorkbot/0.0.1",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": effect.messages,
+            "temperature": effect.temperature,
+        }
+        if effect.tools:
+            payload["tools"] = effect.tools
+        if effect.max_tokens:
+            payload["max_tokens"] = effect.max_tokens
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw_body = resp.read().decode("utf-8")
+                res = json.loads(raw_body)
+                choice = res.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                content = message.get("content")
+                tool_calls = message.get("tool_calls", [])
+                usage = res.get("usage", {})
+                finish_reason = choice.get("finish_reason", "stop")
+
+                return ModelCompleted(
+                    content=content,
+                    tool_calls=tool_calls,
+                    usage=usage,
+                    finish_reason=finish_reason,
+                    seat_id=f"{self.base_url}:{self.model}",
+                )
+
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            retryable = e.code in (429, 500, 502, 503, 504)
+            return ModelFailed(
+                error=f"HTTP {e.code}: {err_body}",
+                seat_id=f"{self.base_url}:{self.model}",
+                retryable=retryable,
+            )
+        except Exception as e:
+            return ModelFailed(
+                error=f"Request failed: {str(e)}",
+                seat_id=f"{self.base_url}:{self.model}",
+                retryable=True,
+            )
+
+
+# -----------------------------------------------------------------------------
+# 2. Local Tool Runner (Stdlib filesystem and command execution)
+# -----------------------------------------------------------------------------
+
+class LocalToolRunner:
+    """Registry and executor for local python functions and tools."""
+
+    def __init__(self, workspace_root: Optional[Path] = None):
+        self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
+        self._tools: dict[str, Callable[..., str]] = {}
+        self._schemas: list[dict[str, Any]] = []
+        self._register_defaults()
+
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters: dict[str, Any],
+        func: Callable[..., str],
+    ):
+        """Register a custom tool function with JSON schema."""
+        self._tools[name] = func
+        self._schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        })
+
+    def get_schemas(self) -> list[dict[str, Any]]:
+        return list(self._schemas)
+
+    def execute(self, effect: ExecuteTool) -> ToolCompleted:
+        func = self._tools.get(effect.name)
+        if not func:
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output=f"Error: Unknown tool '{effect.name}'",
+                is_error=True,
+            )
+
+        try:
+            out = func(**effect.arguments)
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output=str(out),
+                is_error=False,
+            )
+        except Exception as e:
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output=f"Execution error: {str(e)}",
+                is_error=True,
+            )
+
+    def _register_defaults(self):
+        """Register standard baseline tools: read_file, write_file, run_command."""
+
+        def read_file(path: str, offset: int = 1, limit: int = 100) -> str:
+            target = (self.workspace_root / path).resolve()
+            if not target.exists():
+                return f"Error: File '{path}' does not exist."
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            start = max(0, offset - 1)
+            end = start + limit
+            sliced = lines[start:end]
+            numbered = [f"{start + i + 1}: {line}" for i, line in enumerate(sliced)]
+            return "\n".join(numbered)
+
+        self.register(
+            name="read_file",
+            description="Read lines from a file in the workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path to file"},
+                    "offset": {"type": "integer", "description": "1-based starting line", "default": 1},
+                    "limit": {"type": "integer", "description": "Max lines to read", "default": 100},
+                },
+                "required": ["path"],
+            },
+            func=read_file,
+        )
+
+        def write_file(path: str, content: str) -> str:
+            target = (self.workspace_root / path).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return f"Successfully wrote {len(content)} bytes to {path}"
+
+        self.register(
+            name="write_file",
+            description="Write full text content to a file in the workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path to file"},
+                    "content": {"type": "string", "description": "Text content to write"},
+                },
+                "required": ["path", "content"],
+            },
+            func=write_file,
+        )
+
+        def run_command(command: str, timeout: int = 30) -> str:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(self.workspace_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            out = proc.stdout
+            if proc.stderr:
+                out += f"\n[stderr]\n{proc.stderr}"
+            if proc.returncode != 0:
+                out += f"\n[exit code: {proc.returncode}]"
+            return out or "(no output)"
+
+        self.register(
+            name="run_command",
+            description="Run a shell command inside the workspace directory.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
+                },
+                "required": ["command"],
+            },
+            func=run_command,
+        )
+
+
+# -----------------------------------------------------------------------------
+# 3. JSONL Record Store (Append-only persistence)
+# -----------------------------------------------------------------------------
+
+class JsonlRecordStore:
+    """Simple append-only JSONL record store."""
+
+    def __init__(self, root: Optional[Path] = None):
+        self.root = Path(root) if root else Path(".gorkbot/records")
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, kind: str) -> Path:
+        return self.root / f"{kind}.jsonl"
+
+    def append(self, effect: StoreRecord) -> None:
+        rec = dict(effect.record)
+        rec.setdefault("timestamp", time.time())
+        p = self._path(effect.kind)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+
+    def query(self, kind: str, **filters: Any) -> list[dict[str, Any]]:
+        p = self._path(kind)
+        if not p.exists():
+            return []
+        results = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                if all(row.get(k) == v for k, v in filters.items()):
+                    results.append(row)
+            except Exception:
+                continue
+        return results
+
+
+# -----------------------------------------------------------------------------
+# 4. Console Transport (Terminal formatting)
+# -----------------------------------------------------------------------------
+
+class ConsoleTransport:
+    """Prints incoming and outgoing messages to stdout with styling."""
+
+    def __init__(self, bot_name: str = "gorkbot"):
+        self.bot_name = bot_name
+
+    def emit(self, effect: EmitMessage) -> None:
+        if effect.text:
+            print(f"\n\033[1;36m[{self.bot_name}]\033[0m {effect.text}\n")
+
+
+# -----------------------------------------------------------------------------
+# 5. Metrics & Audit Observer
+# -----------------------------------------------------------------------------
+
+@dataclass
+class MetricsObserver:
+    """Tracks token counts, tool calls, and event flow for telemetry/evals."""
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tool_calls: int = 0
+    events_seen: int = 0
+    effects_seen: int = 0
+
+    def on_event(self, state: State, event: Event) -> None:
+        self.events_seen += 1
+        if isinstance(event, ModelCompleted) and event.usage:
+            self.total_prompt_tokens += event.usage.get("prompt_tokens", 0)
+            self.total_completion_tokens += event.usage.get("completion_tokens", 0)
+        if isinstance(event, ToolCompleted):
+            self.total_tool_calls += 1
+
+    def on_effect(self, state: State, effect: Effect) -> None:
+        self.effects_seen += 1
