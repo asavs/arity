@@ -47,19 +47,18 @@ class SandboxToolRunner(ToolRunner):
         workspace_root: Optional[Path] = None,
         role: Optional[Role] = None,
         timeout: int = 30,
-        search_engine: str = "stdlib",  # "stdlib" | "tinyfish" | "auto"
-        tinyfish_api_key: Optional[str] = None,
+        custom_tools: Optional[dict[str, Callable[..., str]]] = None,
     ):
         self.workspace_root = (Path(workspace_root) if workspace_root else Path.cwd()).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.role = role
         self.timeout = timeout
-        self.search_engine = search_engine
-        self.tinyfish_api_key = tinyfish_api_key or os.environ.get("TINYFISH_API_KEY")
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_default_tools()
-
+        if custom_tools:
+            for name, func in custom_tools.items():
+                self._custom_tools[name] = func
     def register(
         self,
         name: str,
@@ -348,58 +347,11 @@ class SandboxToolRunner(ToolRunner):
         )
 
         def web_search(query: str, limit: int = 5) -> str:
-            import urllib.request, urllib.parse, json
-
-            # Engine B: TinyFish Search (if configured or key present)
-            if self.search_engine == "tinyfish" or (self.search_engine == "auto" and self.tinyfish_api_key):
-                if not self.tinyfish_api_key:
-                    return "TinyFish Error: TINYFISH_API_KEY required for tinyfish search engine."
-                url = f"https://api.search.tinyfish.ai?query={urllib.parse.quote(query)}"
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        "User-Agent": "arity/0.1.2",
-                        "X-API-Key": self.tinyfish_api_key,
-                    },
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        items = data.get("results", []) or data.get("items", [])
-                        results = []
-                        for idx, it in enumerate(items[:limit]):
-                            results.append(
-                                f"{idx+1}. **{it.get('title', 'Result')}**\n"
-                                f"   {it.get('snippet', it.get('description', ''))}\n"
-                                f"   URL: {it.get('url', '')}"
-                            )
-                        return "\n\n".join(results) or f"TinyFish returned no results for '{query}'."
-                except Exception as e:
-                    if self.search_engine == "tinyfish":
-                        return f"TinyFish search error: {e}"
-                    # Fallback to stdlib if in auto mode
-
-            # Engine A: Stdlib GitHub & Open Source Skill Search
-            url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
-            req = urllib.request.Request(url, headers={"User-Agent": "arity/0.1.2"})
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    items = data.get("items", [])[:limit]
-                    results = []
-                    for idx, it in enumerate(items):
-                        results.append(
-                            f"{idx+1}. **{it['full_name']}** (⭐ {it['stargazers_count']})\n"
-                            f"   {it.get('description', '')}\n"
-                            f"   URL: {it['html_url']}"
-                        )
-                    return "\n\n".join(results) or f"No results found for '{query}'."
-            except Exception as e:
-                return f"Search error for '{query}': {e}"
+            return stdlib_github_search(query, limit)
 
         self.register(
             name="web_search",
-            description="Search the web and GitHub for repositories, skills, and documentation (Supports stdlib and TinyFish engines).",
+            description="Search the web and GitHub for repositories, skills, and documentation.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -410,7 +362,61 @@ class SandboxToolRunner(ToolRunner):
             },
             func=web_search,
         )
-# MCP (Model Context Protocol) Tool Adapter
+
+
+# -----------------------------------------------------------------------------
+# Standalone Swappable Search Providers (Pluggable Seam Components)
+# -----------------------------------------------------------------------------
+
+def stdlib_github_search(query: str, limit: int = 5) -> str:
+    """Stdlib GitHub repository & skill search (zero dependencies)."""
+    import urllib.request, urllib.parse, json
+    url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
+    req = urllib.request.Request(url, headers={"User-Agent": "arity/0.1.2"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("items", [])[:limit]
+            results = []
+            for idx, it in enumerate(items):
+                results.append(
+                    f"{idx+1}. **{it['full_name']}** (⭐ {it['stargazers_count']})\n"
+                    f"   {it.get('description', '')}\n"
+                    f"   URL: {it['html_url']}"
+                )
+            return "\n\n".join(results) or f"No results found for '{query}'."
+    except Exception as e:
+        return f"Search error for '{query}': {e}"
+
+
+def tinyfish_search(query: str, limit: int = 5, api_key: Optional[str] = None) -> str:
+    """TinyFish Search API provider (structured JSON for AI agents)."""
+    import urllib.request, urllib.parse, json
+    key = api_key or os.environ.get("TINYFISH_API_KEY")
+    if not key:
+        return "TinyFish Error: TINYFISH_API_KEY required for tinyfish search engine."
+    url = f"https://api.search.tinyfish.ai?query={urllib.parse.quote(query)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "arity/0.1.2",
+            "X-API-Key": key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("results", []) or data.get("items", [])
+            results = []
+            for idx, it in enumerate(items[:limit]):
+                results.append(
+                    f"{idx+1}. **{it.get('title', 'Result')}**\n"
+                    f"   {it.get('snippet', it.get('description', ''))}\n"
+                    f"   URL: {it.get('url', '')}"
+                )
+            return "\n\n".join(results) or f"TinyFish returned no results for '{query}'."
+    except Exception as e:
+        return f"TinyFish search error: {e}"
 # -----------------------------------------------------------------------------
 
 class McpToolAdapter(ToolRunner):
