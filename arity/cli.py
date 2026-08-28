@@ -269,6 +269,90 @@ def show_roles():
     print("\033[1;35m====================================================\033[0m\n")
 
 
+def handle_auth_command(args: argparse.Namespace) -> None:
+    """Handle arity auth subcommands."""
+    from .auth import (
+        TokenStore,
+        fetch_antigravity_quota,
+        login_google_antigravity,
+        login_openai_codex,
+        login_xai_grok,
+    )
+    store = TokenStore()
+    action = getattr(args, "auth_action", "status") or "status"
+
+    if action == "status":
+        creds = store.load_all() or store.discover_external_credentials()
+        print("\n\033[1;36m================== Arity Auth Status ==================\033[0m")
+        if not creds:
+            print("  No saved or discovered credentials found.")
+            print("  Run \033[1;33marity auth login <google|openai|xai>\033[0m or \033[1;33marity auth import\033[0m.")
+        else:
+            for prov, data in creds.items():
+                email = data.get("email", "unknown")
+                proj = data.get("projectId") or data.get("accountId") or "N/A"
+                expires = data.get("expires")
+                exp_str = "No expiry recorded"
+                if expires:
+                    exp_sec = float(expires) / 1000.0 if float(expires) > 10_000_000_000 else float(expires)
+                    remaining_min = int((exp_sec - time.time()) / 60)
+                    exp_str = f"Expires in {remaining_min}m" if remaining_min > 0 else "Expired (Auto-refreshable)"
+                print(f"  \033[1m{prov}\033[0m")
+                print(f"    - Email / Identity: {email}")
+                print(f"    - Project / Account: {proj}")
+                print(f"    - Token Status: \033[1;32m{exp_str}\033[0m")
+
+                # Check live quota for Google Antigravity
+                if "google-antigravity" in prov and data.get("access") and data.get("projectId"):
+                    try:
+                        quota = fetch_antigravity_quota(data["access"], data["projectId"])
+                        if quota:
+                            gemini_q = quota.get("gemini-3-flash-agent", {}).get("remainingFraction")
+                            claude_q = quota.get("claude-sonnet-4-6", {}).get("remainingFraction")
+                            if gemini_q is not None or claude_q is not None:
+                                g_str = f"{int(gemini_q*100)}%" if gemini_q is not None else "N/A"
+                                c_str = f"{int(claude_q*100)}%" if claude_q is not None else "N/A"
+                                print(f"    - Live Quota: \033[1;34mGemini 3: {g_str}\033[0m | \033[1;35mClaude: {c_str}\033[0m")
+                    except Exception:
+                        pass
+        print("\033[1;36m=========================================================\033[0m\n")
+    elif action == "import":
+        print("\n\033[1;36m[Arity Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
+        imported = store.import_all()
+        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into ~/.arity/auth.json:")
+        for p in imported:
+            print(f"  - {p}")
+        print()
+
+    elif action == "login":
+        provider = (getattr(args, "provider", "") or "").lower()
+        if provider in ("google", "agy", "antigravity"):
+            login_google_antigravity()
+        elif provider in ("openai", "codex", "chatgpt"):
+            login_openai_codex()
+        elif provider in ("xai", "grok"):
+            login_xai_grok()
+        else:
+            print(f"\033[1;31m[Error]\033[0m Unknown provider '{provider}'. Choose from: google, openai, xai.")
+
+    elif action == "logout":
+        provider = (getattr(args, "provider", "") or "").lower()
+        # Map friendly name to key
+        prov_map = {
+            "google": "google-antigravity",
+            "agy": "google-antigravity",
+            "antigravity": "google-antigravity",
+            "openai": "openai-codex",
+            "codex": "openai-codex",
+            "xai": "xai-oauth",
+            "grok": "xai-oauth",
+        }
+        key = prov_map.get(provider, provider)
+        if store.delete_credential(key):
+            print(f"\033[1;32m[Arity Auth]\033[0m Removed credential for '{key}'.")
+        else:
+            print(f"\033[1;33m[Arity Auth]\033[0m No saved credential found for '{key}'.")
+
 def main():
     parser = argparse.ArgumentParser(description="arity 0.1.2 CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -288,6 +372,16 @@ def main():
 
     run_parser = subparsers.add_parser("run", help="Run a single prompt through the orchestrator")
     run_parser.add_argument("prompt", type=str, help="Prompt text")
+    auth_parser = subparsers.add_parser("auth", help="Manage OAuth subscriptions and credentials")
+    auth_subparsers = auth_parser.add_subparsers(dest="auth_action")
+    auth_subparsers.add_parser("status", help="Show active credentials and expiry status")
+    auth_subparsers.add_parser("import", help="Auto-import active sessions from OMP and Codex")
+    
+    login_cmd = auth_subparsers.add_parser("login", help="Authenticate with a provider")
+    login_cmd.add_argument("provider", type=str, choices=["google", "agy", "openai", "codex", "xai", "grok"], help="Provider to authenticate")
+    
+    logout_cmd = auth_subparsers.add_parser("logout", help="Log out from a provider")
+    logout_cmd.add_argument("provider", type=str, help="Provider to remove")
 
     args = parser.parse_args()
 
@@ -301,6 +395,8 @@ def main():
         show_skills()
     elif args.command == "roles":
         show_roles()
+    elif args.command == "auth":
+        handle_auth_command(args)
     elif args.command == "lock":
         orchestrator = ArityOrchestrator()
         orchestrator.ledger.set_presence(args.seat_id, True)
@@ -320,7 +416,6 @@ def main():
             print(resp.reply_text)
     else:
         run_demo()
-
 
 if __name__ == "__main__":
     main()

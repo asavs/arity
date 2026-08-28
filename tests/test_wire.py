@@ -6,11 +6,13 @@ from arity.handlers import CLIModelProvider
 from arity.ledger import Seat
 from arity.types import CallModel, ModelCompleted, ModelFailed
 from arity.wire import (
+    AntigravityWireProvider,
     CodexWireProvider,
     FallbackModelProvider,
     GrokWireProvider,
     create_wire_model_provider,
 )
+
 
 
 class TestWireProviders(unittest.TestCase):
@@ -56,6 +58,47 @@ class TestWireProviders(unittest.TestCase):
             self.assertEqual(res.usage["prompt_tokens"], 10)
             self.assertEqual(res.usage["completion_tokens"], 5)
 
+
+    def test_antigravity_wire_provider_gemini(self):
+        provider = AntigravityWireProvider(
+            access_token="mock_token",
+            project_id="mock_proj",
+            model="gemini-3.6-flash",
+        )
+        effect = CallModel(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Gemini via AGY!"}]}}], "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 6, "totalTokenCount": 14}}}'
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            res = provider.call(effect)
+            self.assertIsInstance(res, ModelCompleted)
+            self.assertEqual(res.content, "Hello from Gemini via AGY!")
+            self.assertEqual(res.seat_id, "wire:antigravity:gemini-3-flash-agent")
+            self.assertEqual(res.usage["total_tokens"], 14)
+
+    def test_antigravity_wire_provider_claude(self):
+        provider = AntigravityWireProvider(
+            access_token="mock_token",
+            project_id="mock_proj",
+            model="claude-sonnet-4-6",
+        )
+        effect = CallModel(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Claude via AGY!"}]}}], "usageMetadata": {"totalTokenCount": 20}}}'
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            res = provider.call(effect)
+            self.assertIsInstance(res, ModelCompleted)
+            self.assertEqual(res.content, "Hello from Claude via AGY!")
+            self.assertEqual(res.seat_id, "wire:antigravity:claude-sonnet-4-6")
     def test_fallback_provider_swaps_on_failure(self):
         primary = MagicMock()
         primary.call.return_value = ModelFailed(error="HTTP 401 Unauthorized", seat_id="primary", retryable=True)
