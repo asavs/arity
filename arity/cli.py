@@ -155,16 +155,16 @@ def run_demo():
 
 
 def interactive_chat():
-    """Run an interactive console chat with real model endpoints."""
-    print("\033[1;36m=== arity 0.0.1 Interactive Session ===\033[0m")
+    """Run an interactive console chat with the full ArityOrchestrator."""
+    print("\033[1;36m=== arity 0.0.1 Interactive Session (The Voice & Terrarium) ===\033[0m")
+    print("Direct conversation with The Voice. Delegations automatically spawn Terrarium trials.\n")
     print("Type your message (or 'exit' / 'quit' to stop).\n")
 
-    runtime = Runtime()
-    state = State(session_id="cli_interactive", system_prompt="You are arity, a helpful and precise assistant.")
+    orchestrator = ArityOrchestrator()
 
     while True:
         try:
-            user_input = input("\033[1;33mYou:\033[0m ").strip()
+            user_input = input("\033[1;33mAsa:\033[0m ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
@@ -172,29 +172,98 @@ def interactive_chat():
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
 
-        runtime.run(state, initial_event=UserMessage(text=user_input))
+        resp = orchestrator.handle_message(user_text=user_input, sender="Asa")
+        if resp.delegated_task and resp.winning_candidate:
+            print(f"\n\033[1;35m[Delegation]\033[0m Task routed to \033[1m{resp.delegated_task.to_role}\033[0m on seat \033[1m{resp.winning_candidate.seat.id}\033[0m")
+            print(f"\033[1;32m[Archivist]\033[0m Verdict: {resp.archivist_entries[0].verdict.upper()} ({resp.archivist_entries[0].details})")
+            if resp.winning_candidate.output:
+                print(f"\033[1;36m[Output]\033[0m\n{resp.winning_candidate.output}\n")
+        elif resp.reply_text:
+            print(f"\n\033[1;36m[The Voice]\033[0m {resp.reply_text}\n")
 
+
+def show_status():
+    """Display real-time seat health, wire latency, and scorecard standings."""
+    orchestrator = ArityOrchestrator()
+    print("\033[1;36m====================================================\033[0m")
+    print("\033[1;36m            arity System Health & Status          \033[0m")
+    print("\033[1;36m====================================================\033[0m\n")
+
+    print("\033[1;33m[1. Active Seats & Wire Status]\033[0m")
+    for s in orchestrator.ledger.list_seats():
+        status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
+        print(f"  • {s.id:15} | {s.provider:12} | {s.model:25} | {status_str} | ${s.base_price_per_m:.4f}/M")
+
+    print("\n\033[1;33m[2. Empirical Scorecard Standings (Axiom 9)]\033[0m")
+    standings = getattr(orchestrator.scorecard, "_standings", {})
+    if standings:
+        for k, v in sorted(standings.items()):
+            print(f"  • {k:30} : {v:.1f} pts")
+    else:
+        print("  • No historical penalties or bonuses recorded yet (baseline: 10.0 pts)")
+
+    print("\n\033[1;33m[3. Red Phone Ingress / Outbox (Axiom 10)]\033[0m")
+    channels = getattr(orchestrator.inbox, "_channels", {})
+    if channels:
+        for ch, msgs in channels.items():
+            print(f"  • Channel '{ch}': {len(msgs)} messages pending")
+    else:
+        print("  • All red phone channels clear.")
+
+    print("\n\033[1;36m====================================================\033[0m\n")
+
+
+def show_redphone():
+    """Inspect Red Phone channels and messages."""
+    orchestrator = ArityOrchestrator()
+    print("\033[1;35m====================================================\033[0m")
+    print("\033[1;35m       Red Phone Public Address Channel Log         \033[0m")
+    print("\033[1;35m====================================================\033[0m\n")
+
+    recent = orchestrator.inbox.list_recent(limit=15)
+    if not recent:
+        print("  • No messages recorded in Red Phone channels yet.\n")
+        return
+
+    for m in recent:
+        ch = m.get("channel", "main")
+        sender = m.get("sender", "user")
+        text = m.get("text", "")
+        ts = time.strftime("%H:%M:%S", time.localtime(m.get("timestamp", time.time())))
+        print(f"  \033[1;33m[{ts}] [{ch}]\033[0m \033[1m{sender}\033[0m: {text}")
+    print("\n\033[1;35m====================================================\033[0m\n")
 
 def main():
     parser = argparse.ArgumentParser(description="arity 0.0.1 CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("demo", help="Run the architectural demo")
-    subparsers.add_parser("chat", help="Start an interactive chat session")
+    subparsers.add_parser("chat", help="Start an interactive chat session with The Voice")
+    subparsers.add_parser("status", help="Show seat health, scorecard, and wire status")
+    subparsers.add_parser("redphone", help="Inspect Red Phone channels")
 
-    run_parser = subparsers.add_parser("run", help="Run a single prompt")
+    run_parser = subparsers.add_parser("run", help="Run a single prompt through the orchestrator")
     run_parser.add_argument("prompt", type=str, help="Prompt text")
 
     args = parser.parse_args()
 
-    if args.command == "demo" or len(sys.argv) == 1:
+    if args.command == "demo":
         run_demo()
     elif args.command == "chat":
         interactive_chat()
+    elif args.command == "status":
+        show_status()
+    elif args.command == "redphone":
+        show_redphone()
     elif args.command == "run":
-        runtime = Runtime()
-        out, _ = runtime.chat(args.prompt)
-        print(out)
+        orchestrator = ArityOrchestrator()
+        resp = orchestrator.handle_message(user_text=args.prompt, sender="Asa")
+        if resp.delegated_task and resp.winning_candidate and resp.winning_candidate.output:
+            print(resp.winning_candidate.output)
+        elif resp.reply_text:
+            print(resp.reply_text)
+    else:
+        run_demo()
 
 
 if __name__ == "__main__":
