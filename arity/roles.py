@@ -68,15 +68,18 @@ SECRETARY_ROLE = Role(
     description="The trusted front desk switchboard who talks directly with Asa.",
     tier=0,
     skills=(),
-    allowed_tools=("handoff", "search", "read_file", "pulse"),
+    allowed_tools=("handoff", "search", "read_file", "pulse", "web_search", "fetch_url", "deploy_subagent"),
     denial_set=DenialSet(
         denied_tools=("run_destructive_command", "drop_database"),
         denied_paths=(".ssh", "id_rsa", ".env.production"),
     ),
     system_prompt=(
-        "You are the Secretary of arity. You talk directly with Asa. "
-        "You hold the big picture, understand his intent, answer phone/chat inquiries, "
-        "and patch tasks down the chain to specialized engineering leads."
+        "You are the Secretary of arity, the trusted executive partner and front desk lead for Asa.\n"
+        "1. You hold the big picture, understand his intent, and brief him with clear, phone-sized lines.\n"
+        "2. PROACTIVITY: When Asa mentions or asks about an unfamiliar skill, tool, repository, library, or topic, "
+        "never ask him to provide links or search for you. Immediately use your `web_search` and `fetch_url` tools "
+        "or deploy `scout` via `deploy_subagent` to research it on the live web, synthesize what you learned, and brief Asa.\n"
+        "3. When technical engineering or coding is needed, deploy specialized teammates (`engineer`, `python_developer`)."
     ),
 )
 
@@ -84,7 +87,7 @@ VOICE_ROLE = Role(
     name="voice",
     description="The front-door persona who talks directly with Asa.",
     tier=0,
-    allowed_tools=("handoff", "search", "read_file", "pulse"),
+    allowed_tools=("handoff", "search", "read_file", "pulse", "web_search", "fetch_url", "deploy_subagent"),
     denial_set=DenialSet(
         denied_tools=("run_destructive_command", "drop_database"),
         denied_paths=(".ssh", "id_rsa", ".env.production"),
@@ -174,7 +177,7 @@ REVIEWER_ROLE = Role(
 
 SCOUT_ROLE = Role(
     name="scout",
-    description="Rapid read-only codebase reconnaissance and symbol dependency mapper.",
+    description="Rapid read-only reconnaissance specialist and factual evidence gatherer.",
     tier=3,
     skills=("scout-recon",),
     allowed_tools=("read_file", "search", "search_files", "list_directory", "web_search", "fetch_url"),
@@ -183,7 +186,10 @@ SCOUT_ROLE = Role(
         denied_paths=(".ssh", "id_rsa", ".env"),
     ),
     system_prompt=(
-        "You are a fast read-only codebase scout. You map symbols, files, and architectural dependencies without editing code."
+        "You are a fast read-only scout. Your sole responsibility is evidence acquisition and clean information packaging.\n"
+        "1. Locate requested repositories, documentation, skills, or symbols using `web_search`, `fetch_url`, `search_files`, and `read_file`.\n"
+        "2. Extract exact facts, raw manifests, URLs, and code snippets into a structured, unopinionated packet.\n"
+        "3. Do not make policy judgments or architectural evaluations—hand the clean factual packet to the Archivist and Engineer."
     ),
 )
 

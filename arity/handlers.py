@@ -153,6 +153,20 @@ class GeminiModelProvider:
         if effect.max_tokens:
             payload["generationConfig"]["maxOutputTokens"] = effect.max_tokens
 
+        # Convert OpenAI tools format to Gemini functionDeclarations format
+        if effect.tools:
+            function_decls = []
+            for t in effect.tools:
+                fn = t.get("function", {})
+                if fn:
+                    function_decls.append({
+                        "name": fn.get("name"),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                    })
+            if function_decls:
+                payload["tools"] = [{"functionDeclarations": function_decls}]
+
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
 
@@ -163,7 +177,23 @@ class GeminiModelProvider:
                 candidates = res.get("candidates", [{}])
                 candidate = candidates[0] if candidates else {}
                 parts = candidate.get("content", {}).get("parts", [])
-                text = "".join(p.get("text", "") for p in parts)
+
+                text_parts = []
+                tool_calls = []
+                import uuid
+                for idx, p in enumerate(parts):
+                    if "text" in p and p["text"]:
+                        text_parts.append(p["text"])
+                    if "functionCall" in p:
+                        fc = p["functionCall"]
+                        tool_calls.append({
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "function",
+                            "function": {
+                                "name": fc.get("name"),
+                                "arguments": json.dumps(fc.get("args", {})),
+                            },
+                        })
 
                 usage_meta = res.get("usageMetadata", {})
                 usage = {
@@ -172,13 +202,12 @@ class GeminiModelProvider:
                 }
 
                 return ModelCompleted(
-                    content=text,
-                    tool_calls=[],
+                    content="".join(text_parts) if text_parts else None,
+                    tool_calls=tool_calls,
                     usage=usage,
                     finish_reason=candidate.get("finishReason", "STOP").lower(),
                     seat_id=f"gemini:{self.model}",
                 )
-
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
             retryable = e.code in (429, 500, 502, 503, 504)

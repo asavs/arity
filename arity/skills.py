@@ -81,10 +81,10 @@ SCOUT_RECON_SKILL = Skill(
 
 
 class SkillRegistry:
-    """Discovers and registers skills from built-ins and directory manifests."""
+    """Discovers and registers skills from built-ins, project .arity/skills, and global ~/.arity/skills."""
 
     def __init__(self, skills_dir: Optional[Path] = None):
-        self.skills_dir = Path(skills_dir) if skills_dir else Path("skills")
+        self.skills_dir = Path(skills_dir) if skills_dir else Path(".arity/skills")
         self._skills: dict[str, Skill] = {}
         self._register_defaults()
         self._discover_from_disk()
@@ -94,30 +94,30 @@ class SkillRegistry:
             self.register(sk)
 
     def _discover_from_disk(self) -> None:
-        """Scan skills_dir for skills/*/SKILL.md or skills/*.md."""
-        if not self.skills_dir.exists():
-            return
-
-        for path in self.skills_dir.rglob("*.md"):
-            try:
-                name = path.parent.name if path.name == "SKILL.md" else path.stem
-                content = path.read_text(encoding="utf-8")
-                # Parse markdown header and description
-                lines = content.splitlines()
-                title = lines[0].replace("#", "").strip() if lines else name
-                desc = lines[1].strip() if len(lines) > 1 else ""
-                body = "\n".join(lines[2:]).strip() if len(lines) > 2 else content
-
-                self.register(
-                    Skill(
-                        name=name,
-                        description=desc or title,
-                        instructions=body,
-                        tags=("disk",),
-                    )
-                )
-            except Exception:
+        """Scan .arity/skills and ~/.arity/skills for skill manifests."""
+        search_dirs = [self.skills_dir, Path.home() / ".arity" / "skills"]
+        for sdir in search_dirs:
+            if not sdir.exists():
                 continue
+            for path in sdir.rglob("*.md"):
+                try:
+                    name = path.parent.name if path.name == "SKILL.md" else path.stem
+                    content = path.read_text(encoding="utf-8")
+                    lines = content.splitlines()
+                    title = lines[0].replace("#", "").strip() if lines else name
+                    desc = lines[1].strip() if len(lines) > 1 else ""
+                    body = "\n".join(lines[2:]).strip() if len(lines) > 2 else content
+
+                    self.register(
+                        Skill(
+                            name=name,
+                            description=desc or title,
+                            instructions=body,
+                            tags=("installed",),
+                        )
+                    )
+                except Exception:
+                    continue
 
     def install(
         self,
