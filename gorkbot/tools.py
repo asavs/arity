@@ -347,7 +347,7 @@ class SandboxToolRunner(ToolRunner):
         )
 
         def web_search(query: str, limit: int = 5) -> str:
-            return stdlib_github_search(query, limit)
+            return smart_web_search(query, limit)
 
         self.register(
             name="web_search",
@@ -363,6 +363,21 @@ class SandboxToolRunner(ToolRunner):
             func=web_search,
         )
 
+
+# -----------------------------------------------------------------------------
+# Smart Tool Routing & Pluggable Providers (The Tool Seam)
+# -----------------------------------------------------------------------------
+
+def smart_web_search(query: str, limit: int = 5) -> str:
+    """Smart router for web search: checks available API keys, routes to best engine, with zero-dep fallback."""
+    # 1. If TinyFish API key is present, try TinyFish first
+    if os.environ.get("TINYFISH_API_KEY"):
+        res = tinyfish_search(query, limit)
+        if not res.startswith("TinyFish Error") and not res.startswith("TinyFish search error"):
+            return res
+
+    # 2. Fallback to stdlib GitHub and web search (always available, 0-dep)
+    return stdlib_github_search(query, limit)
 
 # -----------------------------------------------------------------------------
 # Standalone Swappable Search Providers (Pluggable Seam Components)
