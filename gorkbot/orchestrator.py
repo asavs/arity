@@ -43,11 +43,15 @@ from .types import (
 class OrchestrationResponse:
     """The complete response from an orchestrated interaction."""
     reply_text: str
-    voice_state: State
+    session_state: State
     delegated_task: Optional[TaskRecord] = None
     winning_candidate: Optional[TerrariumCandidateResult] = None
     archivist_entries: list[ArchivistEntry] = field(default_factory=list)
 
+    @property
+    def voice_state(self) -> State:
+        """Backward-compatible alias for session_state."""
+        return self.session_state
 
 class GorkbotOrchestrator:
     """The master coordinator uniting all 7 elemental parts."""
@@ -86,7 +90,7 @@ class GorkbotOrchestrator:
             model_factory=model_factory,
         )
 
-        self._last_voice_session: Optional[State] = None
+        self._last_session: Optional[State] = None
         self._last_turn_time: float = time.time()
         self._last_predecessors: dict[str, PredecessorAccounts] = {}
 
@@ -98,41 +102,38 @@ class GorkbotOrchestrator:
         candidates_per_task: int = 1,
         now: Optional[float] = None,
     ) -> OrchestrationResponse:
-        """Process an incoming user message through the full end-to-end pipeline."""
+        """Process an incoming message through the unified kernel runtime."""
         curr_time = now if now is not None else time.time()
         self._last_turn_time = curr_time
 
-        # 1. Post to red phone inbox
+        # 1. Post to red phone public address (Axiom 10)
         self.inbox.post(channel=channel, sender=sender, text=user_text)
 
-        # 2. Check if this is a direct task delegation request (e.g. build, write, fix)
+        # 2. Resolve target role (default: Secretary / Voice)
         target_role = self.roles.resolve(user_text)
 
-        # If user asked for an engineering/building/review task, trigger terrarium delegation
-        if target_role.tier > 0:
+        # 3. Cast candidate seat(s) based on role aptitude, quota, and evidence (Axiom 3)
+        casting = self.composer.cast(
+            role=target_role,
+            task=user_text,
+            candidates_count=candidates_per_task,
+            now=curr_time,
+        )
+
+        # 4. Multi-candidate trial or direct single-kernel turn
+        if candidates_per_task > 1 or target_role.tier > 0:
             task_record = TaskRecord(
-                from_role="voice",
+                from_role="user" if target_role.tier == 0 else "secretary",
                 to_role=target_role.name,
                 brief=user_text,
                 predecessor=self._last_predecessors.get(target_role.name),
             )
 
-            # Cast candidate seats (Axiom 3)
-            casting = self.composer.cast(
-                role=target_role,
-                task=user_text,
-                candidates_count=candidates_per_task,
-                now=curr_time,
-            )
-
-            # Run candidate kernels in parallel sandboxes (Axiom 3 Corollary)
             candidate_results = self.terrarium.dispatch_parallel(
                 task=task_record,
                 candidate_seats=casting.candidates,
                 role=target_role,
             )
-
-            # Archivist audits execution and picks verified winner (Axiom 9)
             winner, archivist_entries = self.archivist.evaluate_trial(candidate_results)
 
             if winner and winner.self_report:
@@ -141,101 +142,65 @@ class GorkbotOrchestrator:
                     archivist_entry=archivist_entries[0].entry_text if archivist_entries else None,
                 )
 
-            reply = (
-                f"Task delegated to '{target_role.name}' ({winner.seat.model if winner else 'none'}). "
-                f"Archivist verdict: {archivist_entries[0].verdict.upper() if archivist_entries else 'DONE'}. "
-                f"Output: {winner.output if winner else 'No output'}"
-            )
-
-            voice_state = State(session_id="voice_main", role="voice", status=Status.IDLE)
-            voice_state.output = reply
+            output_text = winner.output if (winner and winner.output) else "(no output)"
+            session_state = winner.final_state if winner else State(session_id=f"sess_{target_role.name}")
+            self._last_session = session_state
 
             return OrchestrationResponse(
-                reply_text=reply,
-                voice_state=voice_state,
+                reply_text=output_text,
+                session_state=session_state,
                 delegated_task=task_record,
                 winning_candidate=winner,
                 archivist_entries=archivist_entries,
             )
 
-        # Otherwise, handle as direct conversation with The Secretary (Tier 0)
-        voice_tool_runner = SandboxToolRunner(role=SECRETARY_ROLE)
+        # 5. Direct single conversational kernel (Tier 0)
+        primary_seat = casting.primary_seat
+        tool_runner = SandboxToolRunner(role=target_role)
 
-        # Add deploy_subagent capability for The Secretary to dispatch specialists
-        def deploy_subagent(role_name: str, brief: str) -> str:
-            sub_role = self.roles.resolve(role_name)
-            sub_task = TaskRecord(from_role="secretary", to_role=sub_role.name, brief=brief)
-            casting = self.composer.cast(role=sub_role, task=brief, candidates_count=1, now=curr_time)
-            sub_res = self.terrarium.dispatch_single(task=sub_task, seat=casting.primary_seat, role=sub_role)
-            return sub_res.output or f"[{sub_role.name} completed]"
-
-        voice_tool_runner.register(
-            name="deploy_subagent",
-            description="Deploy a specialist agent (e.g. 'scout', 'engineer', 'python_developer') to run a task and report back.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "role_name": {"type": "string", "description": "Role to deploy (scout, engineer, python_developer)"},
-                    "brief": {"type": "string", "description": "Task brief for the specialist"},
-                },
-                "required": ["role_name", "brief"],
-            },
-            func=deploy_subagent,
-        )
-
-        voice_casting = self.composer.cast(
-            role=SECRETARY_ROLE,
+        brief = self.compiler.assemble(
+            role=target_role,
             task=user_text,
-            candidates_count=1,
-            now=curr_time,
-        )
-        voice_seat = voice_casting.primary_seat
-        voice_model_provider = self.terrarium._model_factory(voice_seat)
-
-        voice_brief = self.compiler.assemble(
-            role=SECRETARY_ROLE,
-            task=user_text,
-            provider=voice_seat.provider,
-            endpoint=voice_seat.endpoint,
-            model=voice_seat.model,
-            session_id="voice_main",
-            all_tools=voice_tool_runner.get_schemas(),
+            provider=primary_seat.provider,
+            endpoint=primary_seat.endpoint,
+            model=primary_seat.model,
+            session_id=f"{target_role.name}_main",
+            all_tools=tool_runner.get_schemas(),
         )
 
-        voice_runtime = Runtime(
-            model_provider=voice_model_provider,
-            tool_runner=voice_tool_runner,
+        model_provider = self.terrarium._model_factory(primary_seat)
+        runtime = Runtime(
+            model_provider=model_provider,
+            tool_runner=tool_runner,
             store=self.store,
             transport=self.transport,
         )
 
-        voice_state = State(
-            session_id="voice_main",
-            role="secretary",
-            system_prompt=voice_brief.system_prompt,
-            active_tools=voice_brief.filtered_tools,
+        state = State(
+            session_id=f"{target_role.name}_main",
+            role=target_role.name,
+            system_prompt=brief.system_prompt,
+            active_tools=brief.filtered_tools,
         )
-        final_state = voice_runtime.run(voice_state, initial_event=UserMessage(text=user_text, sender=sender))
-        self._last_voice_session = final_state
+        final_state = runtime.run(state, initial_event=UserMessage(text=user_text, sender=sender))
+        self._last_session = final_state
         return OrchestrationResponse(
             reply_text=final_state.output or "(no output)",
-            voice_state=final_state,
+            session_state=final_state,
         )
-
     def tick_pulse(self, now: Optional[float] = None) -> list[PulseAction]:
         """Execute a pulse cycle (keepalives + expiring quota checks)."""
         curr_time = now if now is not None else time.time()
         actions: list[PulseAction] = []
 
-        # 1. Evaluate Voice session keepalive
-        if self._last_voice_session:
+        # 1. Evaluate Secretary session keepalive
+        if self._last_session:
             idle_seconds = curr_time - self._last_turn_time
-            # Get default voice seat
-            voice_seats = self.ledger.list_available(now=curr_time)
-            if voice_seats:
-                seat = voice_seats[0]
+            available_seats = self.ledger.list_available(now=curr_time)
+            if available_seats:
+                seat = available_seats[0]
                 action = self.pulse.evaluate_session(
-                    session_id=self._last_voice_session.session_id,
+                    session_id=self._last_session.session_id,
                     seat=seat,
                     seconds_idle=idle_seconds,
                     prefix_tokens=2000,
