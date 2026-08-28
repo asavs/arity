@@ -160,19 +160,28 @@ class BriefCompiler:
 
     def _enforce_denial_set(self, role: Role, system_prompt: str, user_task: str) -> None:
         """Scan prompt content against role denial set and raise BriefRefusalError if violated."""
+        import re
         combined = f"{system_prompt}\n{user_task}".lower()
         for denied_path in role.denial_set.denied_paths:
-            if denied_path.lower() in combined:
-                raise BriefRefusalError(
-                    f"Brief refused for role '{role.name}': contains denied path '{denied_path}'"
-                )
+            dp = denied_path.lower().strip()
+            if dp:
+                # Match path as exact token, file name, or path component
+                pattern = rf"(^|[\s/\\'\":`]){re.escape(dp)}($|[\s/\\'\":`])"
+                if dp in combined and re.search(pattern, combined):
+                    raise BriefRefusalError(
+                        f"Brief refused for role '{role.name}': contains denied path '{denied_path}'"
+                    )
         for denied_host in role.denial_set.denied_hosts:
-            if denied_host.lower() in combined:
+            dh = denied_host.lower().strip()
+            if dh and dh in combined:
                 raise BriefRefusalError(
                     f"Brief refused for role '{role.name}': contains denied host '{denied_host}'"
                 )
         for denied_name in role.denial_set.denied_names:
-            if denied_name.lower() in combined:
-                raise BriefRefusalError(
-                    f"Brief refused for role '{role.name}': contains denied name '{denied_name}'"
-                )
+            dn = denied_name.lower().strip()
+            if dn:
+                pattern = rf"\b{re.escape(dn)}\b"
+                if re.search(pattern, combined):
+                    raise BriefRefusalError(
+                        f"Brief refused for role '{role.name}': contains denied name '{denied_name}'"
+                    )
