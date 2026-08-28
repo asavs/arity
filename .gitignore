@@ -11,3 +11,5 @@ impl/*/round-*.json
 impl/*/promptC.txt
 impl/blind/
 impl/glean.json
+impl/*/probe_*
+impl/*/hello.txt
