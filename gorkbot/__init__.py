@@ -36,6 +36,8 @@ from .tools import (
     SyntaxValidationError,
     resolve_sandbox_path,
 )
+from .scorecard import Scorecard, ScorecardRecord
+from .archivist import ArchivistEntry, ImpartialArchivist
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -136,4 +138,9 @@ __all__ = [
     "PathTraversalError",
     "SyntaxValidationError",
     "resolve_sandbox_path",
+    # Archivist & Scorecard
+    "Scorecard",
+    "ScorecardRecord",
+    "ArchivistEntry",
+    "ImpartialArchivist",
 ]
