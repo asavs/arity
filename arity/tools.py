@@ -368,11 +368,28 @@ class SandboxToolRunner(ToolRunner):
 # Smart Tool Routing & Pluggable Providers (The Tool Seam)
 # -----------------------------------------------------------------------------
 
+def get_config_value(key: str) -> Optional[str]:
+    """Resolve configuration value from environment or .arity/config.json."""
+    val = os.environ.get(key)
+    if val:
+        return val
+    for p in (Path(".arity/config.json"), Path.home() / ".arity" / "config.json"):
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if key in data and data[key]:
+                    return str(data[key])
+            except Exception:
+                pass
+    return None
+
+
 def smart_web_search(query: str, limit: int = 5) -> str:
     """Smart router for web search: checks available API keys, routes to best engine, with zero-dep fallback."""
     # 1. If TinyFish API key is present, try TinyFish first
-    if os.environ.get("TINYFISH_API_KEY"):
-        res = tinyfish_search(query, limit)
+    tinyfish_key = get_config_value("TINYFISH_API_KEY")
+    if tinyfish_key:
+        res = tinyfish_search(query, limit, api_key=tinyfish_key)
         if not res.startswith("TinyFish Error") and not res.startswith("TinyFish search error"):
             return res
 

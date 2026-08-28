@@ -8,7 +8,8 @@ from arity.types import ExecuteTool
 
 class TestSearchEngines(unittest.TestCase):
     def test_stdlib_github_search_engine(self):
-        runner = SandboxToolRunner()
+        from arity.tools import stdlib_github_search
+        runner = SandboxToolRunner(custom_tools={"web_search": stdlib_github_search})
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"items": [{"full_name": "DietrichGebert/ponytail", "stargazers_count": 2500, "description": "Lazy senior dev skill", "html_url": "https://github.com/DietrichGebert/ponytail"}]}'
         mock_resp.__enter__.return_value = mock_resp
