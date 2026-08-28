@@ -51,8 +51,9 @@ class Scorecard:
         task_id: str,
         verdict: str,
         details: str = "",
+        skills: Optional[list[str]] = None,
     ) -> ScorecardRecord:
-        """Update model standing based on archivist verdict."""
+        """Update model standing based on archivist verdict across role and skills."""
         if verdict == "success":
             delta = +1.0
         elif verdict == "discrepancy":
@@ -68,6 +69,13 @@ class Scorecard:
         new_standing = max(0.0, current + delta)
         self._standings[key] = new_standing
 
+        # Update skill-specific standings (e.g. skill:python-development)
+        if skills:
+            for sk in skills:
+                sk_key = self._key(f"skill:{sk}", model)
+                sk_current = self._standings.get(sk_key, 10.0)
+                self._standings[sk_key] = max(0.0, sk_current + delta)
+
         record = ScorecardRecord(
             model=model,
             role=role,
@@ -77,7 +85,6 @@ class Scorecard:
             standing_after=new_standing,
             details=details,
         )
-
         if self.store:
             try:
                 self.store.append(

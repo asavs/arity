@@ -1,4 +1,4 @@
-# arity (0.1.1)
+# arity (0.1.2)
 
 A composable statechart chassis for autonomous AI agents.
 

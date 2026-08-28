@@ -101,15 +101,16 @@ class ImpartialArchivist:
             f"- **Findings**: {details}"
         )
 
-        # 4. Record verdict in scorecard
+        # 4. Record verdict in scorecard across role and skills
+        skills_list = list(getattr(result.role, "skills", ()))
         self.scorecard.record_verdict(
             role=role,
             model=model,
             task_id=task_id,
             verdict=verdict,
             details=details,
+            skills=skills_list,
         )
-
         # 5. Persist archivist entry in store
         if self.store:
             try:
