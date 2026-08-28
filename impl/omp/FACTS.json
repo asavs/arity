@@ -1,0 +1,13 @@
+{
+  "hands": "full (omp tools, approval-mode write)",
+  "cost_usd": 0.0,
+  "wrote_outside_dir": false,
+  "model": "gemini-3.7-flash-tiered",
+  "effort": "high",
+  "harness": "omp -p (reads brief itself)",
+  "provider_auth": "Antigravity OAuth via omp (subscription seat, $0)",
+  "saw_ground_truth": true,
+  "house_tokens": 477633,
+  "house_cache_read_tokens": 8633581,
+  "note": "one shot; ran demo itself; also wrote test_system.py; self-reported 1,057 lines vs 1,114 measured"
+}
