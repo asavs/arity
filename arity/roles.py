@@ -171,15 +171,19 @@ class RoleRegistry:
                 except Exception:
                     continue
 
-        # Setup fallback alias mappings if specific file is not loaded
-        if "voice" not in self._roles and "secretary" in self._roles:
+        # Setup clean alias mappings to canonical roles
+        if "secretary" in self._roles:
             self._roles["voice"] = self._roles["secretary"]
-        if "builder" not in self._roles and "python_developer" in self._roles:
+        if "python_developer" in self._roles:
             self._roles["builder"] = self._roles["python_developer"]
-        if "architect" not in self._roles and "engineer" in self._roles:
+            self._roles["coder"] = self._roles["python_developer"]
+        if "engineer" in self._roles:
             self._roles["architect"] = self._roles["engineer"]
-        if "reviewer" not in self._roles and "tester" in self._roles:
-            self._roles["reviewer"] = self._roles["tester"]
+        if "reviewer" in self._roles:
+            self._roles["tester"] = self._roles["reviewer"]
+            self._roles["auditor"] = self._roles["reviewer"]
+        if "scout" in self._roles:
+            self._roles["recon"] = self._roles["scout"]
     def register(self, role: Role) -> None:
         self._roles[role.name.lower()] = role
 
