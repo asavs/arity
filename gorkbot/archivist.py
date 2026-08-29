@@ -39,6 +39,13 @@ class ArchivistEntry:
     signature: Optional[str] = None
     test_results: Optional[dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
+    # Filled by evaluate_trial(): composite score, 1-based rank, and the candidate_ids
+    # this entry is statistically tied with (empty when the ranking is decisive).
+    score: float = 0.0
+    rank: int = 0
+    tied_with: list[str] = field(default_factory=list)
+    tie_break: Optional[str] = None
+
 
 class ImpartialArchivist:
     """Audits kernel execution traces and maintains the scorecard."""
@@ -192,31 +199,53 @@ class ImpartialArchivist:
         for r in results:
             entry = self.audit(r)
             entries.append(entry)
+            entry.score = self.composite_score(r, entry)
+            scored_candidates.append((r, entry, entry.score))
 
-            # Composite score calculation:
-            # 1. Base verdict score
-            if entry.verdict == "success":
-                score = 100.0 - (r.tokens_used / 1000.0) - (r.duration_seconds * 2.0)
-                # Bonus for passed unit tests
-                test_res = getattr(r, "test_results", None)
-                if test_res and test_res.get("has_tests"):
-                    total = test_res.get("total", 0)
-                    passed = test_res.get("passed", 0)
-                    if total > 0 and passed == total:
-                        score += 30.0 + min(passed * 2.0, 20.0)
-                    elif total > 0:
-                        score += (passed / total) * 15.0
-            elif entry.verdict == "absent_report":
-                score = 30.0 - r.duration_seconds
-            elif entry.verdict == "discrepancy":
-                score = 0.0  # Penalized severely for hallucinating changes
-            else:
-                score = -10.0
+        # Primary order: score. Ties (within TIE_EPSILON) are broken by evidence that is
+        # not jitter: fewer tokens, then higher prior standing for the combination.
+        def tie_key(item: tuple[TerrariumCandidateResult, ArchivistEntry, float]):
+            r, e, _ = item
+            return (r.tokens_used, -self.scorecard.get_standing(e.signature or r.seat.model))
 
-            scored_candidates.append((r, entry, score))
+        scored_candidates.sort(key=lambda x: (-round(x[2] / TIE_EPSILON), *tie_key(x)))
+        for rank, (r, e, _) in enumerate(scored_candidates, 1):
+            e.rank = rank
+            e.tied_with = [
+                o.candidate_id for (_, o, s) in scored_candidates
+                if o is not e and abs(s - e.score) < TIE_EPSILON
+            ]
+        top_r, top_e, top_score = scored_candidates[0]
+        if top_e.tied_with:
+            top_e.tie_break = "fewer tokens, then higher prior standing"
 
-        # Sort by score descending
-        scored_candidates.sort(key=lambda x: x[2], reverse=True)
-        winner = scored_candidates[0][0] if scored_candidates[0][2] > 0 else None
-
+        winner = top_r if top_score > 0 else None
         return winner, entries
+
+    @staticmethod
+    def composite_score(r: TerrariumCandidateResult, entry: ArchivistEntry) -> float:
+        """Composite score. Hidden (tester-authored) tests outweigh the candidate's own tests:
+        a candidate can write trivially-passing tests for itself, but not for the tester."""
+        if entry.verdict == "discrepancy":
+            return 0.0  # Axiom 9: claiming work that isn't there
+        if entry.verdict == "absent_report":
+            return 30.0 - r.duration_seconds
+        if entry.verdict != "success":
+            return -10.0
+
+        score = 100.0 - (r.tokens_used / 1000.0) - (r.duration_seconds * 2.0)
+        test_res = getattr(r, "test_results", None) or {}
+        own = test_res.get("own") or (test_res if test_res.get("has_tests") else {})
+        hidden = test_res.get("hidden") or {}
+
+        def bonus(res: dict[str, Any], full: float, partial: float) -> float:
+            total, passed = res.get("total", 0), res.get("passed", 0)
+            if not res.get("has_tests") or total <= 0:
+                return 0.0
+            if passed == total:
+                return full + min(passed * 2.0, 20.0)
+            return (passed / total) * partial
+
+        score += bonus(own, full=30.0, partial=15.0)
+        score += bonus(hidden, full=60.0, partial=30.0)
+        return score
