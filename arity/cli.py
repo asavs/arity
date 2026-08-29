@@ -3,9 +3,42 @@ from __future__ import annotations
 
 import argparse
 import sys
+import os
 from pathlib import Path
 import json
 import time
+
+# -----------------------------------------------------------------------------
+# Terminal & Encoding Safeguards for Windows & Cross-Platform Consoles
+# -----------------------------------------------------------------------------
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def safe_print(*args, **kwargs) -> None:
+    """Print with fallback encoding protection to prevent charmap/UnicodeEncodeError on legacy consoles."""
+    file = kwargs.get("file", sys.stdout)
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    text = sep.join(str(a) for a in args) + end
+    try:
+        file.write(text)
+        file.flush()
+    except UnicodeEncodeError:
+        enc = getattr(file, "encoding", None) or "ascii"
+        safe_text = text.encode(enc, errors="replace").decode(enc)
+        file.write(safe_text)
+        file.flush()
+    except Exception:
+        try:
+            print(*args, **kwargs)
+        except Exception:
+            pass
+
 from .ledger import Seat, SeatLedger
 from .orchestrator import ArityOrchestrator
 from .handlers import (
@@ -532,17 +565,17 @@ def handle_race_command(args: argparse.Namespace) -> None:
             cand.custom_model_provider = MockRaceProvider(i, cand.name)
 
     # 2. Print initial race header
-    print("\n\033[1;36m========================================================================================\033[0m")
-    print(f"\033[1;32m🏁 ARITY MULTI-DIMENSIONAL RACE (A/B/C Test)\033[0m")
-    print(f"  \033[1mTask:\033[0m       \"{prompt}\"")
-    print(f"  \033[1mVariants:\033[0m   {variants_arg}")
-    print(f"  \033[1mCandidates:\033[0m {len(candidates)}")
-    print("\033[1;36m========================================================================================\033[0m\n")
+    safe_print("\n\033[1;36m========================================================================================\033[0m")
+    safe_print("\033[1;32m[RACE] ARITY MULTI-DIMENSIONAL TRIAL (A/B/C Test)\033[0m")
+    safe_print(f"  \033[1mTask:\033[0m       \"{prompt}\"")
+    safe_print(f"  \033[1mVariants:\033[0m   {variants_arg}")
+    safe_print(f"  \033[1mCandidates:\033[0m {len(candidates)}")
+    safe_print("\033[1;36m========================================================================================\033[0m\n")
 
     for idx, c in enumerate(candidates, 1):
         m_str, h_str, t_str, s_str = c.display_tuple()
-        print(f"  \033[1;33m[{idx}]\033[0m \033[1m{c.name:25}\033[0m | Model: {m_str:18} | Harness: {h_str:8} | Tools: {t_str:12} | Skills: {s_str}")
-    print()
+        safe_print(f"  \033[1;33m[{idx}]\033[0m \033[1m{c.name:25}\033[0m | Model: {m_str:18} | Harness: {h_str:8} | Tools: {t_str:12} | Skills: {s_str}")
+    safe_print()
 
     # 3. Dispatch race across isolated candidate sandboxes
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
@@ -576,13 +609,13 @@ def handle_race_command(args: argparse.Namespace) -> None:
                 for r in results
             ],
         }
-        print(json.dumps(out_data, indent=2))
+        safe_print(json.dumps(out_data, indent=2))
         return
 
     # 4. Render comparison table
-    print("\n\033[1;37m┌───┬──────────────────────────┬──────────────────┬─────────┬───────────┬────────────┬─────────┬───────────┬─────────┬────────┬──────────┐\033[0m")
-    print("\033[1;37m│ # │ Candidate                │ Model            │ Harness │ Tools     │ Skills     │ Status  │ Tests     │ Time(s) │ Tokens │ Standing │\033[0m")
-    print("\033[1;37m├───┼──────────────────────────┼──────────────────┼─────────┼───────────┼────────────┼─────────┼───────────┼─────────┼────────┼──────────┤\033[0m")
+    safe_print("\n\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m")
+    safe_print("\033[1;37m| # | Candidate                | Model            | Harness | Tools     | Skills     | Status  | Tests     | Time(s) | Tokens | Standing |\033[0m")
+    safe_print("\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m")
 
     for idx, r in enumerate(results, 1):
         c_name = (r.spec.name if r.spec else r.candidate_id)[:24]
@@ -613,28 +646,28 @@ def handle_race_command(args: argparse.Namespace) -> None:
         else:
             st_colored = f"\033[1;31m{status_str:7}\033[0m"
 
-        print(f"│ {idx:<1} │ {c_name:24} │ {m_name:16} │ {h_name:7} │ {t_name:9} │ {s_name:10} │ {st_colored} │ {t_col:9} │ {t_sec:7} │ {tok_str:6} │ {stand_str:8} │")
+        safe_print(f"| {idx:<1} | {c_name:24} | {m_name:16} | {h_name:7} | {t_name:9} | {s_name:10} | {st_colored} | {t_col:9} | {t_sec:7} | {tok_str:6} | {stand_str:8} |")
 
-    print("\033[1;37m└───┴──────────────────────────┴──────────────────┴─────────┴───────────┴────────────┴─────────┴───────────┴─────────┴────────┴──────────┘\033[0m\n")
+    safe_print("\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m\n")
 
     # 5. Announce Impartial Judge Winner and findings
     if winner and winner.spec:
         win_entry = next((e for e in entries if e.candidate_id == winner.candidate_id), None)
-        print(f"\033[1;32m🏆 IMPARTIAL JUDGE WINNER:\033[0m \033[1m{winner.spec.name}\033[0m")
-        print(f"  \033[1m• Signature:\033[0m          \033[1;36m{winner.signature}\033[0m")
-        print(f"  \033[1m• Verdict:\033[0m            \033[1;32m{win_entry.verdict.upper() if win_entry else 'SUCCESS'}\033[0m")
-        print(f"  \033[1m• Physical Artifacts:\033[0m {', '.join(win_entry.verified_artifacts) if win_entry and win_entry.verified_artifacts else 'Verified in sandbox'}")
+        safe_print(f"\033[1;32m[WINNER] IMPARTIAL JUDGE WINNER:\033[0m \033[1m{winner.spec.name}\033[0m")
+        safe_print(f"  \033[1m* Signature:\033[0m          \033[1;36m{winner.signature}\033[0m")
+        safe_print(f"  \033[1m* Verdict:\033[0m            \033[1;32m{win_entry.verdict.upper() if win_entry else 'SUCCESS'}\033[0m")
+        safe_print(f"  \033[1m* Physical Artifacts:\033[0m {', '.join(win_entry.verified_artifacts) if win_entry and win_entry.verified_artifacts else 'Verified in sandbox'}")
         if winner.test_results and winner.test_results.get("has_tests"):
-            print(f"  \033[1m• Verification Proof:\033[0m \033[1;32m100% test pass rate ({winner.test_results.get('passed')}/{winner.test_results.get('total')} tests passed)\033[0m")
-        print(f"  \033[1m• Performance Proof:\033[0m  {winner.duration_seconds:.2f}s latency | {winner.tokens_used:,} tokens")
-        print()
+            safe_print(f"  \033[1m* Verification Proof:\033[0m \033[1;32m100% test pass rate ({winner.test_results.get('passed')}/{winner.test_results.get('total')} tests passed)\033[0m")
+        safe_print(f"  \033[1m* Performance Proof:\033[0m  {winner.duration_seconds:.2f}s latency | {winner.tokens_used:,} tokens")
+        safe_print()
 
     # 6. Show updated Scorecard combination standings
-    print("\033[1;35m📊 Multi-Dimensional Scorecard Standings (Axiom 3 + Axiom 9):\033[0m")
+    safe_print("\033[1;35m[SCORECARD] Multi-Dimensional Standings (Axiom 3 + Axiom 9):\033[0m")
     for r in results:
         score = archivist.scorecard.get_standing(r.signature or r.seat.model)
-        print(f"  • \033[1m{r.signature}\033[0m -> \033[1;33m{score:.1f} pts\033[0m")
-    print("\033[1;36m========================================================================================\033[0m\n")
+        safe_print(f"  * \033[1m{r.signature}\033[0m -> \033[1;33m{score:.1f} pts\033[0m")
+    safe_print("\033[1;36m========================================================================================\033[0m\n")
 
 def main():
     parser = argparse.ArgumentParser(description="arity 0.2.0 CLI")
