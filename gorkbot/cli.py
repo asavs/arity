@@ -14,7 +14,8 @@ import time
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         try:
-            _s.reconfigure(encoding="utf-8", errors="replace")
+            # line_buffering: device-login codes must reach a pipe/background log immediately
+            _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except Exception:
             pass
 
