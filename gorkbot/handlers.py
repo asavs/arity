@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -253,13 +254,19 @@ class CLIModelProvider:
         else:
             cmd = [self.harness, full_prompt]
 
+        # Windows installs CLIs as .cmd shims; without a shell they need their resolved path.
+        cmd[0] = shutil.which(cmd[0]) or cmd[0]
         try:
+            # No shell and no stdin: a CLI that wants to go interactive (login prompt, TUI) fails
+            # fast instead of waiting on a terminal that isn't there. Without shell=True the
+            # timeout kills the CLI itself, not a shell wrapper whose child keeps the pipes open.
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                shell=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
             )
             raw_output = proc.stdout or ""
             if proc.returncode != 0 and not raw_output.strip():
@@ -319,13 +326,19 @@ class OMPModelProvider:
         full_prompt = "\n".join(lines).strip()
         cmd = ["omp", full_prompt]
 
+        # Windows installs CLIs as .cmd shims; without a shell they need their resolved path.
+        cmd[0] = shutil.which(cmd[0]) or cmd[0]
         try:
+            # No shell and no stdin: a CLI that wants to go interactive (login prompt, TUI) fails
+            # fast instead of waiting on a terminal that isn't there. Without shell=True the
+            # timeout kills the CLI itself, not a shell wrapper whose child keeps the pipes open.
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                shell=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
             )
             raw_output = proc.stdout or ""
             if proc.returncode != 0 and not raw_output.strip():
