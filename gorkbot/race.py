@@ -427,16 +427,22 @@ def blind_bundle(rep: RaceReport) -> tuple[str, dict[str, str]]:
                     parts.append(f"\n## {p.relative_to(ws).as_posix()}\n```\n{body}\n```")
         tr = r.test_results or {}
         own, hidden = tr.get("own") or {}, tr.get("hidden") or {}
+        a = (e.axes if e else {}) or {}
+        counted = ", ".join(f"{k}={a[k]}" for k in (
+            "loc", "test_count", "type_ignores", "bare_asserts", "compile_ok", "tool_calls", "tool_errors",
+            "model_turns", "module_present", "entrypoint_present", "brief_numbers_in_own_tests") if k in a)
         parts.append(
             f"\n## Archivist facts for {L}\n"
             f"- verdict: {e.verdict if e else r.status}\n"
             f"- own tests: {own.get('passed', 0)}/{own.get('total', 0)} | hidden tests: {hidden.get('passed', 0)}/{hidden.get('total', 0)}\n"
+            f"- counted already (do not re-count): {counted}\n"
             f"- candidate's own closing report: {(r.output or '').strip()}"  # not self_report: that wrapper names the model
         )
     parts.append(
-        f"\n\n# Your task\nRank candidates {', '.join(letters)}. One cited reason per rank (a file, a line, a test name). "
-        "Say 'tie' where evidence cannot separate two. Name anything worth cherry-picking from a candidate that did not win. "
-        "Facts are settled; do not re-run anything. End with one JSON line: "
+        f"\n\n# Your task\nRank candidates {', '.join(letters)}. The counts above are settled; spend your reasoning on what "
+        "counting cannot see: idiom, intent, maintenance risk, honesty of the closing report. One cited reason per rank "
+        "(a file, a line, a test name). Say 'tie' where evidence cannot separate two. Name anything worth cherry-picking "
+        "from a candidate that did not win. Do not re-run anything. End with one JSON line: "
         '{"order": ["A", ...], "ties": [["A","B"], ...], "cherry_picks": {"A": "...", ...}}'
     )
     return "".join(parts), key
