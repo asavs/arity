@@ -17,8 +17,6 @@ from .seams import Observer, RecordStore
 from .terrarium import ARTIFACT_IGNORE_PARTS, TerrariumCandidateResult
 from .types import Event, State, StoreRecord, ToolCompleted
 
-TIE_EPSILON = 1.0
-"""Composite scores closer than this are a tie: the gap is duration jitter, not evidence."""
 
 
 @dataclass
@@ -45,6 +43,7 @@ class ArchivistEntry:
     rank: int = 0
     tied_with: list[str] = field(default_factory=list)
     tie_break: Optional[str] = None
+    axes: dict[str, Any] = field(default_factory=dict)
 
 
 class ImpartialArchivist:
@@ -202,50 +201,67 @@ class ImpartialArchivist:
             entry.score = self.composite_score(r, entry)
             scored_candidates.append((r, entry, entry.score))
 
-        # Primary order: score. Ties (within TIE_EPSILON) are broken by evidence that is
-        # not jitter: fewer tokens, then higher prior standing for the combination.
-        def tie_key(item: tuple[TerrariumCandidateResult, ArchivistEntry, float]):
-            r, e, _ = item
-            return (r.tokens_used, -self.scorecard.get_standing(e.signature or r.seat.model))
+        # Order is tiered, not summed: facts first (verdict, hidden pass rate, own pass rate),
+        # cost only inside a tier (tokens, then seconds). Candidates with identical facts are a
+        # tie - the archivist has no evidence to separate them, and says so.
+        for r, e, _ in scored_candidates:
+            e.axes = self.axes(r, e)
 
-        scored_candidates.sort(key=lambda x: (-round(x[2] / TIE_EPSILON), *tie_key(x)))
+        def fact_key(e: ArchivistEntry) -> tuple:
+            a = e.axes
+            return (a["tier"], a["hidden_rate"], a["own_rate"])
+
+        def order_key(item: tuple[TerrariumCandidateResult, ArchivistEntry, float]):
+            r, e, _ = item
+            a = e.axes
+            return (-a["tier"], -a["hidden_rate"], -a["own_rate"], a["tokens"], a["seconds"],
+                    -self.scorecard.get_standing(e.signature or r.seat.model))
+
+        scored_candidates.sort(key=order_key)
         for rank, (r, e, _) in enumerate(scored_candidates, 1):
             e.rank = rank
-            e.tied_with = [
-                o.candidate_id for (_, o, s) in scored_candidates
-                if o is not e and abs(s - e.score) < TIE_EPSILON
-            ]
-        top_r, top_e, top_score = scored_candidates[0]
+            e.tied_with = [o.candidate_id for (_, o, _) in scored_candidates if o is not e and fact_key(o) == fact_key(e)]
+        top_r, top_e, _ = scored_candidates[0]
         if top_e.tied_with:
-            top_e.tie_break = "fewer tokens, then higher prior standing"
+            top_e.tie_break = "same facts; ordered by tokens, then seconds, then prior standing"
 
-        winner = top_r if top_score > 0 else None
+        winner = top_r if top_e.axes["tier"] > 0 else None
         return winner, entries
 
     @staticmethod
-    def composite_score(r: TerrariumCandidateResult, entry: ArchivistEntry) -> float:
-        """Composite score. Hidden (tester-authored) tests outweigh the candidate's own tests:
-        a candidate can write trivially-passing tests for itself, but not for the tester."""
-        if entry.verdict == "discrepancy":
-            return 0.0  # Axiom 9: claiming work that isn't there
-        if entry.verdict == "absent_report":
-            return 30.0 - r.duration_seconds
-        if entry.verdict != "success":
-            return -10.0
+    def axes(r: TerrariumCandidateResult, entry: ArchivistEntry) -> dict[str, Any]:
+        """The raw axes of one candidate. Standings are queries over these; nothing is summed here.
 
-        score = 100.0 - (r.tokens_used / 1000.0) - (r.duration_seconds * 2.0)
+        tier: 3 success | 2 absent_report | 1 failed | 0 discrepancy (Axiom 9: lying ranks last)
+        hidden_rate / own_rate: pass fractions (0.0 when that layer has no tests)
+        tokens, seconds: cost
+        """
+        tiers = {"success": 3, "absent_report": 2, "failed": 1, "discrepancy": 0}
         test_res = getattr(r, "test_results", None) or {}
         own = test_res.get("own") or (test_res if test_res.get("has_tests") else {})
         hidden = test_res.get("hidden") or {}
 
-        def bonus(res: dict[str, Any], full: float, partial: float) -> float:
-            total, passed = res.get("total", 0), res.get("passed", 0)
-            if not res.get("has_tests") or total <= 0:
-                return 0.0
-            if passed == total:
-                return full + min(passed * 2.0, 20.0)
-            return (passed / total) * partial
+        def rate(res: dict[str, Any]) -> float:
+            total = res.get("total", 0)
+            return (res.get("passed", 0) / total) if res.get("has_tests") and total > 0 else 0.0
 
-        score += bonus(own, full=30.0, partial=15.0)
-        score += bonus(hidden, full=60.0, partial=30.0)
-        return score
+        return {
+            "tier": tiers.get(entry.verdict, 1),
+            "hidden_rate": rate(hidden),
+            "own_rate": rate(own),
+            "hidden_total": hidden.get("total", 0),
+            "own_total": own.get("total", 0),
+            "tokens": r.tokens_used,
+            "seconds": round(r.duration_seconds, 2),
+            "fallbacks": getattr(r, "fallbacks", 0),
+        }
+
+    @staticmethod
+    def composite_score(r: TerrariumCandidateResult, entry: ArchivistEntry) -> float:
+        """One cheap number derived from the axes, for fast casting and the table. Never used to
+        order a trial: a passing candidate can't fall below a failing one however slow it was."""
+        a = ImpartialArchivist.axes(r, entry)
+        base = {3: 100.0, 2: 30.0, 1: 0.0, 0: -50.0}[a["tier"]]
+        facts = a["hidden_rate"] * 60.0 + a["own_rate"] * 30.0
+        cost = min(20.0, a["tokens"] / 5000.0) + min(20.0, a["seconds"] / 10.0)
+        return round(base + facts - cost, 1)

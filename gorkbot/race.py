@@ -91,6 +91,7 @@ class RaceReport:
                     "fallbacks": r.fallbacks,
                     "verdict": (self.entry_for(r).verdict if self.entry_for(r) else None),
                     "score": (self.entry_for(r).score if self.entry_for(r) else None),
+                    "axes": (self.entry_for(r).axes if self.entry_for(r) else {}),
                     "rank": (self.entry_for(r).rank if self.entry_for(r) else None),
                     "tied_with": (self.entry_for(r).tied_with if self.entry_for(r) else []),
                     "duration_seconds": r.duration_seconds,
