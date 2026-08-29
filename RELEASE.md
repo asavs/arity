@@ -27,6 +27,17 @@
 5. **Terminal chat cache timer (`gorkbot/cli.py`)**
    - `python -m gorkbot chat` shows a countdown timer indicating how long the model's prompt cache stays warm before each input line.
 
+6. **`gorkbot race` — single-axis A/B/C trials with an impartial judge (`gorkbot/race.py`, `gorkbot/terrarium.py`, `gorkbot/archivist.py`)**
+   - `CandidateSpec` now carries six axes: seat, harness, tool runner, skills, role, and `context` (`fresh` | `accounts` | `fork`). `fork` replays the parent's exact prompt prefix for a cache hit.
+   - Presets vary exactly one axis at a time (`--variants models|harness|tools|skills|context`); a custom grammar (`model=..+harness=..+tools=..+skills=a/b+ctx=..`) composes candidates by hand.
+   - Candidates are drawn from the authenticated `SeatLedger`; sandbox directories are slug-safe on Windows.
+   - The archivist ignores verification side-effects (`__pycache__`, `.pytest_cache`, `.hidden_tests`), reports ties instead of crowning duration jitter, and weights hidden tests above a candidate's own.
+   - `--mock` runs canned `good` / `slow` / `liar` providers against an ephemeral store, so demos never touch the real scorecard. `--teardown` / `--keep` control sandbox lifetime.
+
+7. **Task bank and the tester role (`gorkbot/tasks.py`, `gorkbot/definitions/tasks/`, `gorkbot/definitions/roles/tester.md`)**
+   - `gorkbot tasks` lists briefs with hidden acceptance tests (`lru_cache`, `sqlite_cache`, `rate_limiter`); `gorkbot race --task <name>` grades every candidate against tests it never saw, including a time budget where the brief says "fast".
+   - `tester` is a real role again (test engineer, not a reviewer alias). `--tester` has it author the hidden suite before the builders run.
+
 ---
 ### What's New in 0.1.1:
 1. **Direct Wire Protocols (`gorkbot.wire`)**:
