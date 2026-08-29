@@ -42,7 +42,18 @@ from .tiers import (
 )
 from .ledger import Seat, SeatLedger
 from .composer import CastingComposer, CastingDecision
-from .terrarium import CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher, run_sandbox_verification
+from .terrarium import (
+    CONTEXT_MODES,
+    HIDDEN_TESTS_DIR,
+    CandidateSpec,
+    TaskRecord,
+    TerrariumCandidateResult,
+    TerrariumDispatcher,
+    normalize_harness,
+    normalize_tool_runner,
+    run_sandbox_verification,
+)
+from .tasks import RaceTask, TaskBank
 from .tools import (
     McpToolAdapter,
     PathTraversalError,
