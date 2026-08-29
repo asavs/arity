@@ -324,6 +324,7 @@ class TerrariumDispatcher:
         compiler: Optional[BriefCompiler] = None,
         base_workspace: Optional[Path] = None,
         model_factory: Optional[Callable[[Seat], ModelProvider]] = None,
+        quiet: bool = False,
     ):
         self.ledger = ledger
         self.store = store or JsonlRecordStore()
@@ -331,6 +332,7 @@ class TerrariumDispatcher:
         self.base_workspace = Path(base_workspace) if base_workspace else Path(".terrarium")
         self.base_workspace.mkdir(parents=True, exist_ok=True)
         self._model_factory = model_factory or self._default_model_factory
+        self.quiet = quiet  # suppress per-candidate console chatter (machine-readable output modes)
 
     def _default_model_factory(self, seat: Seat) -> ModelProvider:
         return create_model_provider(seat)
@@ -474,7 +476,7 @@ class TerrariumDispatcher:
             model_provider=model_provider,
             tool_runner=tool_runner,
             store=self.store,
-            transport=ConsoleTransport(bot_name=f"{actual_role.name}@{seat.id}"),
+            transport=(_NullTransport() if self.quiet else ConsoleTransport(bot_name=f"{actual_role.name}@{seat.id}")),
             observers=[metrics],
         )
 
