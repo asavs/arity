@@ -253,6 +253,29 @@ class TestTaskBankAndPresets(unittest.TestCase):
         self.assertEqual(specs[0].signature(), "python_developer:gpt-5.6-sol:cli:mcp_tools:firecrawl-developer-index,pytest-tdd:ctx=fork")
         self.assertEqual(specs[1].seat.model, "gemini-3.6-flash")
 
+    def test_review_phase_runs_only_on_a_facts_tie_and_maps_letters_back(self):
+        from gorkbot.race import blind_bundle, parse_judgement
+        # good/slow/liar are separated by facts -> review skipped even with judges named
+        with TemporaryDirectory() as d:
+            rep = run_race(RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol"], workspace_root=Path(d) / "ws"))
+        self.assertEqual(rep.judgements, [])
+        self.assertTrue(any("review skipped" in n for n in rep.notes))
+        # --review always forces it; the canned judge's letters come back as candidate ids
+        with TemporaryDirectory() as d:
+            rep = run_race(RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol", "claude-3-7-sonnet"], review="always", workspace_root=Path(d) / "ws"))
+        self.assertEqual(len(rep.judgements), 2)
+        ids = {r.candidate_id for r in rep.results}
+        for j in rep.judgements:
+            self.assertTrue(j["parsed"])
+            self.assertEqual(set(j["order"]), ids)
+            self.assertTrue(set(j["cherry_picks"]) <= ids)
+        # the bundle never truncates and never leaks a model name
+        text, key = blind_bundle(rep)
+        self.assertEqual(len(key), 3)
+        for r in rep.results:
+            self.assertNotIn(r.seat.model, text)
+        self.assertEqual(parse_judgement("garbage", key)["parsed"], False)
+
     def test_mock_race_is_ephemeral_and_ranks_good_slow_liar(self):
         with TemporaryDirectory() as d:
             rep = run_race(RaceConfig(task_name="lru_cache", mock=True, workspace_root=Path(d) / "ws"))
