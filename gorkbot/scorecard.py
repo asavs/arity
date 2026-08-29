@@ -16,6 +16,16 @@ from .seams import RecordStore
 from .types import StoreRecord
 
 
+_NAMESPACES = ("skill", "harness", "tools", "judge")
+
+
+def _role_key(role: str) -> str:
+    """developer:python -> developer.python so keys stay colon-separated; skill:/harness:/tools: are namespaces, untouched."""
+    if ":" in role and role.split(":", 1)[0] not in _NAMESPACES:
+        return role.replace(":", ".")
+    return role
+
+
 @dataclass
 class ScorecardRecord:
     """A scored evaluation entry for a model, role, or multi-dimensional combination."""
@@ -48,7 +58,7 @@ class Scorecard:
         if model is None:
             # Direct key lookup (e.g. 'builder:gemini-3.6:wire:ast_tools' or 'gemini-3.6')
             return self._standings.get(role_or_key.lower(), 10.0)
-        return self._standings.get(self._key(role_or_key, model), 10.0)
+        return self._standings.get(self._key(_role_key(role_or_key), model), 10.0)
 
     def record_verdict(
         self,
@@ -64,6 +74,7 @@ class Scorecard:
         score_override: Optional[float] = None,
     ) -> ScorecardRecord:
         """Update model and combination standing based on archivist verdict across all axes."""
+        role = _role_key(role)
         if score_override is not None:
             delta = score_override
         elif verdict == "success":

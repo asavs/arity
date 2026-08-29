@@ -49,6 +49,19 @@ class Role:
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
     system_prompt: str = ""
+    # Set when a TypePack is attached (developer:python). The pack's verify block tells the
+    # sandbox how to run this type's tests; empty means "no language-specific verification".
+    type_name: str = ""
+    verify: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def base_name(self) -> str:
+        return self.name.split(":", 1)[0]
+
+    @property
+    def key_name(self) -> str:
+        """Name safe for colon-separated scorecard keys and signatures (developer.python)."""
+        return self.name.replace(":", ".")
 
     def can_use_tool(self, tool_name: str) -> bool:
         """Check if role is permitted to invoke a tool."""
@@ -143,40 +156,107 @@ def load_role_from_file(path: Path) -> Role:
     return parse_role_document(content)
 
 
+# -----------------------------------------------------------------------------
+# Type packs: a language/domain toolkit that attaches to any role (role:type)
+# -----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TypePack:
+    """What a role needs to work in one language or domain: skills, rules, and how to verify.
+
+    A role is who you are and what you may not touch; a type is what you are working in.
+    developer:python, tester:python and reviewer:python share one pack.
+    """
+    name: str
+    description: str = ""
+    skills: tuple[str, ...] = ()
+    system_prompt: str = ""      # appended to the role's prompt under "# Type: <name>"
+    verify: dict[str, Any] = field(default_factory=dict)  # test_command, test_globs, hidden_dir, hidden_command
+    tags: tuple[str, ...] = ()   # task-bank tags that select this type automatically
+
+
+def parse_type_document(content: str) -> TypePack:
+    from .tasks import split_frontmatter
+    meta, body = split_frontmatter(content)
+    verify = {k: meta[k] for k in ("test_command", "test_globs", "hidden_dir", "hidden_command") if k in meta}
+    if isinstance(verify.get("test_globs"), str):
+        verify["test_globs"] = [verify["test_globs"]]
+    return TypePack(
+        name=str(meta.get("name", "unknown")).lower(),
+        description=str(meta.get("description", "")),
+        skills=tuple(meta.get("skills", []) or ()),
+        system_prompt=body,
+        verify=verify,
+        tags=tuple(t.lower() for t in (meta.get("tags", []) or ())),
+    )
+
+
+def compose(role: Role, pack: TypePack) -> Role:
+    """role + type -> a new Role named role:type with the pack's skills, rules, and verification."""
+    skills = tuple(role.skills) + tuple(s for s in pack.skills if s not in role.skills)
+    prompt = role.system_prompt.rstrip() + f"\n\n# Type: {pack.name}\n{pack.system_prompt.strip()}"
+    return Role(
+        name=f"{role.base_name}:{pack.name}",
+        description=f"{role.description} [{pack.name}]",
+        tier=role.tier,
+        skills=skills,
+        allowed_tools=role.allowed_tools,
+        denial_set=role.denial_set,
+        system_prompt=prompt,
+        type_name=pack.name,
+        verify=dict(pack.verify),
+    )
+
+
 class RoleRegistry:
     """Registry of active roles with discovery from role definition documents."""
 
     def __init__(self, initial_roles: Optional[list[Role]] = None):
         self._roles: dict[str, Role] = {}
+        self._types: dict[str, TypePack] = {}
+        self._composed: dict[str, Role] = {}
         if initial_roles:
             for r in initial_roles:
                 self.register(r)
         else:
             self._discover_from_definitions()
 
-    def _discover_from_definitions(self) -> None:
-        """Discover roles from packaged definitions, project .gorkbot/roles, and global ~/.gorkbot/roles."""
-        definitions_dirs = [
-            Path(__file__).parent / "definitions" / "roles",
-            Path(".gorkbot/roles"),
-            Path.home() / ".gorkbot" / "roles",
+    def _definition_dirs(self, kind: str) -> list[Path]:
+        return [
+            Path(__file__).parent / "definitions" / kind,
+            Path(f".gorkbot/{kind}"),
+            Path.home() / ".gorkbot" / kind,
         ]
-        for rdir in definitions_dirs:
+
+    def _discover_from_definitions(self) -> None:
+        """Discover roles and types from packaged definitions, project .gorkbot/, and ~/.gorkbot/."""
+        for rdir in self._definition_dirs("roles"):
             if not rdir.exists():
                 continue
             for path in rdir.glob("*.md"):
                 try:
-                    role = load_role_from_file(path)
-                    self.register(role)
+                    self.register(load_role_from_file(path))
+                except Exception:
+                    continue
+        for tdir in self._definition_dirs("types"):
+            if not tdir.exists():
+                continue
+            for path in tdir.glob("*.md"):
+                try:
+                    self.register_type(parse_type_document(path.read_text(encoding="utf-8")))
                 except Exception:
                     continue
 
         # Setup clean alias mappings to canonical roles
         if "secretary" in self._roles:
             self._roles["voice"] = self._roles["secretary"]
-        if "python_developer" in self._roles:
-            self._roles["builder"] = self._roles["python_developer"]
-            self._roles["coder"] = self._roles["python_developer"]
+        # Python is the default developer type until another language is asked for by name.
+        if "developer" in self._roles and "python" in self._types:
+            for alias in ("python_developer", "builder", "coder"):
+                self._roles[alias] = self.get("developer:python")  # type: ignore[assignment]
+        elif "developer" in self._roles:
+            for alias in ("python_developer", "builder", "coder"):
+                self._roles[alias] = self._roles["developer"]
         if "engineer" in self._roles:
             self._roles["architect"] = self._roles["engineer"]
         if "reviewer" in self._roles:
@@ -189,19 +269,54 @@ class RoleRegistry:
     def register(self, role: Role) -> None:
         self._roles[role.name.lower()] = role
 
+    def register_type(self, pack: TypePack) -> None:
+        self._types[pack.name.lower()] = pack
+        self._composed.clear()
+
+    def get_type(self, name: str) -> Optional[TypePack]:
+        return self._types.get(name.lower())
+
+    def type_for_tags(self, tags: tuple[str, ...] | list[str]) -> Optional[TypePack]:
+        """The type pack whose tags overlap a task's tags (first match wins)."""
+        wanted = {t.lower() for t in tags}
+        return next((p for p in self._types.values() if wanted & set(p.tags)), None)
+
     def get(self, name: str) -> Optional[Role]:
-        return self._roles.get(name.lower())
+        """Look up 'role' or 'role:type'. Composition is cached; an unknown type returns None."""
+        key = name.lower().strip()
+        if key in self._roles:
+            return self._roles[key]
+        if ":" in key:
+            if key in self._composed:
+                return self._composed[key]
+            base_name, type_name = key.split(":", 1)
+            base, pack = self._roles.get(base_name), self._types.get(type_name)
+            if base is None or pack is None:
+                return None
+            self._composed[key] = compose(base, pack)
+            return self._composed[key]
+        return None
+
+    def with_type(self, role: Role, type_name: Optional[str]) -> Role:
+        """Attach a type to a role by name (reviewer + 'python' -> reviewer:python); no-op if absent."""
+        if not type_name or role.type_name == type_name:
+            return role
+        return self.get(f"{role.base_name}:{type_name}") or role
 
     def list_roles(self) -> list[Role]:
         return list(set(self._roles.values()))
+
+    def list_types(self) -> list[TypePack]:
+        return sorted(self._types.values(), key=lambda p: p.name)
 
     def resolve(self, name_or_task: str) -> Role:
         """Resolve a role by exact name or semantic task intent."""
         query = name_or_task.lower().strip()
 
-        # 1. Exact role name match
-        if query in self._roles:
-            return self._roles[query]
+        # 1. Exact role name match (including role:type)
+        exact = self.get(query)
+        if exact is not None:
+            return exact
 
         # 2. Explicit @tag match (e.g. @builder, @scout, @engineer)
         if query.startswith("@"):
@@ -224,7 +339,8 @@ class RoleRegistry:
         best_score = 0
 
         keywords = {
-            "python_developer": ("python", "pytest", "module", "class", "def "),
+            "developer:python": ("python", "pytest", "module", "class", "def "),
+            "developer:rust": ("rust", "cargo", "crate"),
             "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
             "engineer": ("architecture", "system design", "spec", "decompose"),
             "tester": ("verify tests", "run pytest", "check regression"),
@@ -234,9 +350,10 @@ class RoleRegistry:
 
         for role_name, kw_list in keywords.items():
             score = sum(3 if f" {kw} " in f" {query} " else (1 if kw in query else 0) for kw in kw_list)
-            if score > best_score and role_name in self._roles:
+            candidate = self.get(role_name)
+            if score > best_score and candidate is not None:
                 best_score = score
-                best_role = self._roles[role_name]
+                best_role = candidate
 
         return best_role if best_score >= 2 else secretary_role
     def filter_tools(self, role: Role, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -258,8 +375,9 @@ SECRETARY_ROLE = _default_registry.get("secretary") or parse_role_document("---\
 VOICE_ROLE = _default_registry.get("voice") or SECRETARY_ROLE
 ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\n---\nEngineer")
 ARCHITECT_ROLE = _default_registry.get("architect") or ENGINEER_ROLE
-BUILDER_ROLE = _default_registry.get("builder") or parse_role_document("---\nname: builder\ntier: 2\n---\nBuilder")
-PYTHON_DEVELOPER_ROLE = _default_registry.get("python_developer") or BUILDER_ROLE
+DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\n---\nDeveloper")
+BUILDER_ROLE = _default_registry.get("builder") or DEVELOPER_ROLE
+PYTHON_DEVELOPER_ROLE = _default_registry.get("developer:python") or BUILDER_ROLE
 SCOUT_ROLE = _default_registry.get("scout") or parse_role_document("---\nname: scout\ntier: 3\n---\nScout")
 TESTER_ROLE = _default_registry.get("tester") or parse_role_document("---\nname: tester\ntier: 3\n---\nTester")
 REVIEWER_ROLE = _default_registry.get("reviewer") or TESTER_ROLE

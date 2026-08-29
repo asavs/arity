@@ -58,7 +58,7 @@ class TestNormalizationAndSignature(unittest.TestCase):
     def test_signature_and_display_agree(self):
         spec = CandidateSpec(seat=Seat(provider="google", model="gemini-3.6-flash"), role=BUILDER_ROLE,
                              tool_runner_type="sandbox", skills=["pytest-tdd"])
-        self.assertEqual(spec.signature(), "python_developer:gemini-3.6-flash:wire:ast_tools:pytest-tdd")
+        self.assertEqual(spec.signature(), "developer.python:gemini-3.6-flash:wire:ast_tools:pytest-tdd")
         self.assertEqual(spec.display_tuple()[2], "ast_tools")
 
     def test_context_axis_only_appears_when_non_default(self):
@@ -250,7 +250,7 @@ class TestTaskBankAndPresets(unittest.TestCase):
     def test_custom_variant_grammar(self):
         specs, _ = resolve_candidates("model=gpt-5.6-sol+harness=cli+tools=mcp+skills=pytest-tdd/firecrawl-developer-index+ctx=fork,model=gemini-3.6-flash", BUILDER_ROLE, placeholder_seats())
         self.assertEqual(specs[0].seat.model, "gpt-5.6-sol")
-        self.assertEqual(specs[0].signature(), "python_developer:gpt-5.6-sol:cli:mcp_tools:firecrawl-developer-index,pytest-tdd:ctx=fork")
+        self.assertEqual(specs[0].signature(), "developer.python:gpt-5.6-sol:cli:mcp_tools:firecrawl-developer-index,pytest-tdd:ctx=fork")
         self.assertEqual(specs[1].seat.model, "gemini-3.6-flash")
 
     def test_review_phase_runs_only_on_a_facts_tie_and_maps_letters_back(self):

@@ -1,8 +1,7 @@
 ---
 name: reviewer
-description: Read-only judge. Weighs trial candidates on evidence the archivist has already recorded.
-skills:
-  - pytest-tdd
+description: Read-only judge. Weighs trial candidates on evidence the archivist has already recorded. Domain comes from a type (reviewer:python).
+skills: []
 denied_tools:
   - write_file
 denied_paths:
