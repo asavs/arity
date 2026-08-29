@@ -43,6 +43,18 @@ from .types import (
 )
 
 
+class _NullTransport:
+    def emit(self, effect: Any) -> None:
+        pass
+
+
+HIDDEN_TESTS_DIR = ".hidden_tests"
+"""Directory inside a candidate sandbox where tester-authored tests are dropped after the build."""
+
+# Files the archivist must not attribute to a candidate: verification side-effects.
+ARTIFACT_IGNORE_PARTS = ("__pycache__", ".pytest_cache", HIDDEN_TESTS_DIR, ".hypothesis")
+
+
 @dataclass
 class TaskRecord:
     """A structured task handoff record (Axiom 1 & Axiom 3)."""
@@ -56,9 +68,51 @@ class TaskRecord:
     predecessor: Optional[PredecessorAccounts] = None
     task_context: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Context-inheritance axis inputs. A "fork" candidate replays these verbatim
+    # so the provider's prompt cache is hit (Axiom 7); other modes ignore them.
+    parent_system_prompt: Optional[str] = None
+    parent_messages: list[dict[str, Any]] = field(default_factory=list)
+    # Tester-authored tests the builder never sees. Copied into the sandbox
+    # only after the build finishes, then run alongside the builder's own tests.
+    hidden_tests: dict[str, str] = field(default_factory=dict)  # relative filename -> source
 
     def is_depth_exceeded(self) -> bool:
         return self.depth >= self.max_depth
+
+
+def _label(obj: Any) -> str:
+    """Human-readable label for a harness or tool-runner axis value (str, class, instance, or callable)."""
+    if isinstance(obj, str):
+        return obj
+    if hasattr(obj, "__name__"):
+        return obj.__name__
+    return obj.__class__.__name__
+
+
+_TOOL_RUNNER_ALIASES = {
+    "sandbox": "ast_tools", "ast": "ast_tools", "native": "ast_tools", "sandboxtoolrunner": "ast_tools",
+    "mcp": "mcp_tools", "mcp_tools": "mcp_tools", "mcptooladapter": "mcp_tools", "create_mcp_tool_runner": "mcp_tools",
+    "shell": "shell_tools", "local": "shell_tools", "shell_tools": "shell_tools", "localtoolrunner": "shell_tools",
+}
+
+
+def normalize_tool_runner(obj: Any) -> str:
+    """Canonical scorecard name for a tool-runner axis value: ast_tools | mcp_tools | shell_tools | <custom>."""
+    raw = _label(obj).lower()
+    return _TOOL_RUNNER_ALIASES.get(raw, raw)
+
+
+def normalize_harness(obj: Any) -> str:
+    """Canonical scorecard name for a harness axis value."""
+    raw = _label(obj).lower()
+    return {"codex": "cli", "claude": "cli"}.get(raw, raw)
+
+
+def skill_names(skills: list[Any]) -> list[str]:
+    return [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in skills]
+
+
+CONTEXT_MODES = ("fresh", "accounts", "fork")
 
 
 @dataclass
@@ -71,6 +125,11 @@ class CandidateSpec:
       3. Tool / MCP Axis: tool_runner_type ("sandbox"/"ast" | "mcp" | "shell"/"local" | custom)
       4. Skill / Brief Axis: skills (e.g. ["pytest-tdd"], ["firecrawl-developer-index"], [])
       5. Role Axis: role (e.g. PYTHON_DEVELOPER_ROLE, BUILDER_ROLE)
+      6. Context Axis (prompt lever): context
+           "fresh"    - brief only; predecessor accounts dropped
+           "accounts" - brief + rendered predecessor self-report/archivist entry (default)
+           "fork"     - parent's exact system prompt + message prefix replayed, brief appended
+                        (prompt-cache hit; only meaningful when parent and child share a seat)
     """
     seat: Seat
     name: str = ""
@@ -78,175 +137,159 @@ class CandidateSpec:
     harness: Union[str, ModelProvider] = "wire"
     tool_runner_type: Union[str, type[ToolRunner], ToolRunner, Callable[..., ToolRunner]] = "sandbox"
     skills: list[Union[str, Any]] = field(default_factory=list)
+    context: str = "accounts"
     system_prompt_override: Optional[str] = None
     custom_model_provider: Optional[ModelProvider] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        if self.context not in CONTEXT_MODES:
+            raise ValueError(f"CandidateSpec.context must be one of {CONTEXT_MODES}, got {self.context!r}")
         if not self.name:
-            h_label = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__
-            t_label = self.tool_runner_type if isinstance(self.tool_runner_type, str) else (
-                self.tool_runner_type.__name__ if hasattr(self.tool_runner_type, "__name__") else self.tool_runner_type.__class__.__name__
-            )
-            self.name = f"{self.seat.id}:{h_label}:{t_label}"
+            self.name = f"{self.seat.id}:{_label(self.harness)}:{_label(self.tool_runner_type)}"
+
+    @property
+    def harness_name(self) -> str:
+        return normalize_harness(self.harness)
+
+    @property
+    def tool_runner_name(self) -> str:
+        return normalize_tool_runner(self.tool_runner_type)
+
+    @property
+    def skill_names(self) -> list[str]:
+        return skill_names(self.skills)
 
     def signature(self, default_role: str = "builder") -> str:
         """Compute the unique multidimensional combo signature for scorecard standings.
 
-        Format: role:model:harness:tool_runner[:skills]
+        Format: role:model:harness:tool_runner[:skills][:ctx=<mode>]
         e.g. 'builder:gemini-3.6-flash:wire:ast_tools:pytest-tdd'
+        The context segment is only emitted for non-default modes so existing keys stay stable.
         """
         r_name = self.role.name if self.role else default_role
-        m_name = self.seat.model
-        h_name = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__.lower()
-        if isinstance(self.tool_runner_type, str):
-            t_name = self.tool_runner_type
-        elif hasattr(self.tool_runner_type, "__name__"):
-            t_name = self.tool_runner_type.__name__.lower()
-        else:
-            t_name = self.tool_runner_type.__class__.__name__.lower()
-
-        # Normalize tool runner name for clean standings signatures
-        if t_name in ("sandbox", "ast", "sandboxtoolrunner"):
-            t_name = "ast_tools"
-        elif t_name in ("mcp", "mcptooladapter"):
-            t_name = "mcp_tools"
-        elif t_name in ("shell", "local", "localtoolrunner"):
-            t_name = "shell_tools"
-
-        skill_names = []
-        for sk in self.skills:
-            if isinstance(sk, str):
-                skill_names.append(sk)
-            elif hasattr(sk, "name"):
-                skill_names.append(sk.name)
-        skills_part = f":{','.join(sorted(skill_names))}" if skill_names else ""
-
-        return f"{r_name.lower()}:{m_name.lower()}:{h_name.lower()}:{t_name.lower()}{skills_part}"
+        parts = [r_name.lower(), self.seat.model.lower(), self.harness_name, self.tool_runner_name]
+        if self.skill_names:
+            parts.append(",".join(sorted(self.skill_names)))
+        if self.context != "accounts":
+            parts.append(f"ctx={self.context}")
+        return ":".join(parts)
 
     def display_tuple(self) -> tuple[str, str, str, str]:
         """Return (model, harness, tool_runner, skills_str) for display formatting."""
-        h_str = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__
-        t_str = self.tool_runner_type if isinstance(self.tool_runner_type, str) else (
-            self.tool_runner_type.__name__ if hasattr(self.tool_runner_type, "__name__") else self.tool_runner_type.__class__.__name__
-        )
-        s_names = [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in self.skills]
-        s_str = ", ".join(s_names) if s_names else "baseline"
-        return (self.seat.model, h_str, t_str, s_str)
+        s_str = ", ".join(self.skill_names) if self.skill_names else "baseline"
+        return (self.seat.model, self.harness_name, self.tool_runner_name, s_str)
+
+
+_EMPTY_TEST_RESULT: dict[str, Any] = {
+    "has_tests": False, "passed": 0, "failed": 0, "total": 0, "exit_code": 0, "duration": 0.0, "output": "",
+}
+
+
+def _parse_test_output(raw_output: str, returncode: int) -> tuple[int, int]:
+    """Extract (passed, failed) from pytest or unittest output."""
+    passed = failed = 0
+    m_pass = re.search(r"(\d+)\s+passed", raw_output)
+    m_fail = re.search(r"(\d+)\s+failed", raw_output)
+    m_err = re.search(r"(\d+)\s+error", raw_output)
+    if m_pass:
+        passed = int(m_pass.group(1))
+    if m_fail:
+        failed = int(m_fail.group(1))
+    if m_err:
+        failed += int(m_err.group(1))
+    if not m_pass and not m_fail:
+        m_ran = re.search(r"Ran (\d+) tests?", raw_output)
+        if m_ran:
+            total_ran = int(m_ran.group(1))
+            if returncode == 0 and "OK" in raw_output:
+                passed, failed = total_ran, 0
+            else:
+                m_f = re.search(r"failures=(\d+)", raw_output)
+                m_e = re.search(r"errors=(\d+)", raw_output)
+                failed = (int(m_f.group(1)) if m_f else 0) + (int(m_e.group(1)) if m_e else 0)
+                passed = max(0, total_ran - failed)
+    return passed, failed
+
+
+def _run_tests(ws: Path, cmd: str, timeout: float, allow_unittest_fallback: bool) -> dict[str, Any]:
+    start_time = time.time()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{str(ws)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=str(ws), capture_output=True, text=True, timeout=timeout, env=env)
+        raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        if proc.returncode != 0 and "No module named pytest" in raw_output and allow_unittest_fallback:
+            proc = subprocess.run(
+                "python -m unittest discover -s . -p 'test_*.py'",
+                shell=True, cwd=str(ws), capture_output=True, text=True, timeout=timeout, env=env,
+            )
+            raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        passed, failed = _parse_test_output(raw_output, proc.returncode)
+        return {
+            "has_tests": True,
+            "passed": passed,
+            "failed": failed,
+            "total": passed + failed,
+            "exit_code": proc.returncode,
+            "duration": time.time() - start_time,
+            "output": raw_output.strip(),
+        }
+    except subprocess.TimeoutExpired:
+        return {"has_tests": True, "passed": 0, "failed": 1, "total": 1, "exit_code": -1,
+                "duration": timeout, "output": f"Tests timed out after {timeout}s"}
+    except Exception as e:
+        return {"has_tests": True, "passed": 0, "failed": 1, "total": 1, "exit_code": 1,
+                "duration": 0.0, "output": f"Verification error: {e}"}
 
 
 def run_sandbox_verification(
     workspace: Path,
     test_command: Optional[str] = None,
     timeout: float = 30.0,
+    hidden_tests: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    """Execute unit tests in candidate workspace to verify correctness empirically."""
+    """Execute unit tests in a candidate workspace to verify correctness empirically.
+
+    Two layers, reported separately and merged in the top-level counts:
+      - the candidate's own tests (test_*.py / *_test.py / tests/**), or `test_command`
+      - `hidden_tests`: tester-authored files the candidate never saw, written to
+        `.hidden_tests/` only now and run with the workspace on PYTHONPATH.
+    Result keys: has_tests, passed, failed, total, exit_code, duration, output,
+    plus `own` and `hidden` sub-results with the same shape.
+    """
     ws = Path(workspace)
     test_files = list(ws.glob("test_*.py")) + list(ws.glob("*_test.py")) + list(ws.glob("tests/**/test_*.py"))
 
-    if not test_files and not test_command:
-        return {
-            "has_tests": False,
-            "passed": 0,
-            "failed": 0,
-            "total": 0,
-            "exit_code": 0,
-            "duration": 0.0,
-            "output": "No unit test files found in sandbox workspace.",
-        }
+    own = dict(_EMPTY_TEST_RESULT, output="No unit test files found in sandbox workspace.")
+    if test_files or test_command:
+        own = _run_tests(ws, test_command or "python -m pytest -v -p no:cacheprovider", timeout, allow_unittest_fallback=not test_command)
 
-    cmd = test_command or "python -m pytest -v"
-    start_time = time.time()
-    env = dict(os.environ)
-    env["PYTHONPATH"] = f"{str(ws)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    hidden = dict(_EMPTY_TEST_RESULT)
+    if hidden_tests:
+        hdir = ws / HIDDEN_TESTS_DIR
+        hdir.mkdir(parents=True, exist_ok=True)
+        for rel, src in hidden_tests.items():
+            target = hdir / Path(rel).name
+            target.write_text(src, encoding="utf-8")
+        hidden = _run_tests(ws, f"python -m pytest {HIDDEN_TESTS_DIR} -v -p no:cacheprovider", timeout, allow_unittest_fallback=False)
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=str(ws),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        elapsed = time.time() - start_time
-        raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-
-        # If pytest failed to run (e.g. pytest not in PATH), fallback to python -m unittest
-        if proc.returncode != 0 and "No module named pytest" in raw_output and not test_command:
-            proc = subprocess.run(
-                "python -m unittest discover -s . -p 'test_*.py'",
-                shell=True,
-                cwd=str(ws),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-            elapsed = time.time() - start_time
-            raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-
-        passed = 0
-        failed = 0
-
-        # 1. Parse pytest output
-        m_pass = re.search(r"(\d+)\s+passed", raw_output)
-        if m_pass:
-            passed = int(m_pass.group(1))
-        m_fail = re.search(r"(\d+)\s+failed", raw_output)
-        if m_fail:
-            failed = int(m_fail.group(1))
-        m_err = re.search(r"(\d+)\s+error", raw_output)
-        if m_err:
-            failed += int(m_err.group(1))
-
-        # 2. Parse unittest output
-        if not m_pass and not m_fail:
-            m_ran = re.search(r"Ran (\d+) tests?", raw_output)
-            if m_ran:
-                total_ran = int(m_ran.group(1))
-                if proc.returncode == 0 and "OK" in raw_output:
-                    passed = total_ran
-                    failed = 0
-                else:
-                    m_f = re.search(r"failures=(\d+)", raw_output)
-                    m_e = re.search(r"errors=(\d+)", raw_output)
-                    f_cnt = int(m_f.group(1)) if m_f else 0
-                    e_cnt = int(m_e.group(1)) if m_e else 0
-                    failed = f_cnt + e_cnt
-                    passed = max(0, total_ran - failed)
-
-        total = passed + failed
-        return {
-            "has_tests": True,
-            "passed": passed,
-            "failed": failed,
-            "total": total,
-            "exit_code": proc.returncode,
-            "duration": elapsed,
-            "output": raw_output.strip(),
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "has_tests": True,
-            "passed": 0,
-            "failed": 1,
-            "total": 1,
-            "exit_code": -1,
-            "duration": timeout,
-            "output": f"Tests timed out after {timeout}s",
-        }
-    except Exception as e:
-        return {
-            "has_tests": bool(test_files),
-            "passed": 0,
-            "failed": 1,
-            "total": 1,
-            "exit_code": 1,
-            "duration": 0.0,
-            "output": f"Verification error: {e}",
-        }
+    layers = [r for r in (own, hidden) if r["has_tests"]]
+    if not layers:
+        return dict(own, own=own, hidden=hidden)
+    exit_codes = [r["exit_code"] for r in layers]
+    return {
+        "has_tests": True,
+        "passed": sum(r["passed"] for r in layers),
+        "failed": sum(r["failed"] for r in layers),
+        "total": sum(r["total"] for r in layers),
+        "exit_code": next((c for c in exit_codes if c != 0), 0),
+        "duration": sum(r["duration"] for r in layers),
+        "output": "\n\n".join(r["output"] for r in layers if r["output"]),
+        "own": own,
+        "hidden": hidden,
+    }
 
 
 @dataclass
@@ -396,11 +439,11 @@ class TerrariumDispatcher:
         else:
             tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
 
-        # 3. Setup Brief Compiler & Skills Axis
+        # 3. Setup Brief Compiler & Skills Axis (+ Context Axis: what the child inherits)
         compiled_brief = self.compiler.assemble(
             role=actual_role,
             task=task.brief,
-            predecessor=task.predecessor,
+            predecessor=task.predecessor if spec.context == "accounts" else None,
             task_context=task.task_context,
             provider=seat.provider,
             endpoint=seat.endpoint,
@@ -441,6 +484,11 @@ class TerrariumDispatcher:
             system_prompt=compiled_brief.system_prompt,
             active_tools=compiled_brief.filtered_tools,
         )
+        if spec.context == "fork" and (task.parent_system_prompt or task.parent_messages):
+            # Replay the parent's exact prefix so the provider cache is hit; the brief
+            # arrives as the next user turn. Tool-call/result pairs are copied verbatim.
+            initial_state.system_prompt = task.parent_system_prompt or compiled_brief.system_prompt
+            initial_state.messages = [dict(m) for m in task.parent_messages]
 
         # 5. Execute the multi-turn agent loop
         try:
@@ -467,12 +515,17 @@ class TerrariumDispatcher:
         # 7. In-sandbox Verification (Axiom 3 Empirical Proof)
         test_results = None
         if run_verification:
-            test_results = run_sandbox_verification(workspace, test_command=test_command)
+            test_results = run_sandbox_verification(
+                workspace, test_command=test_command, hidden_tests=task.hidden_tests or None,
+            )
 
         # 8. Generate self-report
         test_summary = ""
         if test_results and test_results.get("has_tests"):
             test_summary = f" Unit tests: {test_results.get('passed')}/{test_results.get('total')} passed."
+            hidden = test_results.get("hidden") or {}
+            if hidden.get("has_tests"):
+                test_summary += f" Hidden tests: {hidden.get('passed')}/{hidden.get('total')} passed."
         self_report = f"Candidate {spec.name} executed brief in {duration:.2f}s ({total_tokens} tokens).{test_summary} Output: {output}"
 
         # 9. Collect tool audit records
