@@ -6,6 +6,7 @@ and filesystem artifacts, writes a third-person entry, and updates the scorecard
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -206,6 +207,15 @@ class ImpartialArchivist:
         # tie - the archivist has no evidence to separate them, and says so.
         for r, e, _ in scored_candidates:
             e.axes = self.axes(r, e)
+            e.axes.update(self.trace_axes(r))
+            e.axes.update(self.code_axes(r))
+            e.axes.update(self.brief_axes(r))
+            if self.store:
+                try:
+                    self.store.append(StoreRecord(kind="trial_axes", record={
+                        "task_id": r.task_id, "candidate_id": r.candidate_id, "signature": e.signature, **e.axes}))
+                except Exception:
+                    pass
 
         def fact_key(e: ArchivistEntry) -> tuple:
             a = e.axes
@@ -255,6 +265,88 @@ class ImpartialArchivist:
             "seconds": round(r.duration_seconds, 2),
             "fallbacks": getattr(r, "fallbacks", 0),
         }
+
+    def trace_axes(self, r: TerrariumCandidateResult) -> dict[str, Any]:
+        """What the kernel did, from the records it wrote: turns, tool calls, tool errors, friction."""
+        if not self.store or not hasattr(self.store, "query"):
+            return {}
+        sid = r.candidate_id
+        try:
+            turns = self.store.query("model_turn", session_id=sid)
+            tools = self.store.query("tool_result", session_id=sid)
+            friction = self.store.query("friction", session_id=sid)
+        except Exception:
+            return {}
+        by_tool: dict[str, int] = {}
+        for t in tools:
+            by_tool[t.get("tool_name", "?")] = by_tool.get(t.get("tool_name", "?"), 0) + 1
+        return {
+            "model_turns": len(turns),
+            "tool_calls": len(tools),
+            "tool_errors": sum(1 for t in tools if t.get("is_error")),
+            "friction": len(friction),
+            "tools_by_name": by_tool,
+        }
+
+    @staticmethod
+    def code_axes(r: TerrariumCandidateResult) -> dict[str, Any]:
+        """What the candidate wrote, counted: LOC, tests, type-ignores, bare asserts, does it compile."""
+        import ast
+        import py_compile
+        ws = Path(r.workspace_path)
+        out = {"py_files": 0, "loc": 0, "test_files": 0, "test_count": 0, "type_ignores": 0, "bare_asserts": 0, "compile_ok": True}
+        if not ws.is_dir():
+            return out
+        for p in ws.rglob("*.py"):
+            if any(seg in ARTIFACT_IGNORE_PARTS for seg in p.relative_to(ws).parts):
+                continue
+            try:
+                src = p.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            is_test = p.name.startswith("test_") or p.name.endswith("_test.py")
+            out["py_files"] += 1
+            out["test_files"] += int(is_test)
+            out["loc"] += sum(1 for l in src.splitlines() if l.strip() and not l.strip().startswith("#"))
+            out["type_ignores"] += src.count("type: ignore")
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                out["compile_ok"] = False
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test_") and is_test:
+                    out["test_count"] += 1
+                if isinstance(node, ast.Assert) and not is_test:
+                    out["bare_asserts"] += 1
+            try:
+                py_compile.compile(str(p), doraise=True, cfile=os.devnull if os.name != "nt" else None)
+            except Exception:
+                out["compile_ok"] = False
+        return out
+
+    @staticmethod
+    def brief_axes(r: TerrariumCandidateResult) -> dict[str, Any]:
+        """Did the candidate honour the brief's named contract: module, entrypoint, and its hard numbers in its own tests."""
+        meta = getattr(r, "task_metadata", {}) or {}
+        brief = getattr(r, "brief", "") or ""
+        ws = Path(r.workspace_path)
+        out: dict[str, Any] = {}
+        module, entry = meta.get("module"), meta.get("entrypoint")
+        if module:
+            out["module_present"] = (ws / f"{module}.py").is_file()
+        if module and entry and out.get("module_present"):
+            out["entrypoint_present"] = f"{entry}" in (ws / f"{module}.py").read_text(encoding="utf-8", errors="replace")
+        numbers = {n.replace(",", "") for n in re.findall(r"\b\d{1,3}(?:,\d{3})+\b|\b\d{4,}\b", brief)}
+        if numbers:
+            own = "\n".join(
+                p.read_text(encoding="utf-8", errors="replace") for p in ws.rglob("test_*.py")
+                if not any(seg in ARTIFACT_IGNORE_PARTS for seg in p.relative_to(ws).parts)
+            ) if ws.is_dir() else ""
+            own_norm = own.replace("_", "").replace(",", "")
+            out["brief_numbers"] = sorted(numbers)
+            out["brief_numbers_in_own_tests"] = sorted(n for n in numbers if n in own_norm)
+        return out
 
     @staticmethod
     def composite_score(r: TerrariumCandidateResult, entry: ArchivistEntry) -> float:

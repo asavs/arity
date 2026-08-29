@@ -316,6 +316,8 @@ class TerrariumCandidateResult:
     test_results: Optional[dict[str, Any]] = None
     tester_result: Optional["TerrariumCandidateResult"] = None
     fallbacks: int = 0  # wire -> CLI harness fallbacks during the run; >0 means the harness axis moved
+    brief: str = ""  # the brief this candidate was given (archivist checks its hard numbers against own tests)
+    task_metadata: dict[str, Any] = field(default_factory=dict)  # e.g. module/entrypoint from the task bank
 
 
 class TerrariumDispatcher:
@@ -593,6 +595,8 @@ class TerrariumDispatcher:
             skills_used=skills_used,
             test_results=test_results,
             fallbacks=fallbacks,
+            brief=task.brief,
+            task_metadata=dict(task.metadata),
         )
 
     def dispatch_candidates(
