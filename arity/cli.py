@@ -425,6 +425,8 @@ def handle_race_command(args: argparse.Namespace) -> None:
         as_json=bool(getattr(args, "json", False)),
         tester=bool(getattr(args, "tester", False)),
         teardown=(True if getattr(args, "teardown", False) else (False if getattr(args, "keep", False) else None)),
+        judges=[j.strip() for j in (getattr(args, "judges", "") or "").split(",") if j.strip()],
+        review=getattr(args, "review", None) or "tie",
     )
     report = run_race(cfg)
     if cfg.as_json:
@@ -465,6 +467,8 @@ def main():
     race_parser.add_argument("--mock", action="store_true", help="Canned providers (good / slow / liar), ephemeral store, no tokens spent")
     race_parser.add_argument("--keep", action="store_true", help="Keep sandboxes after the race (default for live runs)")
     race_parser.add_argument("--teardown", action="store_true", help="Delete sandboxes after the race (default for --mock)")
+    race_parser.add_argument("--judges", type=str, default="", help="Review phase: comma-separated judge models that read a blind bundle and rank (reviewer role)")
+    race_parser.add_argument("--review", choices=["tie", "always", "never"], default="tie", help="When the review phase runs (default: only when facts tie)")
     race_parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
     subparsers.add_parser("tasks", help="List the race task bank")
 
