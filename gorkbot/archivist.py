@@ -33,8 +33,9 @@ class ArchivistEntry:
     discrepancy_details: Optional[str] = None
     verdict: str = "success"  # "success" | "discrepancy" | "failed" | "absent_report"
     entry_text: str = ""
+    signature: Optional[str] = None
+    test_results: Optional[dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
-
 
 class ImpartialArchivist:
     """Audits kernel execution traces and maintains the scorecard."""
@@ -44,11 +45,12 @@ class ImpartialArchivist:
         self.store = store
 
     def audit(self, result: TerrariumCandidateResult) -> ArchivistEntry:
-        """Audit a candidate kernel's output and sandbox artifacts."""
+        """Audit a candidate kernel's output, sandbox artifacts, and test pass rate."""
         model = result.seat.model
         role = result.role.name
         task_id = result.task_id
         candidate_id = result.candidate_id
+        signature = getattr(result, "signature", None) or (result.spec.signature() if getattr(result, "spec", None) else None)
 
         # 1. Check if self-report is present
         self_report_present = bool(result.self_report and result.self_report.strip())
@@ -74,11 +76,9 @@ class ImpartialArchivist:
             details = "Kernel terminated without writing a self-report (Axiom 9 fallback)."
         else:
             # Check if self-report claims files that don't exist
-            # e.g. "created schema.sql" or "wrote to foo.txt"
             claimed_files = re.findall(r"(?:created|wrote|modified|file)\s+[`'\"]?([\w\-./]+\.\w+)[`'\"]?", result.self_report or "", re.IGNORECASE)
             for cf in claimed_files:
                 cf_clean = cf.strip("`'\"").replace("\\", "/")
-                # Check if file exists in sandbox
                 if not (result.workspace_path / cf_clean).exists():
                     discrepancy = True
                     discrepancy_details = f"Kernel claimed creation of '{cf_clean}', but artifact was not found in sandbox."
@@ -88,21 +88,40 @@ class ImpartialArchivist:
                 verdict = "discrepancy"
                 details = discrepancy_details or "Discrepancy detected between self-report and actual artifacts."
             else:
-                verdict = "success"
-                details = f"Verified {len(verified_artifacts)} artifacts created ({', '.join(verified_artifacts) if verified_artifacts else 'none'})."
+                # Check in-sandbox test execution results
+                test_res = getattr(result, "test_results", None)
+                if test_res and test_res.get("has_tests"):
+                    passed = test_res.get("passed", 0)
+                    total = test_res.get("total", 0)
+                    failed = test_res.get("failed", 0)
+                    if failed > 0 or test_res.get("exit_code") != 0:
+                        verdict = "failed"
+                        details = f"Verified {len(verified_artifacts)} artifacts, but unit tests failed ({failed}/{total} failed)."
+                    else:
+                        verdict = "success"
+                        details = f"Verified {len(verified_artifacts)} artifacts and 100% test pass rate ({passed}/{total} tests passed)."
+                else:
+                    verdict = "success"
+                    details = f"Verified {len(verified_artifacts)} artifacts created ({', '.join(verified_artifacts) if verified_artifacts else 'none'})."
 
         # Format impartial third-person entry text
+        test_info = ""
+        test_res = getattr(result, "test_results", None)
+        if test_res and test_res.get("has_tests"):
+            test_info = f" | **Tests**: {test_res.get('passed', 0)}/{test_res.get('total', 0)} passed"
+
         entry_text = (
             f"### Archivist Audit for {role}@{model} ({candidate_id})\n"
             f"- **Verdict**: {verdict.upper()}\n"
+            f"- **Signature**: {signature or 'N/A'}\n"
             f"- **Self-Report**: {'Present' if self_report_present else 'ABSENT'}\n"
             f"- **Verified Artifacts**: {', '.join(verified_artifacts) if verified_artifacts else 'None'}\n"
-            f"- **Duration**: {result.duration_seconds:.2f}s | **Tokens**: {result.tokens_used}\n"
+            f"- **Duration**: {result.duration_seconds:.2f}s | **Tokens**: {result.tokens_used}{test_info}\n"
             f"- **Findings**: {details}"
         )
 
-        # 4. Record verdict in scorecard across role and skills
-        skills_list = list(getattr(result.role, "skills", ()))
+        # 4. Record verdict in scorecard across role, skills, and multi-dimensional signature
+        skills_list = list(getattr(result, "skills_used", []) or getattr(result.role, "skills", ()))
         self.scorecard.record_verdict(
             role=role,
             model=model,
@@ -110,7 +129,11 @@ class ImpartialArchivist:
             verdict=verdict,
             details=details,
             skills=skills_list,
+            signature=signature,
+            harness=getattr(result, "harness", None),
+            tool_runner=getattr(result, "tool_runner_name", None),
         )
+
         # 5. Persist archivist entry in store
         if self.store:
             try:
@@ -122,9 +145,11 @@ class ImpartialArchivist:
                             "candidate_id": candidate_id,
                             "model": model,
                             "role": role,
+                            "signature": signature,
                             "verdict": verdict,
                             "discrepancy": discrepancy,
                             "verified_artifacts": verified_artifacts,
+                            "test_results": getattr(result, "test_results", None),
                             "entry_text": entry_text,
                         },
                     )
@@ -144,6 +169,8 @@ class ImpartialArchivist:
             discrepancy_details=discrepancy_details,
             verdict=verdict,
             entry_text=entry_text,
+            signature=signature,
+            test_results=getattr(result, "test_results", None),
         )
 
     def evaluate_trial(
@@ -161,13 +188,23 @@ class ImpartialArchivist:
             entry = self.audit(r)
             entries.append(entry)
 
-            # Score calculation: success > no discrepancy > token efficiency
+            # Composite score calculation:
+            # 1. Base verdict score
             if entry.verdict == "success":
-                score = 100.0 - (r.tokens_used / 1000.0) - r.duration_seconds
+                score = 100.0 - (r.tokens_used / 1000.0) - (r.duration_seconds * 2.0)
+                # Bonus for passed unit tests
+                test_res = getattr(r, "test_results", None)
+                if test_res and test_res.get("has_tests"):
+                    total = test_res.get("total", 0)
+                    passed = test_res.get("passed", 0)
+                    if total > 0 and passed == total:
+                        score += 30.0 + min(passed * 2.0, 20.0)
+                    elif total > 0:
+                        score += (passed / total) * 15.0
             elif entry.verdict == "absent_report":
                 score = 30.0 - r.duration_seconds
             elif entry.verdict == "discrepancy":
-                score = 0.0  # Penalized severely
+                score = 0.0  # Penalized severely for hallucinating changes
             else:
                 score = -10.0
 

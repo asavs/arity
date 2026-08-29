@@ -100,37 +100,49 @@ class BriefCompiler:
         workspace: str = "default",
         session_id: str = "sess_0",
         all_tools: Optional[list[dict[str, Any]]] = None,
+        extra_skills: Optional[list[str | Any]] = None,
+        system_prompt_override: Optional[str] = None,
     ) -> CompiledBrief:
         """Assemble the multi-layered system prompt and user task."""
-        layers: list[str] = []
+        if system_prompt_override:
+            full_system_prompt = system_prompt_override
+        else:
+            layers: list[str] = []
 
-        # Layer 1: Universal Base Facts & Role Persona (STABLE Breakpoint 1)
-        layers.append(f"# Role: {role.name.upper()}\n{role.system_prompt}")
+            # Layer 1: Universal Base Facts & Role Persona (STABLE Breakpoint 1)
+            layers.append(f"# Role: {role.name.upper()}\n{role.system_prompt}")
 
-        # Layer 2: Skills Prompt Injection
-        if getattr(role, "skills", None) and self.skills:
-            skills_section = self.skills.compile_prompt(list(role.skills))
-            if skills_section:
-                layers.append(skills_section)
+            # Layer 2: Skills Prompt Injection (combining role.skills + extra_skills)
+            combined_skills = list(getattr(role, "skills", ()))
+            if extra_skills:
+                for sk in extra_skills:
+                    if sk not in combined_skills:
+                        combined_skills.append(sk)
 
-        # Layer 3: Context by Role Profile (Axiom 8)
-        rname = role.name.lower()
-        if rname in ("secretary", "voice"):
-            scorecard_txt = ""
-            if self.scorecard and hasattr(self.scorecard, "get_summary"):
-                scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
-            layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
-        elif rname in ("engineer", "scout", "architect", "recon"):
-            layers.append(f"# Project Context\n{self.tier1_context}")
-        else:  # python_developer, reviewer, builder, etc.
-            layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
-        # Layer 4: Predecessor Accounts (Axiom 9)
-        if predecessor:
-            rendered_pred = predecessor.render()
-            if rendered_pred:
-                layers.append(rendered_pred)
+            if combined_skills and self.skills:
+                skills_section = self.skills.compile_prompt(combined_skills)
+                if skills_section:
+                    layers.append(skills_section)
 
-        full_system_prompt = "\n\n---\n\n".join(layers)
+            # Layer 3: Context by Role Profile (Axiom 8)
+            rname = role.name.lower()
+            if rname in ("secretary", "voice"):
+                scorecard_txt = ""
+                if self.scorecard and hasattr(self.scorecard, "get_summary"):
+                    scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
+                layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
+            elif rname in ("engineer", "scout", "architect", "recon"):
+                layers.append(f"# Project Context\n{self.tier1_context}")
+            else:  # python_developer, reviewer, builder, etc.
+                layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
+
+            # Layer 4: Predecessor Accounts (Axiom 9)
+            if predecessor:
+                rendered_pred = predecessor.render()
+                if rendered_pred:
+                    layers.append(rendered_pred)
+
+            full_system_prompt = "\n\n---\n\n".join(layers)
         # Refusal check: ensure no denied paths, hosts, or names leaked into the brief
         self._enforce_denial_set(role, full_system_prompt, task)
 

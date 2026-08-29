@@ -7,24 +7,30 @@ Axiom 2: Denial-set enforcement per role in isolated sandboxes.
 from __future__ import annotations
 
 import concurrent.futures
+import os
+import re
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from .handlers import (
+    CLIModelProvider,
     ConsoleTransport,
     JsonlRecordStore,
+    LocalToolRunner,
     MetricsObserver,
+    OMPModelProvider,
     create_model_provider,
 )
-from .tools import SandboxToolRunner
+from .tools import SandboxToolRunner, create_mcp_tool_runner
 from .ledger import Seat, SeatLedger
-from .roles import Role
+from .roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
-from .seams import ModelProvider, RecordStore
+from .seams import ModelProvider, RecordStore, ToolRunner
 from .tiers import BriefCompiler, CompiledBrief, PredecessorAccounts
 from .types import (
     CallModel,
@@ -56,6 +62,194 @@ class TaskRecord:
 
 
 @dataclass
+class CandidateSpec:
+    """A multidimensional candidate specification across stack axes (Axiom 3).
+
+    Axes:
+      1. Model / Seat Axis: seat (model, provider, keys)
+      2. Harness Axis: harness ("wire" | "cli" | "omp" | custom ModelProvider)
+      3. Tool / MCP Axis: tool_runner_type ("sandbox"/"ast" | "mcp" | "shell"/"local" | custom)
+      4. Skill / Brief Axis: skills (e.g. ["pytest-tdd"], ["firecrawl-developer-index"], [])
+      5. Role Axis: role (e.g. PYTHON_DEVELOPER_ROLE, BUILDER_ROLE)
+    """
+    seat: Seat
+    name: str = ""
+    role: Optional[Role] = None
+    harness: Union[str, ModelProvider] = "wire"
+    tool_runner_type: Union[str, type[ToolRunner], ToolRunner, Callable[..., ToolRunner]] = "sandbox"
+    skills: list[Union[str, Any]] = field(default_factory=list)
+    system_prompt_override: Optional[str] = None
+    custom_model_provider: Optional[ModelProvider] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.name:
+            h_label = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__
+            t_label = self.tool_runner_type if isinstance(self.tool_runner_type, str) else (
+                self.tool_runner_type.__name__ if hasattr(self.tool_runner_type, "__name__") else self.tool_runner_type.__class__.__name__
+            )
+            self.name = f"{self.seat.id}:{h_label}:{t_label}"
+
+    def signature(self, default_role: str = "builder") -> str:
+        """Compute the unique multidimensional combo signature for scorecard standings.
+
+        Format: role:model:harness:tool_runner[:skills]
+        e.g. 'builder:gemini-3.6-flash:wire:ast_tools:pytest-tdd'
+        """
+        r_name = self.role.name if self.role else default_role
+        m_name = self.seat.model
+        h_name = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__.lower()
+        if isinstance(self.tool_runner_type, str):
+            t_name = self.tool_runner_type
+        elif hasattr(self.tool_runner_type, "__name__"):
+            t_name = self.tool_runner_type.__name__.lower()
+        else:
+            t_name = self.tool_runner_type.__class__.__name__.lower()
+
+        # Normalize tool runner name for clean standings signatures
+        if t_name in ("sandbox", "ast", "sandboxtoolrunner"):
+            t_name = "ast_tools"
+        elif t_name in ("mcp", "mcptooladapter"):
+            t_name = "mcp_tools"
+        elif t_name in ("shell", "local", "localtoolrunner"):
+            t_name = "shell_tools"
+
+        skill_names = []
+        for sk in self.skills:
+            if isinstance(sk, str):
+                skill_names.append(sk)
+            elif hasattr(sk, "name"):
+                skill_names.append(sk.name)
+        skills_part = f":{','.join(sorted(skill_names))}" if skill_names else ""
+
+        return f"{r_name.lower()}:{m_name.lower()}:{h_name.lower()}:{t_name.lower()}{skills_part}"
+
+    def display_tuple(self) -> tuple[str, str, str, str]:
+        """Return (model, harness, tool_runner, skills_str) for display formatting."""
+        h_str = self.harness if isinstance(self.harness, str) else self.harness.__class__.__name__
+        t_str = self.tool_runner_type if isinstance(self.tool_runner_type, str) else (
+            self.tool_runner_type.__name__ if hasattr(self.tool_runner_type, "__name__") else self.tool_runner_type.__class__.__name__
+        )
+        s_names = [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in self.skills]
+        s_str = ", ".join(s_names) if s_names else "baseline"
+        return (self.seat.model, h_str, t_str, s_str)
+
+
+def run_sandbox_verification(
+    workspace: Path,
+    test_command: Optional[str] = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Execute unit tests in candidate workspace to verify correctness empirically."""
+    ws = Path(workspace)
+    test_files = list(ws.glob("test_*.py")) + list(ws.glob("*_test.py")) + list(ws.glob("tests/**/test_*.py"))
+
+    if not test_files and not test_command:
+        return {
+            "has_tests": False,
+            "passed": 0,
+            "failed": 0,
+            "total": 0,
+            "exit_code": 0,
+            "duration": 0.0,
+            "output": "No unit test files found in sandbox workspace.",
+        }
+
+    cmd = test_command or "python -m pytest -v"
+    start_time = time.time()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{str(ws)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        elapsed = time.time() - start_time
+        raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+
+        # If pytest failed to run (e.g. pytest not in PATH), fallback to python -m unittest
+        if proc.returncode != 0 and "No module named pytest" in raw_output and not test_command:
+            proc = subprocess.run(
+                "python -m unittest discover -s . -p 'test_*.py'",
+                shell=True,
+                cwd=str(ws),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            elapsed = time.time() - start_time
+            raw_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+
+        passed = 0
+        failed = 0
+
+        # 1. Parse pytest output
+        m_pass = re.search(r"(\d+)\s+passed", raw_output)
+        if m_pass:
+            passed = int(m_pass.group(1))
+        m_fail = re.search(r"(\d+)\s+failed", raw_output)
+        if m_fail:
+            failed = int(m_fail.group(1))
+        m_err = re.search(r"(\d+)\s+error", raw_output)
+        if m_err:
+            failed += int(m_err.group(1))
+
+        # 2. Parse unittest output
+        if not m_pass and not m_fail:
+            m_ran = re.search(r"Ran (\d+) tests?", raw_output)
+            if m_ran:
+                total_ran = int(m_ran.group(1))
+                if proc.returncode == 0 and "OK" in raw_output:
+                    passed = total_ran
+                    failed = 0
+                else:
+                    m_f = re.search(r"failures=(\d+)", raw_output)
+                    m_e = re.search(r"errors=(\d+)", raw_output)
+                    f_cnt = int(m_f.group(1)) if m_f else 0
+                    e_cnt = int(m_e.group(1)) if m_e else 0
+                    failed = f_cnt + e_cnt
+                    passed = max(0, total_ran - failed)
+
+        total = passed + failed
+        return {
+            "has_tests": True,
+            "passed": passed,
+            "failed": failed,
+            "total": total,
+            "exit_code": proc.returncode,
+            "duration": elapsed,
+            "output": raw_output.strip(),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "has_tests": True,
+            "passed": 0,
+            "failed": 1,
+            "total": 1,
+            "exit_code": -1,
+            "duration": timeout,
+            "output": f"Tests timed out after {timeout}s",
+        }
+    except Exception as e:
+        return {
+            "has_tests": bool(test_files),
+            "passed": 0,
+            "failed": 1,
+            "total": 1,
+            "exit_code": 1,
+            "duration": 0.0,
+            "output": f"Verification error: {e}",
+        }
+
+
+@dataclass
 class TerrariumCandidateResult:
     """The execution outcome of a single kernel candidate in a trial."""
     candidate_id: str
@@ -71,10 +265,14 @@ class TerrariumCandidateResult:
     tool_events: list[dict[str, Any]] = field(default_factory=list)
     status: str = "completed"
     error: Optional[str] = None
-
-
+    spec: Optional[CandidateSpec] = None
+    signature: str = ""
+    harness: str = "wire"
+    tool_runner_name: str = "sandbox"
+    skills_used: list[str] = field(default_factory=list)
+    test_results: Optional[dict[str, Any]] = None
 class TerrariumDispatcher:
-    """Dispatches tasks across candidate kernels in isolated parallel sandboxes."""
+    """Dispatches tasks across multi-dimensional candidate kernels in isolated parallel sandboxes."""
 
     def __init__(
         self,
@@ -94,24 +292,54 @@ class TerrariumDispatcher:
     def _default_model_factory(self, seat: Seat) -> ModelProvider:
         return create_model_provider(seat)
 
+    def _resolve_candidate_spec(
+        self,
+        spec_or_seat: Union[CandidateSpec, Seat],
+        role: Optional[Role] = None,
+    ) -> CandidateSpec:
+        """Normalize Seat or CandidateSpec into a unified CandidateSpec."""
+        if isinstance(spec_or_seat, CandidateSpec):
+            if role and not spec_or_seat.role:
+                spec_or_seat.role = role
+            return spec_or_seat
+        return CandidateSpec(
+            seat=spec_or_seat,
+            role=role or PYTHON_DEVELOPER_ROLE,
+            harness="wire",
+            tool_runner_type="sandbox",
+        )
+
     def dispatch_single(
         self,
         task: TaskRecord,
-        seat: Seat,
-        role: Role,
+        candidate_or_seat: Union[CandidateSpec, Seat],
+        role: Optional[Role] = None,
+        run_verification: bool = True,
+        test_command: Optional[str] = None,
     ) -> TerrariumCandidateResult:
-        """Run a single candidate kernel in an isolated sandbox."""
+        """Run a single candidate kernel in an isolated sandbox with multidimensional seams."""
+        spec = self._resolve_candidate_spec(candidate_or_seat, role)
+        seat = spec.seat
+        actual_role = spec.role or role or PYTHON_DEVELOPER_ROLE
+
         start_time = time.time()
         candidate_id = f"cand_{seat.id}_{uuid.uuid4().hex[:6]}"
         workspace = self.base_workspace / task.id / candidate_id
         workspace.mkdir(parents=True, exist_ok=True)
+
+        sig = spec.signature(default_role=actual_role.name)
+        harness_name = spec.harness if isinstance(spec.harness, str) else spec.harness.__class__.__name__
+        tool_name = spec.tool_runner_type if isinstance(spec.tool_runner_type, str) else (
+            spec.tool_runner_type.__name__ if hasattr(spec.tool_runner_type, "__name__") else spec.tool_runner_type.__class__.__name__
+        )
+        skills_used = [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in spec.skills]
 
         if task.is_depth_exceeded():
             return TerrariumCandidateResult(
                 candidate_id=candidate_id,
                 task_id=task.id,
                 seat=seat,
-                role=role,
+                role=actual_role,
                 final_state=State(session_id=candidate_id, status=Status.HALTED),
                 output=f"Error: Maximum recursion depth ({task.max_depth}) exceeded.",
                 self_report=None,
@@ -120,9 +348,14 @@ class TerrariumDispatcher:
                 workspace_path=workspace,
                 status="depth_exceeded",
                 error="Max depth exceeded",
+                spec=spec,
+                signature=sig,
+                harness=harness_name,
+                tool_runner_name=tool_name,
+                skills_used=skills_used,
             )
 
-        # 1. Setup isolated sandbox tool runner with peer message routing
+        # 1. Peer message router for cross-kernel delegation
         def route_peer_message(to_peer: str, text_msg: str) -> str:
             if task.depth + 1 >= task.max_depth:
                 return f"Error: Maximum message hop limit ({task.max_depth}) reached."
@@ -130,19 +363,42 @@ class TerrariumDispatcher:
             roles = RoleRegistry()
             target_peer = roles.resolve(to_peer)
             peer_task = TaskRecord(
-                from_role=role.name if hasattr(role, 'name') else str(role),
+                from_role=actual_role.name if hasattr(actual_role, 'name') else str(actual_role),
                 to_role=target_peer.name,
                 brief=text_msg,
                 depth=task.depth + 1,
                 max_depth=task.max_depth,
             )
-            peer_res = self.dispatch_single(task=peer_task, seat=seat, role=target_peer)
+            peer_spec = CandidateSpec(
+                seat=seat,
+                role=target_peer,
+                harness=spec.harness,
+                tool_runner_type=spec.tool_runner_type,
+                skills=spec.skills,
+            )
+            peer_res = self.dispatch_single(task=peer_task, candidate_or_seat=peer_spec)
             return peer_res.output or f"[{target_peer.name} replied with no output]"
 
-        tool_runner = SandboxToolRunner(workspace_root=workspace, role=role, message_router=route_peer_message)
-        metrics = MetricsObserver()
+        # 2. Setup Tool Runner Axis (Sandbox / AST vs. MCP vs. Shell vs. Custom)
+        if spec.tool_runner_type in ("sandbox", "ast", "native") or spec.tool_runner_type is SandboxToolRunner:
+            tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
+        elif spec.tool_runner_type in ("mcp", "mcp_tools") or spec.tool_runner_type is create_mcp_tool_runner:
+            tool_runner = create_mcp_tool_runner(workspace_root=workspace, role=actual_role)
+        elif spec.tool_runner_type in ("shell", "local", "shell_tools") or spec.tool_runner_type is LocalToolRunner:
+            tool_runner = LocalToolRunner(workspace_root=workspace)
+        elif isinstance(spec.tool_runner_type, ToolRunner):
+            tool_runner = spec.tool_runner_type
+        elif callable(spec.tool_runner_type):
+            try:
+                tool_runner = spec.tool_runner_type(workspace, actual_role, route_peer_message)
+            except TypeError:
+                tool_runner = spec.tool_runner_type(workspace)
+        else:
+            tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
+
+        # 3. Setup Brief Compiler & Skills Axis
         compiled_brief = self.compiler.assemble(
-            role=role,
+            role=actual_role,
             task=task.brief,
             predecessor=task.predecessor,
             task_context=task.task_context,
@@ -152,26 +408,41 @@ class TerrariumDispatcher:
             workspace=str(workspace),
             session_id=candidate_id,
             all_tools=tool_runner.get_schemas(),
+            extra_skills=spec.skills,
+            system_prompt_override=spec.system_prompt_override,
         )
 
-        # 3. Instantiate candidate runtime
-        model_provider = self._model_factory(seat)
+        # 4. Setup Model Provider / Harness Axis (Direct Wire vs. CLI vs. OMP vs. Custom)
+        if spec.custom_model_provider:
+            model_provider = spec.custom_model_provider
+        elif isinstance(spec.harness, ModelProvider):
+            model_provider = spec.harness
+        elif spec.harness in ("cli", "codex", "claude"):
+            cli_harness = spec.harness if spec.harness != "cli" else "codex"
+            model_provider = CLIModelProvider(harness=cli_harness, model=seat.model)
+        elif spec.harness == "omp":
+            model_provider = OMPModelProvider(model=seat.model)
+        else:
+            # Default wire / factory provider
+            model_provider = self._model_factory(seat)
+
+        metrics = MetricsObserver()
         runtime = Runtime(
             model_provider=model_provider,
             tool_runner=tool_runner,
             store=self.store,
-            transport=ConsoleTransport(bot_name=f"{role.name}@{seat.id}"),
+            transport=ConsoleTransport(bot_name=f"{actual_role.name}@{seat.id}"),
             observers=[metrics],
         )
 
         initial_state = State(
             session_id=candidate_id,
-            role=role.name,
+            role=actual_role.name,
             system_prompt=compiled_brief.system_prompt,
             active_tools=compiled_brief.filtered_tools,
         )
 
-        # 4. Execute the multi-turn agent loop
+        # 5. Execute the multi-turn agent loop
         try:
             final_state = runtime.run(
                 initial_state,
@@ -190,16 +461,24 @@ class TerrariumDispatcher:
         duration = time.time() - start_time
         total_tokens = metrics.total_prompt_tokens + metrics.total_completion_tokens
 
-        # 5. Meter tokens in ledger
+        # 6. Meter tokens in ledger
         self.ledger.meter(seat.id, total_tokens)
 
-        # 6. Extract or generate self-report
-        self_report = f"Candidate {seat.id} executed brief in {duration:.2f}s ({total_tokens} tokens). Output: {output}"
+        # 7. In-sandbox Verification (Axiom 3 Empirical Proof)
+        test_results = None
+        if run_verification:
+            test_results = run_sandbox_verification(workspace, test_command=test_command)
 
-        # 7. Collect tool audit records
+        # 8. Generate self-report
+        test_summary = ""
+        if test_results and test_results.get("has_tests"):
+            test_summary = f" Unit tests: {test_results.get('passed')}/{test_results.get('total')} passed."
+        self_report = f"Candidate {spec.name} executed brief in {duration:.2f}s ({total_tokens} tokens).{test_summary} Output: {output}"
+
+        # 9. Collect tool audit records
         tool_records = self.store.query("tool_result", session_id=candidate_id) if hasattr(self.store, "query") else []
 
-        # 8. Record trial entry in store
+        # 10. Record trial entry in store
         if self.store:
             try:
                 self.store.append(
@@ -209,10 +488,15 @@ class TerrariumDispatcher:
                             "task_id": task.id,
                             "candidate_id": candidate_id,
                             "seat_id": seat.id,
-                            "role": role.name,
+                            "role": actual_role.name,
+                            "signature": sig,
+                            "harness": harness_name,
+                            "tool_runner": tool_name,
+                            "skills": skills_used,
                             "status": status,
                             "tokens_used": total_tokens,
                             "duration_seconds": duration,
+                            "test_results": test_results,
                             "output_preview": output[:200] if output else "",
                             "error": error,
                         },
@@ -225,7 +509,7 @@ class TerrariumDispatcher:
             candidate_id=candidate_id,
             task_id=task.id,
             seat=seat,
-            role=role,
+            role=actual_role,
             final_state=final_state,
             output=output,
             self_report=self_report,
@@ -235,7 +519,66 @@ class TerrariumDispatcher:
             tool_events=tool_records,
             status=status,
             error=error,
+            spec=spec,
+            signature=sig,
+            harness=harness_name,
+            tool_runner_name=tool_name,
+            skills_used=skills_used,
+            test_results=test_results,
         )
+
+    def dispatch_candidates(
+        self,
+        task: TaskRecord,
+        candidates: list[CandidateSpec],
+        max_workers: int = 4,
+        run_verification: bool = True,
+        test_command: Optional[str] = None,
+    ) -> list[TerrariumCandidateResult]:
+        """Dispatch task concurrently across multidimensional CandidateSpecs (A/B/C testing)."""
+        if not candidates:
+            return []
+
+        results: list[TerrariumCandidateResult] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), max_workers)) as executor:
+            future_to_cand = {
+                executor.submit(
+                    self.dispatch_single,
+                    task,
+                    cand,
+                    None,
+                    run_verification,
+                    test_command,
+                ): cand
+                for cand in candidates
+            }
+            for future in concurrent.futures.as_completed(future_to_cand):
+                cand = future_to_cand[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception as e:
+                    actual_role = cand.role or PYTHON_DEVELOPER_ROLE
+                    results.append(
+                        TerrariumCandidateResult(
+                            candidate_id=f"cand_{cand.seat.id}_err",
+                            task_id=task.id,
+                            seat=cand.seat,
+                            role=actual_role,
+                            final_state=State(session_id=f"err_{cand.seat.id}", status=Status.HALTED),
+                            output=None,
+                            self_report=None,
+                            tokens_used=0,
+                            duration_seconds=0.0,
+                            workspace_path=self.base_workspace / task.id,
+                            status="failed",
+                            error=str(e),
+                            spec=cand,
+                            signature=cand.signature(default_role=actual_role.name),
+                        )
+                    )
+
+        return results
 
     def dispatch_parallel(
         self,
@@ -244,37 +587,38 @@ class TerrariumDispatcher:
         role: Role,
         max_workers: int = 4,
     ) -> list[TerrariumCandidateResult]:
-        """Dispatch task concurrently across all candidate seats (A/B testing)."""
-        if not candidate_seats:
-            return []
+        """Dispatch task concurrently across candidate seats (backwards-compatible API)."""
+        specs = [
+            CandidateSpec(seat=seat, role=role, harness="wire", tool_runner_type="sandbox")
+            for seat in candidate_seats
+        ]
+        return self.dispatch_candidates(task=task, candidates=specs, max_workers=max_workers)
 
-        results: list[TerrariumCandidateResult] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidate_seats), max_workers)) as executor:
-            future_to_seat = {
-                executor.submit(self.dispatch_single, task, seat, role): seat
-                for seat in candidate_seats
-            }
-            for future in concurrent.futures.as_completed(future_to_seat):
-                try:
-                    res = future.result()
-                    results.append(res)
-                except Exception as e:
-                    seat = future_to_seat[future]
-                    results.append(
-                        TerrariumCandidateResult(
-                            candidate_id=f"cand_{seat.id}_err",
-                            task_id=task.id,
-                            seat=seat,
-                            role=role,
-                            final_state=State(session_id=f"err_{seat.id}", status=Status.HALTED),
-                            output=None,
-                            self_report=None,
-                            tokens_used=0,
-                            duration_seconds=0.0,
-                            workspace_path=self.base_workspace / task.id,
-                            status="failed",
-                            error=str(e),
-                        )
-                    )
+    def race(
+        self,
+        task: Union[TaskRecord, str],
+        candidates: list[CandidateSpec],
+        test_command: Optional[str] = None,
+        max_workers: int = 4,
+        archivist: Optional[Any] = None,
+    ) -> tuple[Optional[TerrariumCandidateResult], list[TerrariumCandidateResult], list[Any]]:
+        """Execute an empirical race between multidimensional candidates, audit and rank them."""
+        if isinstance(task, str):
+            task_record = TaskRecord(brief=task)
+        else:
+            task_record = task
 
-        return results
+        results = self.dispatch_candidates(
+            task=task_record,
+            candidates=candidates,
+            max_workers=max_workers,
+            run_verification=True,
+            test_command=test_command,
+        )
+
+        if archivist is None:
+            from .archivist import ImpartialArchivist
+            archivist = ImpartialArchivist(store=self.store)
+
+        winner, entries = archivist.evaluate_trial(results)
+        return winner, results, entries
