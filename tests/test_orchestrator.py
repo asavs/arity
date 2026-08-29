@@ -95,7 +95,7 @@ class TestArityOrchestrator(unittest.TestCase):
 
         # 1. Delegation occurred
         self.assertIsNotNone(response.delegated_task)
-        self.assertEqual(response.delegated_task.to_role, "python_developer")
+        self.assertEqual(response.delegated_task.to_role, "developer:python")
 
         # 2. Winning candidate finished successfully
         self.assertIsNotNone(response.winning_candidate)
@@ -113,7 +113,7 @@ class TestArityOrchestrator(unittest.TestCase):
         self.assertEqual(created_file.read_text(), "CREATE TABLE deals (id INT);")
 
         # 5. Scorecard standing increased
-        self.assertGreater(orchestrator.scorecard.get_standing("python_developer", "gemini-3.6-flash"), 10.0)
+        self.assertGreater(orchestrator.scorecard.get_standing("developer:python", "gemini-3.6-flash"), 10.0)
 
         # 6. Pulse tick discovers expiring seat
         pulse_actions = orchestrator.tick_pulse(now=10000.0)

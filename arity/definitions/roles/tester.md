@@ -1,9 +1,7 @@
 ---
 name: tester
-description: Test engineer who writes acceptance tests for a task before and independently of the implementation.
+description: Test engineer who writes acceptance tests before and apart from the implementation. Language comes from a type (tester:python).
 skills:
-  - python-development
-  - pytest-tdd
   - test-engineering
 denied_paths:
   - .ssh

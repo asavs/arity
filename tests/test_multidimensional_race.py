@@ -84,7 +84,7 @@ class TestCandidateSpecAndSignatures(unittest.TestCase):
         )
         self.assertIn("pytest-tdd", cand_d.signature())
         self.assertIn("firecrawl-developer-index", cand_d.signature())
-        self.assertTrue(cand_d.signature().startswith("python_developer:gemini-3.6-flash:wire:ast_tools:"))
+        self.assertTrue(cand_d.signature().startswith("developer.python:gemini-3.6-flash:wire:ast_tools:"))
 
 
 class TestMultidimensionalScorecard(unittest.TestCase):

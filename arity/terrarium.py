@@ -60,7 +60,7 @@ class TaskRecord:
     """A structured task handoff record (Axiom 1 & Axiom 3)."""
     id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
     from_role: str = "secretary"
-    to_role: str = "python_developer"
+    to_role: str = "developer:python"
     brief: str = ""
     budget: float = 1.0  # USD or reference token budget
     depth: int = 0  # Recursion depth limit
@@ -167,7 +167,7 @@ class CandidateSpec:
         e.g. 'builder:gemini-3.6-flash:wire:ast_tools:pytest-tdd'
         The context segment is only emitted for non-default modes so existing keys stay stable.
         """
-        r_name = self.role.name if self.role else default_role
+        r_name = self.role.key_name if self.role else default_role.replace(":", ".")
         parts = [r_name.lower(), self.seat.model.lower(), self.harness_name, self.tool_runner_name]
         if self.skill_names:
             parts.append(",".join(sorted(self.skill_names)))
@@ -244,11 +244,21 @@ def _run_tests(ws: Path, cmd: str, timeout: float, allow_unittest_fallback: bool
                 "duration": 0.0, "output": f"Verification error: {e}"}
 
 
+PYTHON_VERIFY: dict[str, Any] = {
+    "test_command": "python -m pytest -v -p no:cacheprovider",
+    "test_globs": ["test_*.py", "*_test.py", "tests/**/test_*.py"],
+    "hidden_dir": HIDDEN_TESTS_DIR,
+    "hidden_command": f"python -m pytest {HIDDEN_TESTS_DIR} -v -p no:cacheprovider",
+}
+"""Default verification block; a role's TypePack (developer:python, developer:rust) overrides it."""
+
+
 def run_sandbox_verification(
     workspace: Path,
     test_command: Optional[str] = None,
     timeout: float = 30.0,
     hidden_tests: Optional[dict[str, str]] = None,
+    verify: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Execute unit tests in a candidate workspace to verify correctness empirically.
 
@@ -260,20 +270,22 @@ def run_sandbox_verification(
     plus `own` and `hidden` sub-results with the same shape.
     """
     ws = Path(workspace)
-    test_files = list(ws.glob("test_*.py")) + list(ws.glob("*_test.py")) + list(ws.glob("tests/**/test_*.py"))
+    v = {**PYTHON_VERIFY, **(verify or {})}
+    test_files = [p for g in v["test_globs"] for p in ws.glob(g)]
 
     own = dict(_EMPTY_TEST_RESULT, output="No unit test files found in sandbox workspace.")
     if test_files or test_command:
-        own = _run_tests(ws, test_command or "python -m pytest -v -p no:cacheprovider", timeout, allow_unittest_fallback=not test_command)
+        own = _run_tests(ws, test_command or v["test_command"], timeout,
+                         allow_unittest_fallback=not test_command and v["test_command"].startswith("python -m pytest"))
 
     hidden = dict(_EMPTY_TEST_RESULT)
     if hidden_tests:
-        hdir = ws / HIDDEN_TESTS_DIR
+        hdir = ws / v["hidden_dir"]
         hdir.mkdir(parents=True, exist_ok=True)
         for rel, src in hidden_tests.items():
             target = hdir / Path(rel).name
             target.write_text(src, encoding="utf-8")
-        hidden = _run_tests(ws, f"python -m pytest {HIDDEN_TESTS_DIR} -v -p no:cacheprovider", timeout, allow_unittest_fallback=False)
+        hidden = _run_tests(ws, v["hidden_command"], timeout, allow_unittest_fallback=False)
 
     layers = [r for r in (own, hidden) if r["has_tests"]]
     if not layers:
@@ -532,6 +544,7 @@ class TerrariumDispatcher:
         if run_verification:
             test_results = run_sandbox_verification(
                 workspace, test_command=test_command, hidden_tests=task.hidden_tests or None,
+                verify=getattr(actual_role, "verify", None) or None,
             )
 
         # 8. Generate self-report
