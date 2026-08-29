@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.archivist import ImpartialArchivist, TIE_EPSILON
+from gorkbot.archivist import ImpartialArchivist
 from gorkbot.handlers import JsonlRecordStore
 from gorkbot.ledger import Seat, SeatLedger
 from gorkbot.race import (
@@ -126,8 +126,7 @@ class TestArchivistJudgement(unittest.TestCase):
         top = next(e for e in entries if e.rank == 1)
         self.assertEqual(len(top.tied_with), 2)
         self.assertIsNotNone(top.tie_break)
-        scores = [e.score for e in entries]
-        self.assertLess(max(scores) - min(scores), TIE_EPSILON)
+        self.assertEqual(len({(e.axes["tier"], e.axes["hidden_rate"], e.axes["own_rate"]) for e in entries}), 1)
 
     def test_hidden_tests_outweigh_own_tests_and_catch_the_slow_build(self):
         from gorkbot.race import SLOW_LRU
@@ -143,6 +142,25 @@ class TestArchivistJudgement(unittest.TestCase):
         self.assertEqual(slow.test_results["own"]["failed"], 0)       # its own test passes
         self.assertGreater(slow.test_results["hidden"]["failed"], 0)  # the benchmark does not
         self.assertEqual(next(e for e in entries if e.candidate_id == slow.candidate_id).verdict, "failed")
+
+    def test_a_slow_pass_still_outranks_a_fast_failure(self):
+        """Facts are tiers; cost only orders inside a tier. A full pass can never score below zero."""
+        from gorkbot.terrarium import TerrariumCandidateResult, State, Status
+        from gorkbot.archivist import ArchivistEntry
+        def fake(name, verdict, hidden_pass, seconds, tokens):
+            r = TerrariumCandidateResult(candidate_id=name, task_id="t", seat=placeholder_seats()[0], role=BUILDER_ROLE,
+                                         final_state=State(session_id=name), output="", self_report="x", tokens_used=tokens,
+                                         duration_seconds=seconds, workspace_path=self.base,
+                                         test_results={"has_tests": True, "own": {"has_tests": False, "passed": 0, "total": 0},
+                                                       "hidden": {"has_tests": True, "passed": hidden_pass, "total": 7}})
+            e = ArchivistEntry(task_id="t", candidate_id=name, model="m", role="r", self_report_present=True, self_report="x", verdict=verdict)
+            return r, e
+        slow_pass = fake("slow", "success", 7, 600.0, 900_000)
+        fast_fail = fake("fast", "failed", 6, 1.0, 100)
+        a_slow, a_fast = ImpartialArchivist.axes(*slow_pass), ImpartialArchivist.axes(*fast_fail)
+        self.assertGreater(a_slow["tier"], a_fast["tier"])
+        self.assertGreater(ImpartialArchivist.composite_score(*slow_pass), 0)
+        self.assertGreater(ImpartialArchivist.composite_score(*slow_pass), ImpartialArchivist.composite_score(*fast_fail))
 
     def test_teardown_removes_sandboxes(self):
         spec = self._spec("good", ScriptedProvider({"lru_cache.py": GOOD_LRU}, "Created lru_cache.py.", "g"))
