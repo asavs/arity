@@ -167,13 +167,16 @@ class SkillRegistry:
     def list_skills(self) -> list[Skill]:
         return list(self._skills.values())
 
-    def compile_prompt(self, skill_names: list[str]) -> str:
+    def compile_prompt(self, skill_names_or_objects: list[str | Skill]) -> str:
         """Render a combined skills block for system prompt injection."""
         sections = []
-        for name in skill_names:
-            sk = self.get(name)
-            if sk:
-                sections.append(sk.render_prompt_section())
+        for item in skill_names_or_objects:
+            if isinstance(item, Skill):
+                sections.append(item.render_prompt_section())
+            elif isinstance(item, str):
+                sk = self.get(item)
+                if sk:
+                    sections.append(sk.render_prompt_section())
         if not sections:
             return ""
         return "\n## Active Role Skills\n\n" + "\n".join(sections)

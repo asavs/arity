@@ -554,3 +554,114 @@ class McpToolAdapter(ToolRunner):
 
     def _default_mcp_stub(self, name: str, args: dict[str, Any]) -> str:
         return f"MCP Tool '{name}' executed with args: {json.dumps(args)}"
+
+
+def create_mcp_tool_runner(
+    workspace_root: Optional[Path] = None,
+    role: Optional[Role] = None,
+    timeout: int = 30,
+) -> McpToolAdapter:
+    """Instantiate an MCP Tool Runner backed by sandboxed local workspace primitives."""
+    ws = (Path(workspace_root) if workspace_root else Path.cwd()).resolve()
+    ws.mkdir(parents=True, exist_ok=True)
+
+    def mcp_executor(tool_name: str, args: dict[str, Any]) -> str:
+        if role and not role.can_use_tool(tool_name):
+            return f"Security Denial: Role '{role.name}' is not permitted to execute tool '{tool_name}'"
+
+        if tool_name == "read_file":
+            path_str = args.get("path", "")
+            offset = int(args.get("offset", 1))
+            limit = int(args.get("limit", 100))
+            target = resolve_sandbox_path(ws, path_str)
+            if not target.exists():
+                return f"Error: File '{path_str}' does not exist."
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            start = max(0, offset - 1)
+            end = start + limit
+            selected = lines[start:end]
+            numbered = [f"{start + i + 1:4d} | {line}" for i, line in enumerate(selected)]
+            return "\n".join(numbered)
+
+        elif tool_name == "write_file":
+            path_str = args.get("path", "")
+            content = args.get("content", "")
+            target = resolve_sandbox_path(ws, path_str)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return f"Successfully wrote {len(content.encode('utf-8'))} bytes to '{path_str}' via MCP."
+
+        elif tool_name == "execute_command":
+            command = args.get("command", "")
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=str(ws),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                out = proc.stdout or ""
+                if proc.stderr:
+                    out += f"\n[stderr]\n{proc.stderr}"
+                return out.strip() or f"[Command '{command}' exited with code {proc.returncode} via MCP]"
+            except Exception as e:
+                return f"MCP command execution error: {e}"
+
+        elif tool_name == "web_search":
+            query = args.get("query", "")
+            return smart_web_search(query)
+
+        return f"Unknown MCP tool: {tool_name}"
+
+    adapter = McpToolAdapter(mcp_client_callable=mcp_executor)
+    adapter.register_mcp_tool({
+        "name": "read_file",
+        "description": "Read file contents inside the workspace via MCP protocol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative file path"},
+                "offset": {"type": "integer", "default": 1},
+                "limit": {"type": "integer", "default": 100},
+            },
+            "required": ["path"],
+        },
+    })
+    adapter.register_mcp_tool({
+        "name": "write_file",
+        "description": "Create or overwrite file inside workspace via MCP protocol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative file path"},
+                "content": {"type": "string", "description": "Text content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    })
+    adapter.register_mcp_tool({
+        "name": "execute_command",
+        "description": "Run shell command inside workspace via MCP protocol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run"},
+            },
+            "required": ["command"],
+        },
+    })
+    adapter.register_mcp_tool({
+        "name": "web_search",
+        "description": "Search the web via MCP protocol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    })
+    return adapter
