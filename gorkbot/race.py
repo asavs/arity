@@ -87,6 +87,8 @@ class RaceReport:
                     "signature": r.signature,
                     "status": r.status,
                     "error": r.error,
+                    "harness_actual": r.harness,
+                    "fallbacks": r.fallbacks,
                     "verdict": (self.entry_for(r).verdict if self.entry_for(r) else None),
                     "score": (self.entry_for(r).score if self.entry_for(r) else None),
                     "rank": (self.entry_for(r).rank if self.entry_for(r) else None),
@@ -438,6 +440,11 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
             p(f"  findings:  {e.entry_text.splitlines()[-1].replace('- **Findings**: ', '')}")
     else:
         p(f"{red}no winner:{reset} every candidate scored <= 0 (failed, lied, or produced nothing verifiable)")
+
+    moved = [r for r in rep.results if r.fallbacks]
+    for r in moved:
+        p(f"{yellow}harness moved:{reset} {(r.spec.name if r.spec else r.candidate_id)} ran as {r.harness} "
+          f"({r.fallbacks} fallback{'s' if r.fallbacks != 1 else ''}); do not attribute this result to the wire.")
 
     losers = [r for r in rep.results if rep.winner is None or r.candidate_id != rep.winner.candidate_id]
     for r in losers:

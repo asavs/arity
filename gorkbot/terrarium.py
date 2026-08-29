@@ -315,6 +315,7 @@ class TerrariumCandidateResult:
     skills_used: list[str] = field(default_factory=list)
     test_results: Optional[dict[str, Any]] = None
     tester_result: Optional["TerrariumCandidateResult"] = None
+    fallbacks: int = 0  # wire -> CLI harness fallbacks during the run; >0 means the harness axis moved
 
 
 class TerrariumDispatcher:
@@ -514,6 +515,13 @@ class TerrariumDispatcher:
         duration = time.time() - start_time
         total_tokens = metrics.total_prompt_tokens + metrics.total_completion_tokens
 
+        # If the wire fell back to a CLI harness mid-run, the candidate did not run on the
+        # harness its signature claims. Record it so the judge can refuse to attribute.
+        fallbacks = int(getattr(model_provider, "fallback_count", 0) or 0)
+        if fallbacks:
+            fallback_name = getattr(getattr(model_provider, "fallback", None), "harness", "cli")
+            harness_name = f"{harness_name}->{fallback_name}"
+
         # 6. Meter tokens in ledger
         self.ledger.meter(seat.id, total_tokens)
 
@@ -549,6 +557,7 @@ class TerrariumDispatcher:
                             "role": actual_role.name,
                             "signature": sig,
                             "harness": harness_name,
+                            "fallbacks": fallbacks,
                             "tool_runner": tool_name,
                             "skills": skills_used,
                             "status": status,
@@ -583,6 +592,7 @@ class TerrariumDispatcher:
             tool_runner_name=tool_name,
             skills_used=skills_used,
             test_results=test_results,
+            fallbacks=fallbacks,
         )
 
     def dispatch_candidates(
