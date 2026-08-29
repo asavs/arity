@@ -6,6 +6,7 @@ external harness swappable as a seamless fallback and A/B benchmark.
 from __future__ import annotations
 
 import json
+import sys
 import os
 import sqlite3
 import urllib.error
@@ -489,11 +490,11 @@ class FallbackModelProvider:
                 return result
             # Primary failed, attempt fallback
             self.fallback_count += 1
-            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {result.error}. Shifting to fallback harness...")
+            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {result.error}. Shifting to fallback harness...", file=sys.stderr)
         except Exception as e:
             self.fallback_count += 1
             self.last_latency_seconds = time.time() - start_t
-            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary exception: {e}. Shifting to fallback harness...")
+            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary exception: {e}. Shifting to fallback harness...", file=sys.stderr)
 
         return self.fallback.call(effect)
 
