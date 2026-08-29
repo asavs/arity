@@ -180,8 +180,10 @@ class RoleRegistry:
         if "engineer" in self._roles:
             self._roles["architect"] = self._roles["engineer"]
         if "reviewer" in self._roles:
-            self._roles["tester"] = self._roles["reviewer"]
             self._roles["auditor"] = self._roles["reviewer"]
+            self._roles.setdefault("tester", self._roles["reviewer"])
+        if "tester" in self._roles:
+            self._roles["test_engineer"] = self._roles["tester"]
         if "scout" in self._roles:
             self._roles["recon"] = self._roles["scout"]
     def register(self, role: Role) -> None:
