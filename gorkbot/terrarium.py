@@ -314,6 +314,9 @@ class TerrariumCandidateResult:
     tool_runner_name: str = "sandbox"
     skills_used: list[str] = field(default_factory=list)
     test_results: Optional[dict[str, Any]] = None
+    tester_result: Optional["TerrariumCandidateResult"] = None
+
+
 class TerrariumDispatcher:
     """Dispatches tasks across multi-dimensional candidate kernels in isolated parallel sandboxes."""
 
@@ -655,6 +658,53 @@ class TerrariumDispatcher:
         ]
         return self.dispatch_candidates(task=task, candidates=specs, max_workers=max_workers)
 
+    def author_hidden_tests(
+        self,
+        task: TaskRecord,
+        tester: CandidateSpec,
+    ) -> tuple[dict[str, str], TerrariumCandidateResult]:
+        """Run a tester candidate against the brief and harvest the test files it writes.
+
+        The tester works in its own sandbox and never sees any builder output. Whatever
+        `test_*.py` files it leaves behind become the hidden suite for the race.
+        """
+        from .roles import TESTER_ROLE
+        tester_task = TaskRecord(
+            from_role=task.from_role,
+            to_role="tester",
+            brief=(
+                "Author the acceptance tests for the following task. You are NOT implementing it; "
+                "another engineer will, without seeing your tests. Write only `test_*.py` files.\n\n"
+                f"## Task under test\n{task.brief}"
+            ),
+            depth=task.depth,
+            max_depth=task.max_depth,
+            task_context=task.task_context,
+        )
+        if tester.role is None:
+            tester.role = TESTER_ROLE
+        res = self.dispatch_single(task=tester_task, candidate_or_seat=tester, run_verification=False)
+        harvested: dict[str, str] = {}
+        if res.workspace_path.exists():
+            for p in sorted(res.workspace_path.rglob("test_*.py")):
+                if any(part in ARTIFACT_IGNORE_PARTS for part in p.parts):
+                    continue
+                harvested[p.name] = p.read_text(encoding="utf-8")
+        return harvested, res
+
+    def teardown(self, results: list[TerrariumCandidateResult]) -> None:
+        """Remove candidate sandboxes and empty task directories (tear-down half of tear-up/tear-down)."""
+        for r in results:
+            ws = Path(r.workspace_path)
+            try:
+                if ws.is_dir() and ws != self.base_workspace and self.base_workspace in ws.parents:
+                    shutil.rmtree(ws, ignore_errors=True)
+                    parent = ws.parent
+                    if parent != self.base_workspace and parent.is_dir() and not any(parent.iterdir()):
+                        parent.rmdir()
+            except Exception:
+                pass
+
     def race(
         self,
         task: Union[TaskRecord, str],
@@ -662,12 +712,26 @@ class TerrariumDispatcher:
         test_command: Optional[str] = None,
         max_workers: int = 4,
         archivist: Optional[Any] = None,
+        tester: Optional[CandidateSpec] = None,
+        teardown: bool = False,
     ) -> tuple[Optional[TerrariumCandidateResult], list[TerrariumCandidateResult], list[Any]]:
-        """Execute an empirical race between multidimensional candidates, audit and rank them."""
-        if isinstance(task, str):
-            task_record = TaskRecord(brief=task)
-        else:
-            task_record = task
+        """Execute an empirical race between multidimensional candidates, audit and rank them.
+
+        Order of operations matters for impartiality:
+          1. tester (if given) authors hidden tests, before any builder runs
+          2. builders run in parallel sandboxes; each is verified against its own tests
+             AND the hidden suite, which is only written into the sandbox after the build
+          3. the archivist audits artifacts (excluding verification side-effects) and scores
+          4. optionally, sandboxes are torn down
+        """
+        task_record = TaskRecord(brief=task) if isinstance(task, str) else task
+
+        tester_result: Optional[TerrariumCandidateResult] = None
+        if tester is not None:
+            harvested, tester_result = self.author_hidden_tests(task_record, tester)
+            merged = dict(task_record.hidden_tests)
+            merged.update(harvested)
+            task_record.hidden_tests = merged
 
         results = self.dispatch_candidates(
             task=task_record,
@@ -682,4 +746,9 @@ class TerrariumDispatcher:
             archivist = ImpartialArchivist(store=self.store)
 
         winner, entries = archivist.evaluate_trial(results)
+        for r in results:
+            r.tester_result = tester_result
+
+        if teardown:
+            self.teardown(results + ([tester_result] if tester_result else []))
         return winner, results, entries
