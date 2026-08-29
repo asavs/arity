@@ -115,16 +115,18 @@ class AntigravityWireProvider:
                     except Exception:
                         args = {"raw": fn.get("arguments")}
                     call_names[tc.get("id", "")] = fn.get("name", "")
-                    part: dict[str, Any] = {"functionCall": {"name": fn.get("name", ""), "args": args}}
+                    # Claude behind this endpoint requires tool_use ids on both halves of the exchange.
+                    part: dict[str, Any] = {"functionCall": {"id": tc.get("id", ""), "name": fn.get("name", ""), "args": args}}
                     if tc.get("thought_signature"):
                         part["thoughtSignature"] = tc["thought_signature"]
                     parts.append(part)
                 contents.append({"role": "model", "parts": parts or [{"text": ""}]})
             elif role == "tool":
-                name = msg.get("name") or call_names.get(msg.get("tool_call_id", ""), "tool")
+                call_id = msg.get("tool_call_id", "")
+                name = msg.get("name") or call_names.get(call_id, "tool")
                 contents.append({
                     "role": "user",
-                    "parts": [{"functionResponse": {"name": name, "response": {"output": str(content)}}}],
+                    "parts": [{"functionResponse": {"id": call_id, "name": name, "response": {"output": str(content)}}}],
                 })
             else:  # "user"
                 contents.append({
@@ -202,7 +204,7 @@ class AntigravityWireProvider:
                         if "functionCall" in p:
                             fc = p["functionCall"]
                             tc: dict[str, Any] = {
-                                "id": f"call_{uuid.uuid4().hex[:8]}",
+                                "id": fc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name"),
