@@ -469,6 +469,53 @@ def parse_judgement(text: str, key: dict[str, str]) -> dict[str, Any]:
     return out
 
 
+def check_citations(text: str, key: dict[str, str], rep: RaceReport) -> dict[str, Any]:
+    """For each 'Candidate X' paragraph, every backticked identifier must appear in X's sandbox.
+
+    A judge is required to cite; this checks the citations are real. It is a fact printed next to
+    the judgement, not a score.
+    """
+    import re
+    from .terrarium import ARTIFACT_IGNORE_PARTS
+    by_id = {r.candidate_id: r for r in rep.results}
+    corpus: dict[str, str] = {}
+    for L, cid in key.items():
+        ws = Path(by_id[cid].workspace_path) if cid in by_id else None
+        blob = ""
+        if ws and ws.is_dir():
+            for p in ws.rglob("*"):
+                if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in p.relative_to(ws).parts):
+                    try:
+                        blob += p.relative_to(ws).as_posix() + "\n" + p.read_text(encoding="utf-8", errors="replace") + "\n"
+                    except Exception:
+                        pass
+        corpus[L] = blob
+    checked = true = 0
+    false_cites: list[str] = []
+    # Attribute each backticked token to the most recent candidate letter mentioned before it.
+    current: Optional[str] = None
+    for m in re.finditer(r"(?:\*\*|\b)([A-Z])(?:\*\*|\b)(?=\s*[-:—–]|\s*\))|`([^`\n]{2,80})`", text or ""):
+        if m.group(1) and m.group(1) in key:
+            current = m.group(1)
+            continue
+        token = m.group(2)
+        if not token or current is None:
+            continue
+        # "B has no `__repr__`" is a claim of absence; only positive citations are checkable here.
+        lead = (text[max(0, m.start() - 60):m.start()]).lower()
+        if re.search(r"\b(no|not|lacks?|lacking|without|omits?|omitted|missing|never|instead of|rather than)\b[^`]*$", lead):
+            continue
+        ident = token.split("(")[0].split("::")[-1].split(".")[-1].strip()
+        if not re.fullmatch(r"[\w/]+", ident) or ident in ("None", "True", "False", "int", "str", "bool", "in", "OrderedDict", "dict", "self"):
+            continue
+        checked += 1
+        if ident in corpus.get(current, ""):
+            true += 1
+        else:
+            false_cites.append(f"{current}:{ident}")
+    return {"checked": checked, "true": true, "false": false_cites[:10]}
+
+
 def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher, seats: list[Seat]) -> list[dict[str, Any]]:
     from .roles import RoleRegistry
     from .types import StoreRecord
@@ -489,8 +536,13 @@ def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher
         return []
     results = dispatcher.dispatch_candidates(task=review_task, candidates=judge_specs, max_workers=cfg.workers, run_verification=False)
     judgements: list[dict[str, Any]] = []
+    model_of = {c.candidate_id: c.seat.model for c in rep.results}
     for r in results:
         j = parse_judgement(r.output or "", key)
+        # Two facts about the judgement itself, reported not scored: did it rank its own model first,
+        # and do the identifiers it cites (files, tests, names) actually exist in the sandbox it cites them for.
+        j["ranked_own_model_first"] = bool(j["order"]) and model_of.get(j["order"][0]) == r.seat.model
+        j["citations"] = check_citations(r.output or "", key, rep)
         j.update({
             "task_id": rep.task.id, "judge": r.seat.model, "judge_seat": r.seat.id, "harness": r.harness,
             "status": r.status, "tokens_used": r.tokens_used, "duration_seconds": round(r.duration_seconds, 2),
@@ -573,7 +625,13 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
                 continue
             order = " > ".join(names.get(c, c) for c in j["order"])
             ties = f"  ties: {[[names.get(c, c) for c in t] for t in j['ties']]}" if j["ties"] else ""
-            p(f"  {j['judge']:20} {order}{ties}")
+            cit = j.get("citations") or {}
+            flags = []
+            if cit.get("checked"):
+                flags.append(f"cited {cit['true']}/{cit['checked']} true" + (f" (false: {', '.join(cit['false'])})" if cit.get("false") else ""))
+            if j.get("ranked_own_model_first"):
+                flags.append("ranked its own model first")
+            p(f"  {j['judge']:20} {order}{ties}" + (f"   {dim}[{'; '.join(flags)}]{reset}" if flags else ""))
             for cid, note in (j.get("cherry_picks") or {}).items():
                 if note:
                     p(f"      {dim}cherry-pick from {names.get(cid, cid)}: {note}{reset}")
