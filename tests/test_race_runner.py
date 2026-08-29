@@ -269,6 +269,12 @@ class TestTaskBankAndPresets(unittest.TestCase):
             self.assertTrue(j["parsed"])
             self.assertEqual(set(j["order"]), ids)
             self.assertTrue(set(j["cherry_picks"]) <= ids)
+            self.assertIn("ranked_own_model_first", j)
+            self.assertEqual(set(j["citations"]), {"checked", "true", "false"})
+        # the bundle tells judges what is already counted, so they spend tokens on the remainder
+        text, _ = blind_bundle(rep)
+        self.assertIn("counted already", text)
+        self.assertIn("loc=", text)
         # the bundle never truncates and never leaks a model name
         text, key = blind_bundle(rep)
         self.assertEqual(len(key), 3)
