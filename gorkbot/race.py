@@ -430,7 +430,7 @@ def blind_bundle(rep: RaceReport) -> tuple[str, dict[str, str]]:
             f"\n## Archivist facts for {L}\n"
             f"- verdict: {e.verdict if e else r.status}\n"
             f"- own tests: {own.get('passed', 0)}/{own.get('total', 0)} | hidden tests: {hidden.get('passed', 0)}/{hidden.get('total', 0)}\n"
-            f"- self-report: {(r.self_report or '').strip()[:800]}"
+            f"- candidate's own closing report: {(r.output or '').strip()}"  # not self_report: that wrapper names the model
         )
     parts.append(
         f"\n\n# Your task\nRank candidates {', '.join(letters)}. One cited reason per rank (a file, a line, a test name). "
