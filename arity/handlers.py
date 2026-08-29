@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -578,6 +579,7 @@ class JsonlRecordStore:
     def __init__(self, root: Optional[Path] = None):
         self.root = Path(root) if root else Path(".arity/records")
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()  # parallel candidates append concurrently; interleaved lines corrupt JSONL
 
     def _path(self, kind: str) -> Path:
         return self.root / f"{kind}.jsonl"
