@@ -55,6 +55,10 @@ class RaceConfig:
     teardown: Optional[bool] = None  # None -> mock tears down, live keeps
     store_root: Optional[Path] = None
     workspace_root: Optional[Path] = None
+    # Review phase: the reviewer role reads a blind bundle of the candidates and ranks them.
+    judges: list[str] = field(default_factory=list)  # model names to seat as judges
+    review: str = "tie"  # "tie" (only when facts tie) | "always" | "never"
+    judge_provider: Optional[Callable[[str], Any]] = None  # tests: model name -> ModelProvider
 
 
 @dataclass
@@ -68,6 +72,7 @@ class RaceReport:
     archivist: ImpartialArchivist
     ephemeral: bool
     notes: list[str] = field(default_factory=list)
+    judgements: list[dict[str, Any]] = field(default_factory=list)
 
     def entry_for(self, r: TerrariumCandidateResult) -> Optional[ArchivistEntry]:
         return next((e for e in self.entries if e.candidate_id == r.candidate_id), None)
@@ -81,6 +86,7 @@ class RaceReport:
             "winner": self.winner.spec.name if self.winner and self.winner.spec else None,
             "winner_signature": self.winner.signature if self.winner else None,
             "notes": self.notes,
+            "judgements": self.judgements,
             "results": [
                 {
                     "name": r.spec.name if r.spec else r.candidate_id,
@@ -334,6 +340,11 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     if cfg.mock:
         attach_mocks(candidates)
         notes.append("mock mode: canned providers, ephemeral store, sandboxes torn down")
+        if cfg.judges and not cfg.judge_provider:
+            # Canned judge: ranks by letter and cherry-picks from B, so the review phase is visible offline.
+            cfg.judge_provider = lambda model: ScriptedProvider(
+                {}, '1. A - fewest lines (lru_cache.py).\n2. B - broader tests.\n3. C - no artifacts.\n'
+                    '{"order": ["A", "B", "C"], "ties": [], "cherry_picks": {"B": "its eviction test"}}', f"judge-{model}")
 
     # Mock runs never write to the real scorecard; live runs are the scorecard's whole purpose.
     ephemeral = cfg.mock
@@ -362,14 +373,128 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         notes.append("no hidden tests: candidates are graded only on tests they wrote themselves (use --task or --tester)")
 
     teardown = cfg.teardown if cfg.teardown is not None else ephemeral
+    # Review must read the sandboxes, so it runs before any teardown.
     winner, results, entries = dispatcher.race(
         task=task, candidates=candidates, test_command=cfg.test_command, max_workers=cfg.workers,
-        archivist=archivist, tester=tester_spec, teardown=teardown,
+        archivist=archivist, tester=tester_spec, teardown=False,
     )
+    report = RaceReport(task=task, race_task=race_task, candidates=candidates, winner=winner, results=results,
+                        entries=entries, archivist=archivist, ephemeral=ephemeral, notes=notes)
+
+    top = report.entry_for(winner) if winner else None
+    facts_tie = bool(top and top.tied_with)
+    if cfg.judges and cfg.review != "never" and (cfg.review == "always" or facts_tie):
+        report.judgements = run_review(report, cfg, dispatcher, seats)
+    elif cfg.judges and not facts_tie:
+        notes.append("review skipped: the facts already separated the candidates (use --review always to force)")
+
+    if teardown:
+        dispatcher.teardown(results + ([results[0].tester_result] if results and results[0].tester_result else []))
     if tmp_root and teardown:
         shutil.rmtree(tmp_root, ignore_errors=True)
-    return RaceReport(task=task, race_task=race_task, candidates=candidates, winner=winner, results=results,
-                      entries=entries, archivist=archivist, ephemeral=ephemeral, notes=notes)
+    return report
+
+
+# -----------------------------------------------------------------------------
+# Review phase: blind bundle -> reviewer role on each judge seat -> one order each
+# -----------------------------------------------------------------------------
+
+def blind_bundle(rep: RaceReport) -> tuple[str, dict[str, str]]:
+    """The evidence every judge sees, with candidate identities scrubbed to letters.
+
+    Full files, never truncated: a judge that says 'truncated, cannot verify' is right, and
+    a bundle that forces it to say so is a bug in the bundle. Returns (text, letter -> candidate_id).
+    """
+    import random
+    from .terrarium import ARTIFACT_IGNORE_PARTS
+    ordered = list(rep.results)
+    random.Random(rep.task.id).shuffle(ordered)
+    letters = [chr(ord("A") + i) for i in range(len(ordered))]
+    key = {L: r.candidate_id for L, r in zip(letters, ordered)}
+    parts = [f"# Brief\n{rep.task.brief.strip()}\n"]
+    for L, r in zip(letters, ordered):
+        e = rep.entry_for(r)
+        parts.append(f"\n\n# Candidate {L}")
+        ws = Path(r.workspace_path)
+        if ws.is_dir():
+            for p in sorted(ws.rglob("*")):
+                if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in p.relative_to(ws).parts):
+                    try:
+                        body = p.read_text(encoding="utf-8")
+                    except Exception:
+                        continue
+                    parts.append(f"\n## {p.relative_to(ws).as_posix()}\n```\n{body}\n```")
+        tr = r.test_results or {}
+        own, hidden = tr.get("own") or {}, tr.get("hidden") or {}
+        parts.append(
+            f"\n## Archivist facts for {L}\n"
+            f"- verdict: {e.verdict if e else r.status}\n"
+            f"- own tests: {own.get('passed', 0)}/{own.get('total', 0)} | hidden tests: {hidden.get('passed', 0)}/{hidden.get('total', 0)}\n"
+            f"- self-report: {(r.self_report or '').strip()[:800]}"
+        )
+    parts.append(
+        f"\n\n# Your task\nRank candidates {', '.join(letters)}. One cited reason per rank (a file, a line, a test name). "
+        "Say 'tie' where evidence cannot separate two. Name anything worth cherry-picking from a candidate that did not win. "
+        "Facts are settled; do not re-run anything. End with one JSON line: "
+        '{"order": ["A", ...], "ties": [["A","B"], ...], "cherry_picks": {"A": "...", ...}}'
+    )
+    return "".join(parts), key
+
+
+def parse_judgement(text: str, key: dict[str, str]) -> dict[str, Any]:
+    """Pull the trailing JSON line out of a judge's reply and map letters back to candidate ids."""
+    out: dict[str, Any] = {"order": [], "ties": [], "cherry_picks": {}, "parsed": False}
+    decoder = json.JSONDecoder()
+    text = text or ""
+    # Try every '{' from the end backwards; the ranking object may nest (cherry_picks is a dict).
+    for start in reversed([i for i, ch in enumerate(text) if ch == "{"]):
+        try:
+            data, _ = decoder.raw_decode(text[start:])
+            if not isinstance(data, dict) or "order" not in data:
+                continue
+            out["order"] = [key.get(L, L) for L in data.get("order", [])]
+            out["ties"] = [[key.get(L, L) for L in t] for t in data.get("ties", [])]
+            out["cherry_picks"] = {key.get(L, L): v for L, v in (data.get("cherry_picks") or {}).items()}
+            out["parsed"] = True
+            break
+        except Exception:
+            continue
+    return out
+
+
+def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher, seats: list[Seat]) -> list[dict[str, Any]]:
+    from .roles import RoleRegistry
+    from .types import StoreRecord
+    reviewer = RoleRegistry().get("reviewer")
+    text, key = blind_bundle(rep)
+    review_task = TaskRecord(brief=text, from_role="Asa", to_role="reviewer", metadata={"reviews": rep.task.id})
+    judge_specs: list[CandidateSpec] = []
+    for model in cfg.judges:
+        seat = next((s for s in seats if s.model == model or s.id == model), None)
+        if seat is None:
+            rep.notes.append(f"no seat for judge '{model}'")
+            continue
+        spec = CandidateSpec(seat=seat, name=f"judge:{model}", role=reviewer, harness="wire", tool_runner_type="sandbox", skills=[])
+        if cfg.judge_provider:
+            spec.custom_model_provider = cfg.judge_provider(model)
+        judge_specs.append(spec)
+    if not judge_specs:
+        return []
+    results = dispatcher.dispatch_candidates(task=review_task, candidates=judge_specs, max_workers=cfg.workers, run_verification=False)
+    judgements: list[dict[str, Any]] = []
+    for r in results:
+        j = parse_judgement(r.output or "", key)
+        j.update({
+            "task_id": rep.task.id, "judge": r.seat.model, "judge_seat": r.seat.id, "harness": r.harness,
+            "status": r.status, "tokens_used": r.tokens_used, "duration_seconds": round(r.duration_seconds, 2),
+            "key": key, "text": r.output or r.error or "",
+        })
+        judgements.append(j)
+        try:
+            dispatcher.store.append(StoreRecord(kind="judgement", record=j))
+        except Exception:
+            pass
+    return judgements
 
 
 # -----------------------------------------------------------------------------
@@ -431,6 +556,21 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
             cells.append(f"{colour}{cell}{reset}" if name == "verdict" else cell)
         p(" | ".join(cells))
     p()
+
+    if rep.judgements:
+        names = {r.candidate_id: (r.spec.name if r.spec else r.candidate_id) for r in rep.results}
+        p(f"{bold}review{reset} (facts tied; blind bundle, letters shuffled)")
+        for j in rep.judgements:
+            if not j.get("parsed"):
+                p(f"  {j['judge']:20} {red}no parseable ranking{reset} ({j['status']})")
+                continue
+            order = " > ".join(names.get(c, c) for c in j["order"])
+            ties = f"  ties: {[[names.get(c, c) for c in t] for t in j['ties']]}" if j["ties"] else ""
+            p(f"  {j['judge']:20} {order}{ties}")
+            for cid, note in (j.get("cherry_picks") or {}).items():
+                if note:
+                    p(f"      {dim}cherry-pick from {names.get(cid, cid)}: {note}{reset}")
+        p()
 
     if rep.winner and rep.winner.spec:
         e = rep.entry_for(rep.winner)
