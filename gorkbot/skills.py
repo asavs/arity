@@ -66,6 +66,20 @@ PYTEST_TDD_SKILL = Skill(
     tags=("testing", "pytest", "verification"),
 )
 
+TEST_ENGINEERING_SKILL = Skill(
+    name="test-engineering",
+    description="Author hidden acceptance tests for a task before any implementation exists.",
+    instructions=(
+        "1. Derive one test per observable promise in the brief; name tests after the promise.\n"
+        "2. Cover the contract, the edge cases, and the failure modes; skip implementation details.\n"
+        "3. Turn performance adjectives into a benchmark test with an explicit time budget.\n"
+        "4. Declare the expected module and class/function names in a docstring at the top of the file.\n"
+        "5. Write only `test_*.py` files; never an implementation or a stub."
+    ),
+    tools=("write_file", "read_file", "run_command"),
+    tags=("testing", "acceptance", "hidden-tests"),
+)
+
 SCOUT_RECON_SKILL = Skill(
     name="scout-recon",
     description="Rapid read-only codebase reconnaissance with compressed architectural handoffs.",
@@ -90,7 +104,7 @@ class SkillRegistry:
         self._discover_from_disk()
 
     def _register_defaults(self) -> None:
-        for sk in (FIRECRAWL_SKILL, PYTHON_DEVELOPER_SKILL, PYTEST_TDD_SKILL, SCOUT_RECON_SKILL):
+        for sk in (FIRECRAWL_SKILL, PYTHON_DEVELOPER_SKILL, PYTEST_TDD_SKILL, SCOUT_RECON_SKILL, TEST_ENGINEERING_SKILL):
             self.register(sk)
 
     def _discover_from_disk(self) -> None:
