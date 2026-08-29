@@ -323,16 +323,16 @@ class TerrariumDispatcher:
         actual_role = spec.role or role or PYTHON_DEVELOPER_ROLE
 
         start_time = time.time()
-        candidate_id = f"cand_{seat.id}_{uuid.uuid4().hex[:6]}"
+        # Seat ids like "google:asa:gemini-3.6-flash" are not valid directory names on Windows.
+        seat_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seat.id)).strip("-")
+        candidate_id = f"cand_{seat_slug}_{uuid.uuid4().hex[:6]}"
         workspace = self.base_workspace / task.id / candidate_id
         workspace.mkdir(parents=True, exist_ok=True)
 
         sig = spec.signature(default_role=actual_role.name)
-        harness_name = spec.harness if isinstance(spec.harness, str) else spec.harness.__class__.__name__
-        tool_name = spec.tool_runner_type if isinstance(spec.tool_runner_type, str) else (
-            spec.tool_runner_type.__name__ if hasattr(spec.tool_runner_type, "__name__") else spec.tool_runner_type.__class__.__name__
-        )
-        skills_used = [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in spec.skills]
+        harness_name = spec.harness_name
+        tool_name = spec.tool_runner_name
+        skills_used = spec.skill_names
 
         if task.is_depth_exceeded():
             return TerrariumCandidateResult(
