@@ -92,6 +92,9 @@ class AntigravityWireProvider:
         contents: list[dict[str, Any]] = []
         system_instruction: Optional[dict[str, Any]] = None
 
+        # Gemini function calling needs the tool name on every functionResponse; OpenAI-style
+        # tool messages only carry the call id, so remember the name from the assistant turn.
+        call_names: dict[str, str] = {}
         for msg in effect.messages:
             role = msg.get("role")
             content = msg.get("content", "")
@@ -101,11 +104,28 @@ class AntigravityWireProvider:
                     "parts": [{"text": str(content)}],
                 }
             elif role == "assistant":
+                parts: list[dict[str, Any]] = []
+                if content:
+                    parts.append({"text": str(content)})
+                for tc in msg.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {"raw": fn.get("arguments")}
+                    call_names[tc.get("id", "")] = fn.get("name", "")
+                    part: dict[str, Any] = {"functionCall": {"name": fn.get("name", ""), "args": args}}
+                    if tc.get("thought_signature"):
+                        part["thoughtSignature"] = tc["thought_signature"]
+                    parts.append(part)
+                contents.append({"role": "model", "parts": parts or [{"text": ""}]})
+            elif role == "tool":
+                name = msg.get("name") or call_names.get(msg.get("tool_call_id", ""), "tool")
                 contents.append({
-                    "role": "model",
-                    "parts": [{"text": str(content)}],
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": name, "response": {"output": str(content)}}}],
                 })
-            else:  # "user" or "tool"
+            else:  # "user"
                 contents.append({
                     "role": "user",
                     "parts": [{"text": str(content)}],
@@ -126,12 +146,29 @@ class AntigravityWireProvider:
         if model_enum:
             inner_request["labels"] = {"model_enum": model_enum}
 
+        # Tool declarations (OpenAI schema -> Gemini functionDeclarations). Without these the
+        # model can only describe the work in prose; a live race graded that as an empty sandbox.
+        if effect.tools:
+            decls = []
+            for t in effect.tools:
+                fn = t.get("function", {})
+                if fn.get("name"):
+                    decls.append({
+                        "name": fn["name"],
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                    })
+            if decls:
+                inner_request["tools"] = [{"functionDeclarations": decls}]
+
         if is_claude:
             inner_request["toolConfig"] = {
                 "functionCallingConfig": {
                     "mode": "VALIDATED",
                 }
             }
+        elif effect.tools:
+            inner_request["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
 
         payload = {
             "project": self.project_id,
@@ -163,14 +200,18 @@ class AntigravityWireProvider:
                             content_text += p["text"]
                         if "functionCall" in p:
                             fc = p["functionCall"]
-                            tool_calls.append({
+                            tc: dict[str, Any] = {
                                 "id": f"call_{uuid.uuid4().hex[:8]}",
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name"),
                                     "arguments": json.dumps(fc.get("args", {})),
                                 },
-                            })
+                            }
+                            # Gemini 3 rejects a replayed functionCall without its thought signature.
+                            if p.get("thoughtSignature"):
+                                tc["thought_signature"] = p["thoughtSignature"]
+                            tool_calls.append(tc)
 
                 usage_meta = res.get("response", {}).get("usageMetadata", {})
                 usage = {
