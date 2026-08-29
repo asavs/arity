@@ -410,264 +410,37 @@ def handle_auth_command(args: argparse.Namespace) -> None:
 
 
 def handle_race_command(args: argparse.Namespace) -> None:
-    """Handle arity race A/B/C multidimensional trial command."""
-    from .roles import RoleRegistry, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
-    from .terrarium import CandidateSpec, TaskRecord, TerrariumDispatcher
-    from .archivist import ImpartialArchivist
-    from .skills import PYTEST_TDD_SKILL, FIRECRAWL_SKILL, SCOUT_RECON_SKILL
+    """arity race: one task, N single-axis candidates, one impartial judge. Logic lives in race.py."""
+    from .race import RaceConfig, render_report, run_race
 
-    prompt = args.prompt
-    variants_arg = (getattr(args, "variants", "") or "wire,cli,omp").lower()
-    role_name = getattr(args, "role", "builder") or "builder"
-    test_cmd = getattr(args, "test_cmd", None)
-    is_mock = getattr(args, "mock", False)
-    as_json = getattr(args, "json", False)
-    workers = int(getattr(args, "workers", 4) or 4)
-
-    roles = RoleRegistry()
-    target_role = roles.get(role_name) or BUILDER_ROLE
-
-    candidates: list[CandidateSpec] = []
-
-    # 1. Resolve candidates from presets or flags
-    if variants_arg in ("wire,cli,omp", "harness", "wire_cli_omp"):
-        seat_a = Seat(id="gemini-flash", provider="gemini", model="gemini-3.6-flash")
-        seat_b = Seat(id="gpt-5.6-sol", provider="codex", model="gpt-5.6-sol")
-        seat_c = Seat(id="claude-sonnet", provider="omp", model="claude-3-7-sonnet")
-        candidates = [
-            CandidateSpec(seat=seat_a, name="Wire + AST Tools", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat_b, name="CLI + MCP Tools", role=target_role, harness="cli", tool_runner_type="mcp", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat_c, name="OMP + Shell Tools", role=target_role, harness="omp", tool_runner_type="shell", skills=[]),
-        ]
-    elif variants_arg in ("ast,mcp,shell", "tools", "ast_mcp_shell"):
-        seat = Seat(id="gemini-flash", provider="gemini", model="gemini-3.6-flash")
-        candidates = [
-            CandidateSpec(seat=seat, name="AST Sandbox Tools", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat, name="MCP Tool Adapter", role=target_role, harness="wire", tool_runner_type="mcp", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat, name="Local Shell Tools", role=target_role, harness="wire", tool_runner_type="shell", skills=["pytest-tdd"]),
-        ]
-    elif variants_arg in ("tdd,baseline", "skills", "tdd_baseline"):
-        seat = Seat(id="gemini-flash", provider="gemini", model="gemini-3.6-flash")
-        candidates = [
-            CandidateSpec(seat=seat, name="With pytest-tdd Skill", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat, name="Zero-Shot Baseline", role=target_role, harness="wire", tool_runner_type="sandbox", skills=[]),
-            CandidateSpec(seat=seat, name="Scout Recon Skill", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["scout-recon", "firecrawl-developer-index"]),
-        ]
-    elif variants_arg in ("models", "gemini,gpt,claude"):
-        seat_a = Seat(id="gemini-flash", provider="gemini", model="gemini-3.6-flash")
-        seat_b = Seat(id="gpt-5.6-sol", provider="openai", model="gpt-5.6-sol")
-        seat_c = Seat(id="claude-sonnet", provider="anthropic", model="claude-3-7-sonnet")
-        candidates = [
-            CandidateSpec(seat=seat_a, name="Gemini 3.6 Flash", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat_b, name="GPT 5.6 Sol", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-            CandidateSpec(seat=seat_c, name="Claude 3.7 Sonnet", role=target_role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"]),
-        ]
-    else:
-        # Parse custom comma-separated list of variant names
-        var_list = [v.strip() for v in variants_arg.split(",") if v.strip()]
-        for idx, v in enumerate(var_list):
-            seat = Seat(id=f"seat_{v}", provider="gemini", model=f"model-{v}")
-            candidates.append(
-                CandidateSpec(
-                    seat=seat,
-                    name=f"Variant {v.upper()}",
-                    role=target_role,
-                    harness="wire" if "wire" in v else ("cli" if "cli" in v else ("omp" if "omp" in v else "wire")),
-                    tool_runner_type="mcp" if "mcp" in v else ("shell" if "shell" in v else "sandbox"),
-                    skills=["pytest-tdd"] if "tdd" in v or "wire" in v else [],
-                )
-            )
-
-    # If mock mode is requested, attach deterministic sequence providers
-    if is_mock:
-        for i, cand in enumerate(candidates):
-            class MockRaceProvider:
-                def __init__(self, c_idx: int, c_name: str):
-                    self.c_idx = c_idx
-                    self.c_name = c_name
-                    self.turn = 0
-
-                def call(self, effect: CallModel) -> ModelCompleted:
-                    self.turn += 1
-                    if self.turn == 1:
-                        # Turn 1: Write implementation and unit test files
-                        tool_calls = [
-                            {
-                                "id": f"call_w_{self.c_idx}_1",
-                                "type": "function",
-                                "function": {
-                                    "name": "write_file",
-                                    "arguments": json.dumps({
-                                        "path": "lru_cache.py",
-                                        "content": (
-                                            "class LRUCache:\n"
-                                            "    def __init__(self, capacity: int = 128):\n"
-                                            "        self.capacity = capacity\n"
-                                            "        self.cache = {}\n\n"
-                                            "    def get(self, key: str):\n"
-                                            "        if key not in self.cache:\n"
-                                            "            return None\n"
-                                            "        val = self.cache.pop(key)\n"
-                                            "        self.cache[key] = val\n"
-                                            "        return val\n\n"
-                                            "    def put(self, key: str, val):\n"
-                                            "        if key in self.cache:\n"
-                                            "            self.cache.pop(key)\n"
-                                            "        elif len(self.cache) >= self.capacity:\n"
-                                            "            oldest = next(iter(self.cache))\n"
-                                            "            del self.cache[oldest]\n"
-                                            "        self.cache[key] = val\n"
-                                        ),
-                                    }),
-                                },
-                            },
-                            {
-                                "id": f"call_w_{self.c_idx}_2",
-                                "type": "function",
-                                "function": {
-                                    "name": "write_file",
-                                    "arguments": json.dumps({
-                                        "path": "test_lru_cache.py",
-                                        "content": (
-                                            "import unittest\n"
-                                            "from lru_cache import LRUCache\n\n"
-                                            "class TestLRU(unittest.TestCase):\n"
-                                            "    def test_basic_get_put(self):\n"
-                                            "        cache = LRUCache(2)\n"
-                                            "        cache.put('a', 1)\n"
-                                            "        cache.put('b', 2)\n"
-                                            "        self.assertEqual(cache.get('a'), 1)\n"
-                                            "        cache.put('c', 3)\n"
-                                            "        self.assertIsNone(cache.get('b'))\n"
-                                            "        self.assertEqual(cache.get('c'), 3)\n\n"
-                                            "if __name__ == '__main__':\n"
-                                            "    unittest.main()\n"
-                                        ),
-                                    }),
-                                },
-                            },
-                        ]
-                        return ModelCompleted(
-                            content=f"Implementing LRU Cache with unit tests for {self.c_name}",
-                            tool_calls=tool_calls,
-                            usage={"prompt_tokens": 150, "completion_tokens": 120},
-                            finish_reason="tool_calls",
-                            seat_id=f"mock_{self.c_idx}",
-                        )
-                    else:
-                        return ModelCompleted(
-                            content=f"Completed LRU cache implementation with full test suite in {self.c_name}.",
-                            tool_calls=[],
-                            usage={"prompt_tokens": 200, "completion_tokens": 50},
-                            finish_reason="stop",
-                            seat_id=f"mock_{self.c_idx}",
-                        )
-            cand.custom_model_provider = MockRaceProvider(i, cand.name)
-
-    # 2. Print initial race header
-    safe_print("\n\033[1;36m========================================================================================\033[0m")
-    safe_print("\033[1;32m[RACE] ARITY MULTI-DIMENSIONAL TRIAL (A/B/C Test)\033[0m")
-    safe_print(f"  \033[1mTask:\033[0m       \"{prompt}\"")
-    safe_print(f"  \033[1mVariants:\033[0m   {variants_arg}")
-    safe_print(f"  \033[1mCandidates:\033[0m {len(candidates)}")
-    safe_print("\033[1;36m========================================================================================\033[0m\n")
-
-    for idx, c in enumerate(candidates, 1):
-        m_str, h_str, t_str, s_str = c.display_tuple()
-        safe_print(f"  \033[1;33m[{idx}]\033[0m \033[1m{c.name:25}\033[0m | Model: {m_str:18} | Harness: {h_str:8} | Tools: {t_str:12} | Skills: {s_str}")
-    safe_print()
-
-    # 3. Dispatch race across isolated candidate sandboxes
-    ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
-    dispatcher = TerrariumDispatcher(ledger=ledger)
-    task_rec = TaskRecord(brief=prompt, from_role="Asa", to_role=target_role.name)
-
-    archivist = ImpartialArchivist()
-    winner, results, entries = dispatcher.race(
-        task=task_rec,
-        candidates=candidates,
-        test_command=test_cmd,
-        max_workers=workers,
-        archivist=archivist,
+    cfg = RaceConfig(
+        prompt=getattr(args, "prompt", "") or "",
+        task_name=getattr(args, "task", None),
+        variants=getattr(args, "variants", None) or "models",
+        role=getattr(args, "role", None) or "builder",
+        test_command=getattr(args, "test_cmd", None),
+        workers=int(getattr(args, "workers", 4) or 4),
+        mock=bool(getattr(args, "mock", False)),
+        as_json=bool(getattr(args, "json", False)),
+        tester=bool(getattr(args, "tester", False)),
+        teardown=(True if getattr(args, "teardown", False) else (False if getattr(args, "keep", False) else None)),
     )
+    report = run_race(cfg)
+    if cfg.as_json:
+        safe_print(json.dumps(report.to_dict(), indent=2, default=str))
+    else:
+        render_report(report, printer=safe_print)
 
-    if as_json:
-        out_data = {
-            "task": prompt,
-            "winner": winner.spec.name if winner and winner.spec else None,
-            "winner_signature": winner.signature if winner else None,
-            "results": [
-                {
-                    "name": r.spec.name if r.spec else r.candidate_id,
-                    "signature": r.signature,
-                    "status": r.status,
-                    "duration_seconds": r.duration_seconds,
-                    "tokens_used": r.tokens_used,
-                    "test_results": r.test_results,
-                    "output": r.output,
-                }
-                for r in results
-            ],
-        }
-        safe_print(json.dumps(out_data, indent=2))
-        return
 
-    # 4. Render comparison table
-    safe_print("\n\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m")
-    safe_print("\033[1;37m| # | Candidate                | Model            | Harness | Tools     | Skills     | Status  | Tests     | Time(s) | Tokens | Standing |\033[0m")
-    safe_print("\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m")
+def show_tasks() -> None:
+    """List the race task bank."""
+    from .tasks import TaskBank
+    safe_print("\n\033[1;36m================== Race Task Bank ==================\033[0m")
+    for t in TaskBank().list_tasks():
+        safe_print(f"  \033[1;33m{t.name:16}\033[0m {t.description}")
+        safe_print(f"  {'':16} module={t.module} entrypoint={t.entrypoint} hidden_tests={len(t.hidden_tests)} tags={', '.join(t.tags)}")
+    safe_print("\033[1;36m=====================================================\033[0m\n")
 
-    for idx, r in enumerate(results, 1):
-        c_name = (r.spec.name if r.spec else r.candidate_id)[:24]
-        m_name = (r.seat.model)[:16]
-        h_name = (r.harness)[:7]
-        t_name = (r.tool_runner_name)[:9]
-        s_name = (",".join(r.skills_used) if r.skills_used else "baseline")[:10]
-        status_str = r.status.upper()[:7]
-
-        # Test column formatting
-        if r.test_results and r.test_results.get("has_tests"):
-            p = r.test_results.get("passed", 0)
-            tot = r.test_results.get("total", 0)
-            t_col = f"{p}/{tot} OK" if r.test_results.get("failed", 0) == 0 else f"{p}/{tot} FAIL"
-        else:
-            t_col = "N/A"
-
-        t_sec = f"{r.duration_seconds:.2f}s"
-        tok_str = f"{r.tokens_used:,}"
-
-        # Get standing from scorecard
-        standing_val = archivist.scorecard.get_standing(r.signature or r.seat.model)
-        stand_str = f"{standing_val:.1f} pts"
-
-        # Status coloring
-        if status_str == "COMPLET" or status_str == "SUCCESS":
-            st_colored = f"\033[1;32m{status_str:7}\033[0m"
-        else:
-            st_colored = f"\033[1;31m{status_str:7}\033[0m"
-
-        safe_print(f"| {idx:<1} | {c_name:24} | {m_name:16} | {h_name:7} | {t_name:9} | {s_name:10} | {st_colored} | {t_col:9} | {t_sec:7} | {tok_str:6} | {stand_str:8} |")
-
-    safe_print("\033[1;37m+---+--------------------------+------------------+---------+-----------+------------+---------+-----------+---------+--------+----------+\033[0m\n")
-
-    # 5. Announce Impartial Judge Winner and findings
-    if winner and winner.spec:
-        win_entry = next((e for e in entries if e.candidate_id == winner.candidate_id), None)
-        safe_print(f"\033[1;32m[WINNER] IMPARTIAL JUDGE WINNER:\033[0m \033[1m{winner.spec.name}\033[0m")
-        safe_print(f"  \033[1m* Signature:\033[0m          \033[1;36m{winner.signature}\033[0m")
-        safe_print(f"  \033[1m* Verdict:\033[0m            \033[1;32m{win_entry.verdict.upper() if win_entry else 'SUCCESS'}\033[0m")
-        safe_print(f"  \033[1m* Physical Artifacts:\033[0m {', '.join(win_entry.verified_artifacts) if win_entry and win_entry.verified_artifacts else 'Verified in sandbox'}")
-        if winner.test_results and winner.test_results.get("has_tests"):
-            safe_print(f"  \033[1m* Verification Proof:\033[0m \033[1;32m100% test pass rate ({winner.test_results.get('passed')}/{winner.test_results.get('total')} tests passed)\033[0m")
-        safe_print(f"  \033[1m* Performance Proof:\033[0m  {winner.duration_seconds:.2f}s latency | {winner.tokens_used:,} tokens")
-        safe_print()
-
-    # 6. Show updated Scorecard combination standings
-    safe_print("\033[1;35m[SCORECARD] Multi-Dimensional Standings (Axiom 3 + Axiom 9):\033[0m")
-    for r in results:
-        score = archivist.scorecard.get_standing(r.signature or r.seat.model)
-        safe_print(f"  * \033[1m{r.signature}\033[0m -> \033[1;33m{score:.1f} pts\033[0m")
-    safe_print("\033[1;36m========================================================================================\033[0m\n")
 
 def main():
     parser = argparse.ArgumentParser(description="arity 0.2.0 CLI")
@@ -680,14 +453,19 @@ def main():
     subparsers.add_parser("roles", help="List staff roles, capabilities, and denial sets")
     subparsers.add_parser("redphone", help="Inspect Red Phone channels")
 
-    race_parser = subparsers.add_parser("race", help="Run an empirical A/B/C race across multi-dimensional candidates")
-    race_parser.add_argument("prompt", type=str, help="Task or prompt to race across candidates")
-    race_parser.add_argument("--variants", "-v", type=str, default="wire,cli,omp", help="Variant preset (wire,cli,omp | ast,mcp,shell | tdd,baseline | models) or custom comma-separated list")
-    race_parser.add_argument("--role", "-r", type=str, default="builder", help="Staff role to assume (default: builder)")
-    race_parser.add_argument("--test-cmd", type=str, default=None, help="Custom unit test verification command to execute in sandboxes")
-    race_parser.add_argument("--workers", "-w", type=int, default=4, help="Max parallel candidate workers")
-    race_parser.add_argument("--mock", action="store_true", help="Run with deterministic candidate mock simulation")
-    race_parser.add_argument("--json", action="store_true", help="Output full race results as JSON")
+    race_parser = subparsers.add_parser("race", help="Race one task across single-axis candidates with an impartial judge")
+    race_parser.add_argument("prompt", type=str, nargs="?", default="", help="Ad-hoc task brief (or use --task)")
+    race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `arity tasks`); brings hidden tests")
+    race_parser.add_argument("--variants", "-v", type=str, default="models", help="Preset: models | harness | tools | skills | context, or custom 'model=..+harness=..+tools=..+skills=a/b+ctx=..' list")
+    race_parser.add_argument("--role", "-r", type=str, default="builder", help="Builder role (default: builder)")
+    race_parser.add_argument("--tester", action="store_true", help="Have the tester role author hidden tests before the race")
+    race_parser.add_argument("--test-cmd", type=str, default=None, help="Override the candidate's own test command")
+    race_parser.add_argument("--workers", "-w", type=int, default=4, help="Max parallel candidates")
+    race_parser.add_argument("--mock", action="store_true", help="Canned providers (good / slow / liar), ephemeral store, no tokens spent")
+    race_parser.add_argument("--keep", action="store_true", help="Keep sandboxes after the race (default for live runs)")
+    race_parser.add_argument("--teardown", action="store_true", help="Delete sandboxes after the race (default for --mock)")
+    race_parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
+    subparsers.add_parser("tasks", help="List the race task bank")
 
     lock_parser = subparsers.add_parser("lock", help="Lock human presence on a seat")
     lock_parser.add_argument("seat_id", type=str, help="Seat ID to presence-lock")
@@ -713,6 +491,8 @@ def main():
         run_demo()
     elif args.command == "race":
         handle_race_command(args)
+    elif args.command == "tasks":
+        show_tasks()
     elif args.command == "chat":
         interactive_chat()
     elif args.command == "status":
