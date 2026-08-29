@@ -360,6 +360,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         from_role="Asa",
         to_role=role.name,
         hidden_tests=dict(race_task.hidden_tests) if race_task else {},
+        metadata={"module": race_task.module, "entrypoint": race_task.entrypoint} if race_task else {},
     )
     tester_spec: Optional[CandidateSpec] = None
     if cfg.tester:
