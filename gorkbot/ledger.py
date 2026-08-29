@@ -66,8 +66,41 @@ class Seat:
         return max(0.0001, self.base_price_per_m * (1.0 - decay_factor))
 
 
+ANTIGRAVITY_MODELS = {
+    # ledger model name -> name the quota endpoint reports
+    "gemini-3.6-flash": "gemini-3-flash-agent",
+    "claude-opus-4.6": "claude-opus-4-6-thinking",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "gpt-oss-120b": "gpt-oss-120b-medium",
+}
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[float]:
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
 class SeatLedger:
     """Manages the pool of model seats, quota balances, and presence locks."""
+
+    @staticmethod
+    def _antigravity_quota(store: Any, key: str, acc: dict[str, Any]) -> dict[str, Any]:
+        """Live per-model quota for one account; {} when unreachable (seats then keep defaults)."""
+        if os.environ.get("GORKBOT_SKIP_QUOTA"):
+            return {}
+        try:
+            from .auth import fetch_antigravity_quota
+            fresh = store.refresh_if_needed(key) or acc
+            if fresh.get("access") and fresh.get("projectId"):
+                return fetch_antigravity_quota(fresh["access"], fresh["projectId"]) or {}
+        except Exception:
+            pass
+        return {}
 
     def __init__(self, initial_seats: Optional[list[Seat]] = None, auto_seed: bool = True):
         self._seats: dict[str, Seat] = {}
@@ -130,19 +163,30 @@ class SeatLedger:
             from .auth import TokenStore
             store = TokenStore()
 
-            # 1. Google (Antigravity backend with OMP fallback)
+            # 1. Google Antigravity: one seat per (account, model). The backend keeps two
+            #    separate quotas - Gemini, and Claude+GPT-OSS - so a Gemini 429 says nothing
+            #    about Claude. Seed each seat's `remaining` from the live quota when reachable.
             agy_accounts = store.get_all_for_provider("google-antigravity")
             for key, acc in agy_accounts:
                 email = acc.get("email", "")
-                self.register(
-                    Seat(
+                quota = self._antigravity_quota(store, key, acc)
+                for model, wire_name in ANTIGRAVITY_MODELS.items():
+                    q = quota.get(wire_name) or {}
+                    fraction = q.get("remainingFraction")
+                    reset = _parse_iso(q.get("resetTime")) or default_reset
+                    seat = Seat(
                         provider="google",
-                        model="gemini-3.6-flash",
+                        model=model,
                         harness="omp",
                         account=email,
-                        reset_deadline=default_reset,
+                        reset_deadline=reset,
                     )
-                )
+                    if fraction is not None:
+                        seat.remaining = seat.total_allowance * float(fraction)
+                    elif quota:
+                        # Endpoint answered but omitted this model: it is exhausted.
+                        seat.remaining = 0.0
+                    self.register(seat)
 
             # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
             codex_creds = store.get_credential("openai-codex")

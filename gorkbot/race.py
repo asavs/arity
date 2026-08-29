@@ -118,8 +118,10 @@ def placeholder_seats() -> list[Seat]:
 
 
 def live_seats(ledger: Optional[SeatLedger] = None) -> list[Seat]:
+    """Authenticated, unlocked seats, fullest quota first (so a model name resolves to the account that can still pay)."""
     ledger = ledger or SeatLedger()
-    return [s for s in ledger.list_seats() if not s.presence]
+    seats = [s for s in ledger.list_seats() if not s.presence]
+    return sorted(seats, key=lambda s: -s.remaining / max(1.0, s.total_allowance))
 
 
 def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int) -> CandidateSpec:
