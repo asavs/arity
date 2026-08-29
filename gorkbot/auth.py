@@ -11,6 +11,7 @@ import base64
 import hashlib
 import http.server
 import json
+import sys
 import os
 import secrets
 import shutil
@@ -236,8 +237,9 @@ class TokenStore:
                 merged = {**cred, **refreshed}
                 self.save_credential(key, merged)
                 return merged
-        except Exception:
-            pass
+        except Exception as e:
+            # A silent failure here surfaced as a 2.5h hang downstream. Say it once, plainly.
+            print(f"[gorkbot auth] token refresh failed for '{key}': {e}. Run: gorkbot auth login {provider.split('-')[0]}", file=sys.stderr)
 
         return cred
 
