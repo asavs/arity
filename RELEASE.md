@@ -1,8 +1,33 @@
-# arity 0.1.1 — Marrow & Wire
+# arity 0.2.0 — Direct Line
 
-**Release Date:** 2026-08-28  
-**Highlights:** Direct Codex & Grok subscription wire protocols, local OAuth token discovery, transparent CLI harness fallbacks, and real-time Red Phone CLI dashboard.
+**Release Date:** 2026-08-28
 
+### What changed:
+
+1. **Multi-account Google Antigravity & OAuth (`arity/auth.py`, `arity/wire.py`)**
+   - Added a standard-library Python OAuth 2.0 PKCE flow on port 51121 (`arity auth login google`).
+   - Imports and tracks multiple Google accounts from `~/.omp/agent/agent.db` so you can use quota from different accounts.
+   - Added live quota checks via `daily-cloudcode-pa.googleapis.com` in `arity auth status`, showing remaining percentages for Gemini and Claude.
+   - Auto-refreshes expired access tokens in the background.
+
+2. **Simplified seat model (`arity/ledger.py`, `arity/wire.py`)**
+   - Removed artificial seat IDs. A seat is now `(provider, model, harness)` with an optional account name.
+   - Direct Python wire calls run first; if they fail or time out, execution falls back to the installed CLI tool (`omp`, `codex`, `claude`).
+
+3. **Restructured staff roles (`arity/definitions/roles/`, `arity/roles.py`)**
+   - Removed duplicate role definitions (`voice.md`, `builder.md`, `tester.md`).
+   - Standardized on five roles: `secretary` (front desk), `scout` (search and research), `engineer` (planning), `python_developer` (coding), and `reviewer` (auditing and test execution).
+   - Removed the arbitrary tier number math in favor of role-based context assembly.
+
+4. **Unified messaging tool & runtime security (`arity/tools.py`, `arity/orchestrator.py`)**
+   - Replaced subagent spawning functions with a single `message(to, text)` tool. Setting `to="user"` replies to the human; setting `to="<role>"` routes to a teammate.
+   - Removed static `allowed_tools` lists from markdown files. Roles now inherit available tools automatically, filtered by their `denied_tools` and `denied_paths`.
+   - Moved path and host access checks to the tool runner (`SandboxToolRunner`), preventing false-positive crashes when prompt text discusses files like `.env`.
+
+5. **Terminal chat cache timer (`arity/cli.py`)**
+   - `python -m arity chat` shows a countdown timer indicating how long the model's prompt cache stays warm before each input line.
+
+---
 ### What's New in 0.1.1:
 1. **Direct Wire Protocols (`arity.wire`)**:
    - Direct HTTPS/SSE streaming callers for OpenAI Codex (`https://chatgpt.com/backend-api/codex/responses`) and xAI Grok (`https://api.x.ai/v1/chat/completions`).

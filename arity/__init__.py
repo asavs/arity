@@ -41,7 +41,7 @@ from .tiers import (
 )
 from .ledger import Seat, SeatLedger
 from .composer import CastingComposer, CastingDecision
-from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .terrarium import CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher, run_sandbox_verification
 from .tools import (
     McpToolAdapter,
     PathTraversalError,
@@ -128,26 +128,29 @@ __all__ = [
     "Role",
     "DenialSet",
     "RoleRegistry",
+    "SECRETARY_ROLE",
     "VOICE_ROLE",
-    "ARCHITECT_ROLE",
+    "ENGINEER_ROLE",
+    "PYTHON_DEVELOPER_ROLE",
     "BUILDER_ROLE",
     "REVIEWER_ROLE",
-    # Tiers & Briefs
-    "TierLevel",
+    "SCOUT_ROLE",
+    # Memory & Briefs
     "PredecessorAccounts",
     "CompiledBrief",
     "BriefCompiler",
     "BriefRefusalError",
     "compute_identity",
-    # Ledger & Casting
     "Seat",
     "SeatLedger",
     "CastingComposer",
     "CastingDecision",
-    # Terrarium & Handoffs
+    # Terrarium & Multi-Dimensional Trials
+    "CandidateSpec",
     "TaskRecord",
     "TerrariumCandidateResult",
     "TerrariumDispatcher",
+    "run_sandbox_verification",
     # Tools & Sandbox
     "SandboxToolRunner",
     "McpToolAdapter",
