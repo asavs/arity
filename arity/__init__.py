@@ -28,6 +28,7 @@ from .skills import (
     PYTHON_DEVELOPER_SKILL,
     PYTEST_TDD_SKILL,
     SCOUT_RECON_SKILL,
+    TEST_ENGINEERING_SKILL,
     Skill,
     SkillRegistry,
 )
