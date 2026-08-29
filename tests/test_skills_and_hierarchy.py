@@ -34,7 +34,7 @@ class TestSkillsAndHierarchy(unittest.TestCase):
 
         # Python developer resolution
         r2 = registry.resolve("write a python script with pytest tests")
-        self.assertEqual(r2.name, "python_developer")
+        self.assertEqual(r2.name, "developer:python")
 
         # Lead engineer resolution
         r3 = registry.resolve("plan the system architecture and technical spec")

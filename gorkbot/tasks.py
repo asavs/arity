@@ -38,19 +38,32 @@ def split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         return {}, content.strip()
     meta: dict[str, Any] = {}
     end = None
+    current: Optional[str] = None  # key whose value is a "- item" list
     for idx, line in enumerate(lines[1:], 1):
         s = line.strip()
         if s == "---":
             end = idx
             break
-        if ":" not in s or s.startswith("-") or s.startswith("#"):
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("-") and current is not None:
+            meta.setdefault(current, [])
+            if isinstance(meta[current], list):
+                meta[current].append(s[1:].strip(" '\""))
+            continue
+        if ":" not in s:
             continue
         k, v = s.split(":", 1)
-        v = v.strip()
+        k, v = k.strip(), v.strip()
         if v.startswith("[") and v.endswith("]"):
-            meta[k.strip()] = [x.strip(" '\"") for x in v[1:-1].split(",") if x.strip()]
+            meta[k] = [x.strip(" '\"") for x in v[1:-1].split(",") if x.strip()]
+            current = None
+        elif v == "":
+            meta[k] = []      # list follows on the next lines
+            current = k
         else:
-            meta[k.strip()] = v.strip(" '\"")
+            meta[k] = v.strip(" '\"")
+            current = None
     body = "\n".join(lines[end + 1:]).strip() if end is not None else content.strip()
     return meta, body
 

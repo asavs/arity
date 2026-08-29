@@ -319,6 +319,12 @@ def show_roles():
         if role.denial_set.denied_paths:
             print(f"    Path Locks:    {', '.join(role.denial_set.denied_paths)}")
         print()
+    print("\033[1;35m  Types (attach to any role as role:type, e.g. developer:python, reviewer:rust)\033[0m")
+    for pack in registry.list_types():
+        print(f"  \033[1;33m* {pack.name:20}\033[0m {pack.description}")
+        print(f"    Skills:        {', '.join(pack.skills) or '-'}")
+        print(f"    Verify:        {pack.verify.get('test_command', '-')}")
+    print()
     print("\033[1;35m====================================================\033[0m\n")
 
 

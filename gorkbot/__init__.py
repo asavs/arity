@@ -22,6 +22,7 @@ from .roles import (
     DenialSet,
     Role,
     RoleRegistry,
+    TypePack,
 )
 from .skills import (
     FIRECRAWL_SKILL,

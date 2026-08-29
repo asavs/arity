@@ -31,7 +31,7 @@ class TestRolesAndDenialSets(unittest.TestCase):
 
         # Semantic resolution
         builder = self.registry.resolve("implement a new database schema")
-        self.assertEqual(builder.name, "python_developer")
+        self.assertEqual(builder.name, "developer:python")
         reviewer = self.registry.resolve("audit code and check PR")
         self.assertEqual(reviewer.name, "reviewer")
     def test_denial_set_tool_enforcement(self):
@@ -76,7 +76,7 @@ class TestTiersAndBriefCompiler(unittest.TestCase):
         builder_brief = self.compiler.assemble(BUILDER_ROLE, "Build the scraper")
         self.assertNotIn("Personal Context", builder_brief.system_prompt)
         self.assertNotIn("Asa: High-context personal notes", builder_brief.system_prompt)
-        self.assertIn("Operational Scope (python_developer)", builder_brief.system_prompt)
+        self.assertIn("Operational Scope (developer:python)", builder_brief.system_prompt)
     def test_predecessor_accounts_included(self):
         predecessor = PredecessorAccounts(
             self_report="I built the deal schema in brokie/schema.sql",

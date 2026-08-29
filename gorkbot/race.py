@@ -46,7 +46,7 @@ class RaceConfig:
     prompt: str = ""
     task_name: Optional[str] = None
     variants: str = "models"
-    role: str = "builder"
+    role: str = "developer:python"
     test_command: Optional[str] = None
     workers: int = 4
     mock: bool = False
@@ -330,6 +330,12 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         race_task = TaskBank().get(cfg.task_name)
         if race_task is None:
             raise SystemExit(f"unknown task '{cfg.task_name}'; see `gorkbot tasks`")
+        # A task's tags pick the type (python, rust, ...) unless the role already names one.
+        pack = roles.type_for_tags(race_task.tags)
+        if pack and not role.type_name:
+            role = roles.with_type(role, pack.name)
+            notes.append(f"type '{pack.name}' from task tags -> {role.name}")
+    type_name = role.type_name or None
     brief = cfg.prompt or (race_task.brief if race_task else "")
     if not brief:
         raise SystemExit("a prompt or --task is required")
@@ -365,8 +371,8 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     tester_spec: Optional[CandidateSpec] = None
     if cfg.tester:
         tester_seat = candidates[0].seat
-        tester_spec = CandidateSpec(seat=tester_seat, name="tester", role=TESTER_ROLE, harness="wire",
-                                    tool_runner_type="sandbox", skills=["test-engineering"])
+        tester_spec = CandidateSpec(seat=tester_seat, name="tester", role=roles.with_type(TESTER_ROLE, type_name),
+                                    harness="wire", tool_runner_type="sandbox", skills=["test-engineering"])
         if cfg.mock:
             tester_spec.custom_model_provider = ScriptedProvider(
                 {"test_hidden_by_tester.py": OWN_TEST}, "Wrote test_hidden_by_tester.py.", "tester")
@@ -519,7 +525,9 @@ def check_citations(text: str, key: dict[str, str], rep: RaceReport) -> dict[str
 def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher, seats: list[Seat]) -> list[dict[str, Any]]:
     from .roles import RoleRegistry
     from .types import StoreRecord
-    reviewer = RoleRegistry().get("reviewer")
+    roles = RoleRegistry()
+    # The judge takes the same type as the builders: reviewer:python judges a python race.
+    reviewer = roles.with_type(roles.get("reviewer"), (rep.candidates[0].role.type_name if rep.candidates and rep.candidates[0].role else None))
     text, key = blind_bundle(rep)
     review_task = TaskRecord(brief=text, from_role="Asa", to_role="reviewer", metadata={"reviews": rep.task.id})
     judge_specs: list[CandidateSpec] = []
