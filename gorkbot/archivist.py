@@ -14,8 +14,11 @@ from typing import Any, Optional
 
 from .scorecard import Scorecard
 from .seams import Observer, RecordStore
-from .terrarium import TerrariumCandidateResult
+from .terrarium import ARTIFACT_IGNORE_PARTS, TerrariumCandidateResult
 from .types import Event, State, StoreRecord, ToolCompleted
+
+TIE_EPSILON = 1.0
+"""Composite scores closer than this are a tie: the gap is duration jitter, not evidence."""
 
 
 @dataclass
@@ -57,10 +60,12 @@ class ImpartialArchivist:
         self_report = result.self_report
 
         # 2. Inspect physical files in workspace
+        # Verification runs in the same sandbox before this audit; its side-effects
+        # (bytecode, pytest cache, the hidden suite) are not the candidate's work.
         verified_artifacts = []
         if result.workspace_path.exists():
             for p in result.workspace_path.rglob("*"):
-                if p.is_file():
+                if p.is_file() and not any(part in ARTIFACT_IGNORE_PARTS for part in p.relative_to(result.workspace_path).parts):
                     rel = str(p.relative_to(result.workspace_path)).replace("\\", "/")
                     verified_artifacts.append(rel)
 
