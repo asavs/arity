@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[<>=]|\x1b\][^\x07]*\x07")
+"""CSI sequences, private-mode toggles, and OSC strings emitted by terminal-UI CLIs."""
 
 from .seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
 from .types import (
@@ -276,8 +280,8 @@ class CLIModelProvider:
                     retryable=False,
                 )
 
-            # Clean output (strip harness banner if present)
-            output = raw_output.strip()
+            # Clean output: TUI escape/control sequences (omp, claude) and harness banners.
+            output = _ANSI_RE.sub("", raw_output).strip()
             if self.harness == "codex" and "tokens used" in output:
                 # Extract content after token summary or raw lines
                 output_lines = [l for l in output.splitlines() if not l.startswith("2026-") and "rmcp::transport" not in l]
