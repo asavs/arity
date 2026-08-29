@@ -594,6 +594,12 @@ class TerrariumDispatcher:
         if not candidates:
             return []
 
+        # ARITY_CONCURRENCY (env or .arity/config.json) caps every trial, whatever the caller asks for.
+        from .tools import get_config_value
+        cap = get_config_value("ARITY_CONCURRENCY")
+        if cap and str(cap).isdigit() and int(cap) > 0:
+            max_workers = min(max_workers, int(cap))
+
         results: list[TerrariumCandidateResult] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), max_workers)) as executor:
             future_to_cand = {
