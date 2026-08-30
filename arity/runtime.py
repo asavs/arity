@@ -10,6 +10,7 @@ import uuid
 from typing import Optional
 
 from .handlers import (
+    default_record_store,
     ConsoleTransport,
     JsonlRecordStore,
     LocalToolRunner,
@@ -50,7 +51,7 @@ class Runtime:
     ):
         self.model = model_provider or create_default_model_provider()
         self.tools = tool_runner or LocalToolRunner()
-        self.store = store or JsonlRecordStore()
+        self.store = store or default_record_store()
         self.transport = transport or ConsoleTransport()
         self.observers: list[Observer] = observers or [MetricsObserver()]
 

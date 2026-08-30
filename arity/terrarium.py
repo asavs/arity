@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from .handlers import (
+    default_record_store,
     CLIModelProvider,
     ConsoleTransport,
     JsonlRecordStore,
@@ -353,7 +354,7 @@ class TerrariumDispatcher:
         quiet: bool = False,
     ):
         self.ledger = ledger
-        self.store = store or JsonlRecordStore()
+        self.store = store or default_record_store()
         self.compiler = compiler or BriefCompiler()
         self.base_workspace = Path(base_workspace) if base_workspace else Path(".terrarium")
         self.base_workspace.mkdir(parents=True, exist_ok=True)

@@ -218,7 +218,7 @@ class TestTaskBankAndPresets(unittest.TestCase):
     def test_packaged_bank_loads_briefs_and_hidden_tests(self):
         bank = TaskBank()
         names = [t.name for t in bank.list_tasks()]
-        self.assertEqual(names, ["lru_cache", "rate_limiter", "sqlite_cache"])
+        self.assertEqual(names, ["lru_cache", "rate_limiter", "sqlite_cache", "sqlite_record_store"])
         lru = bank.get("lru_cache")
         self.assertEqual((lru.module, lru.entrypoint), ("lru_cache", "LRUCache"))
         self.assertIn("performance", lru.tags)

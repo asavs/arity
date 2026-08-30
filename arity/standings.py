@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .handlers import JsonlRecordStore
+from .handlers import JsonlRecordStore, default_record_store
 
 
 def _rows(store: JsonlRecordStore, kind: str) -> list[dict[str, Any]]:
@@ -42,7 +42,7 @@ def _mean(xs: Iterable[float]) -> float:
 
 def standings(store: Optional[JsonlRecordStore] = None, by: str = "model") -> list[dict[str, Any]]:
     """Aggregate trial_axes (+ judgements) into one row per group. Rates are fractions of trials."""
-    store = store or JsonlRecordStore()
+    store = store or default_record_store()
     axes = _rows(store, "trial_axes")
     judgements = _rows(store, "judgement")
     key_fn = {"model": lambda a: _model_of(a.get("signature")),

@@ -34,6 +34,12 @@
    - The archivist ignores verification side-effects (`__pycache__`, `.pytest_cache`, `.hidden_tests`), reports ties instead of crowning duration jitter, and weights hidden tests above a candidate's own.
    - `--mock` runs canned `good` / `slow` / `liar` providers against an ephemeral store, so demos never touch the real scorecard. `--teardown` / `--keep` control sandbox lifetime.
 
+8. **`arity run` — the front door, and the record store it built (`arity/race.py`, `arity/stores/sqlite.py`)**
+   - `arity run "<brief>"`: one seat per model (fullest quota first, wire-capable first), race, review on a facts tie, the secretary's question when judges split, and delivery of the winner to `--out` with a one-line receipt.
+   - Type packs: a role plus a language (`developer:python`, `tester:python`, `reviewer:python`; `rust` stubbed). Conference phase: candidates woken up together with each other's work and queued notes, re-verified.
+   - Multi-axis record per trial (correctness tiers, own/hidden pass, prompt vs. completion tokens, turns, tool calls, false claims, confessions, fetch reach, fallbacks) and `arity standings` over it — no composite.
+   - **The SQLite record store in this release was built by the trial system it records:** `arity run --task sqlite_record_store --tester --conference 1` — a tester wrote 18 hidden tests, three models built it, GPT-5.6-sol passed 24/24, one conference round, delivered. It replays the JSONL records of this release losslessly (3,145 records; 10 corrupt lines from the pre-lock store skipped). `ARITY_STORE=sqlite` selects it.
+
 7. **Task bank and the tester role (`arity/tasks.py`, `arity/definitions/tasks/`, `arity/definitions/roles/tester.md`)**
    - `arity tasks` lists briefs with hidden acceptance tests (`lru_cache`, `sqlite_cache`, `rate_limiter`); `arity race --task <name>` grades every candidate against tests it never saw, including a time budget where the brief says "fast".
    - `tester` is a real role again (test engineer, not a reviewer alias). `--tester` has it author the hidden suite before the builders run.

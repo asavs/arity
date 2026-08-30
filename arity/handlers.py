@@ -579,6 +579,16 @@ class LocalToolRunner:
 # 3. JSONL Record Store (Append-only persistence)
 # -----------------------------------------------------------------------------
 
+def default_record_store() -> "RecordStore":
+    """The store every default constructor uses. ARITY_STORE=sqlite (env or .arity/config.json)
+    selects arity/stores/sqlite.py at .arity/records.db; anything else is the JSONL store."""
+    from .tools import get_config_value
+    if (get_config_value("ARITY_STORE") or "jsonl").lower() == "sqlite":
+        from .stores.sqlite import SqliteRecordStore
+        return SqliteRecordStore(Path(".arity/records.db"))
+    return JsonlRecordStore()
+
+
 class JsonlRecordStore:
     """Simple append-only JSONL record store."""
 
