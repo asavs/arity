@@ -730,7 +730,7 @@ def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Optional[Ter
 
 def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "developer:python",
                    candidates: Optional[int] = None, judges: Optional[list[str]] = None, conference: int = 0,
-                   out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
+                   tester: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True) -> tuple[RaceReport, Delivery]:
     """arity run: race with the axis choices made, then deliver."""
     from .tools import get_config_value
@@ -739,7 +739,7 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
     variants = ",".join(f"model={s.model}" for s in seats) if seats else "models"
     cfg = RaceConfig(prompt=brief, task_name=task_name, variants=variants, role=role, mock=mock, workers=cap,
                      judges=judges if judges is not None else [s.model for s in seats], review="tie",
-                     conference=conference, teardown=False, quiet=quiet)
+                     conference=conference, teardown=False, quiet=quiet, tester=tester)
     rep = run_race(cfg)
     final = rep.conference_winner or rep.winner
     asked = False
