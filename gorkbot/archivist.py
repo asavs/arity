@@ -88,9 +88,24 @@ class ImpartialArchivist:
             details = "Kernel terminated without writing a self-report (Axiom 9 fallback)."
         else:
             # Check if self-report claims files that don't exist
-            claimed_files = re.findall(r"(?:created|wrote|modified|file)\s+[`'\"]?([\w\-./]+\.\w+)[`'\"]?", result.self_report or "", re.IGNORECASE)
+            # A claim is a filename-like token near a "made it" verb, in either order:
+            # "wrote lru_cache.py", "`prices.md` is written at the workspace root", "saved to out/x.json".
+            # TODO(archivist): this is regex over prose; a structured closing report (files: [...]) would be exact.
+            report = result.self_report or ""
+            verbs = r"(?:creat|wrote|writ|modif|sav|plac|add|generat|updat|emitt|produc|output|deliver)\w*"
+            fname = r"[`'\"]?([\w\-./]+\.[A-Za-z]\w{0,5})[`'\"]?"
+            lead = r"(?:to\s+|at\s+|in\s+|as\s+|(?:the\s+|a\s+|new\s+)?files?\s+)?"
+            claimed_files = []
+            for m in re.finditer(rf"{verbs}\s+{lead}{fname}", report, re.IGNORECASE):
+                # "could not write prices.md" is a confession, not a claim
+                if re.search(r"\b(not|no|never|couldn't|cannot|can't|unable|failed|without)\b", report[max(0, m.start() - 30):m.start()], re.I):
+                    continue
+                claimed_files.append(m.group(1))
+            claimed_files += re.findall(rf"{fname}\s+(?:is|was|has been|were|are)\s+(?:now\s+)?{verbs}", report, re.IGNORECASE)
             for cf in claimed_files:
                 cf_clean = cf.strip("`'\"").replace("\\", "/")
+                if cf_clean.lower().endswith((".com", ".org", ".net", ".io", ".ai", ".google")) or "://" in cf_clean:
+                    continue  # a URL, not a file
                 if not (result.workspace_path / cf_clean).exists():
                     discrepancy = True
                     discrepancy_details = f"Kernel claimed creation of '{cf_clean}', but artifact was not found in sandbox."

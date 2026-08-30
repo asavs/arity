@@ -18,12 +18,18 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
 - [ ] Secretary asks Asa on a review disagreement (definition written; code not).
 
 ## Races
+- [ ] A brief that asks a write-denied role (scout) to write a file is a task-design error; the race
+      should refuse or warn at resolve time (role.can_use_tool('write_file') vs brief mentions 'write').
+- [ ] Archivist discrepancy detection is regex over prose; make the closing report structured
+      (files: [...]) so claims are exact.
 - [ ] First non-code race (scout, secretary) — verify facts-tie → review → human holds up without pytest.
 - [ ] `types/rust.md` verify commands are untested (`cargo test`, hidden tests under `tests/`).
 - [ ] Conference: nobody has used `message(to="peer:X")` yet in a live run; watch whether it matters.
 - [ ] Conference cost is ~99% context replay per turn; measure with a provider that reports cache hits.
 
 ## Judge
+- [ ] Citation check is code-shaped (backticked identifiers). For prose/scout output check cited URLs
+      against the fetch_url tool log instead - the scout race scored 0/0 citations.
 - [ ] Citation checker attributes comparative sentences ("C, unlike A's `move_to_end`") to the wrong letter
       (~90% precision). Reported, never scored — improve the attributor or leave it.
 - [ ] Judge with `type` skills for non-code domains (`reviewer:design`?) once a non-code race exists.
