@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from .handlers import JsonlRecordStore
+from .handlers import JsonlRecordStore, default_record_store
 from .seams import RecordStore
 from .types import StoreRecord
 
@@ -46,7 +46,7 @@ class Scorecard:
     """Tracks empirical model standing by role, rewarding verified tasks and penalizing hallucinations."""
 
     def __init__(self, store: Optional[RecordStore] = None):
-        self.store = store or JsonlRecordStore()
+        self.store = store or default_record_store()
         self._standings: dict[str, float] = {}  # key: "role:model" -> standing
         self._load_from_store()
 

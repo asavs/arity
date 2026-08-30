@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from .archivist import ArchivistEntry, ImpartialArchivist
 from .composer import CastingComposer, CastingDecision
-from .handlers import ConsoleTransport, JsonlRecordStore
+from .handlers import ConsoleTransport, JsonlRecordStore, default_record_store
 from .ledger import Seat, SeatLedger
 from .pulse import PulseAction, PulseEngine
 from .roles import BUILDER_ROLE, Role, RoleRegistry, SECRETARY_ROLE, VOICE_ROLE
@@ -70,7 +70,7 @@ class GorkbotOrchestrator:
         base_workspace: Optional[Path] = None,
         model_factory: Optional[Callable[[Seat], ModelProvider]] = None,
     ):
-        self.store = store or JsonlRecordStore()
+        self.store = store or default_record_store()
         self.ledger = ledger or SeatLedger()
         self.roles = roles or RoleRegistry()
         self.scorecard = scorecard or Scorecard(store=self.store)
