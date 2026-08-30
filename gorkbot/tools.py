@@ -360,18 +360,48 @@ class SandboxToolRunner(ToolRunner):
                 def get_text(self):
                     return "\n".join(self.text)
 
-            req = urllib.request.Request(url, headers={"User-Agent": "gorkbot/0.1.2"})
-            try:
+            # A bot UA gets 403s and sign-in walls from most large sites; a browser UA gets the page.
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,text/markdown;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            limit = 8000
+
+            def direct() -> tuple[str, str]:
+                req = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     content_type = resp.headers.get("Content-Type", "")
                     raw = resp.read().decode("utf-8", errors="replace")
-                    if "text/html" in content_type:
-                        parser = SimpleHTMLTextExtractor()
-                        parser.feed(raw)
-                        return parser.get_text()[:4000]
-                    return raw[:4000]
-            except Exception as e:
-                return f"Error fetching URL '{url}': {e}"
+                if "text/html" not in content_type:
+                    return raw[:limit], "direct"
+                parser = SimpleHTMLTextExtractor()
+                parser.feed(raw)
+                return parser.get_text(), "direct"
+
+            def looks_empty(text: str) -> bool:
+                t = text.strip().lower()
+                return len(t) < 300 or t.startswith(("sign in", "log in", "enable javascript", "please enable")) or "javascript is required" in t[:400]
+
+            # Reader proxy renders JS shells into markdown. TODO(scout): swap for Firecrawl/TinyFish or a
+            # headless browser in a VM when pricing pages need clicks; a reader is enough for text.
+            def via_reader() -> tuple[str, str]:
+                req = urllib.request.Request(f"https://r.jina.ai/{url}", headers={**headers, "Accept": "text/markdown, text/plain"})
+                with urllib.request.urlopen(req, timeout=timeout + 15) as resp:
+                    return resp.read().decode("utf-8", errors="replace"), "reader"
+
+            errors: list[str] = []
+            for attempt in (direct, via_reader):
+                try:
+                    text, how = attempt()
+                except Exception as e:
+                    errors.append(f"{attempt.__name__}: {e}")
+                    continue
+                if looks_empty(text) and attempt is direct:
+                    errors.append("direct: page is a JS shell or sign-in wall")
+                    continue
+                return f"[fetched via {how}] {text[:limit]}"
+            return f"Error fetching URL '{url}': " + " | ".join(errors)
 
         self.register(
             name="fetch_url",
