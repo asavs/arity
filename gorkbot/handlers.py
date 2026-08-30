@@ -579,6 +579,16 @@ class LocalToolRunner:
 # 3. JSONL Record Store (Append-only persistence)
 # -----------------------------------------------------------------------------
 
+def default_record_store() -> "RecordStore":
+    """The store every default constructor uses. GORKBOT_STORE=sqlite (env or .gorkbot/config.json)
+    selects gorkbot/stores/sqlite.py at .gorkbot/records.db; anything else is the JSONL store."""
+    from .tools import get_config_value
+    if (get_config_value("GORKBOT_STORE") or "jsonl").lower() == "sqlite":
+        from .stores.sqlite import SqliteRecordStore
+        return SqliteRecordStore(Path(".gorkbot/records.db"))
+    return JsonlRecordStore()
+
+
 class JsonlRecordStore:
     """Simple append-only JSONL record store."""
 
