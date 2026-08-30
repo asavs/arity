@@ -516,8 +516,15 @@ class TerrariumDispatcher:
             model_provider = self._model_factory(seat)
             # A seat with no wire at all gets a bare CLI provider that cannot call tools; say so in
             # the record instead of filing it under "wire". (A wire that later falls back is handled below.)
-            if isinstance(model_provider, (CLIModelProvider, OMPModelProvider)):
+            if hasattr(model_provider, "cwd") and not hasattr(model_provider, "primary"):  # a bare CLI, no wire
                 harness_name = f"cli:{getattr(model_provider, 'harness', 'omp')}"
+
+        # Any CLI harness in the chain (bare, or a wire's fallback) must act inside this sandbox.
+        # TODO(kernel): a CLI's own tools still bypass the role's denial set; sandboxing by cwd is
+        # containment, not enforcement. A leaf should run as a user that cannot see the repo.
+        for cli in (model_provider, getattr(model_provider, "fallback", None)):
+            if cli is not None and hasattr(cli, "cwd"):
+                cli.cwd = str(workspace)
 
         metrics = MetricsObserver()
         runtime = Runtime(
