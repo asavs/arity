@@ -79,6 +79,8 @@ class TestConference(unittest.TestCase):
                 self.assertFalse((Path(r.workspace_path) / PEERS_DIR).exists())   # staged copies cleaned up
                 self.assertTrue(r.test_results["hidden"]["has_tests"])             # re-verified after the last round
                 self.assertEqual(r.test_results["hidden"]["failed"], 0)
+                self.assertIn("merged.py", r.changed_files)                        # what the conference changed
+                self.assertGreater(r.tokens_used, r.phase_tokens)                    # cost is cumulative across phases
 
             # Round 1 saw the peer's files staged, and the phase-1 transcript replayed (fork context)
             first_call = next(iter(mocks.values())).calls[0]
