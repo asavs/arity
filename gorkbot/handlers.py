@@ -236,6 +236,9 @@ class CLIModelProvider:
     harness: str = "codex"  # "codex" | "claude" | "omp"
     model: str = "gpt-5.6-sol"
     timeout: float = 120.0
+    # The CLI has its own tools. Without a cwd it acts in the process's directory - the repo -
+    # instead of the candidate's sandbox. The dispatcher sets this to the sandbox.
+    cwd: Optional[str] = None
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         # Assemble full prompt from system + user messages
@@ -272,6 +275,7 @@ class CLIModelProvider:
                 timeout=self.timeout,
                 shell=False,
                 stdin=subprocess.DEVNULL,
+                cwd=self.cwd,
             )
             raw_output = proc.stdout or ""
             if proc.returncode != 0 and not raw_output.strip():
@@ -315,6 +319,7 @@ class OMPModelProvider:
     """Harness provider executing tasks via the Oh My Pi (omp) subagent harness."""
     model: str = "claude-3-7-sonnet"
     timeout: float = 120.0
+    cwd: Optional[str] = None  # see CLIModelProvider.cwd
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         lines: list[str] = []
@@ -344,6 +349,7 @@ class OMPModelProvider:
                 timeout=self.timeout,
                 shell=False,
                 stdin=subprocess.DEVNULL,
+                cwd=self.cwd,
             )
             raw_output = proc.stdout or ""
             if proc.returncode != 0 and not raw_output.strip():

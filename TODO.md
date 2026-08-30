@@ -41,6 +41,9 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
 - [ ] Judge with `type` skills for non-code domains (`reviewer:design`?) once a non-code race exists.
 
 ## Kernel
+- [ ] CLI harnesses (claude/codex/omp) bring their own tools, which bypass the role's denial set. cwd now
+      confines them to the sandbox (a live run wrote into the repo root before this), but that is containment,
+      not enforcement - the wiki's answer is a leaf user that cannot see the repo.
 - [ ] Provider replay compatibility is its own fragility axis (Gemini thought signatures, Claude tool ids and
       empty parts). Consider a per-provider replay test that round-trips one tool call.
 - [ ] Existing test suite writes into the real `.gorkbot/records` in places (`test_terrarium.py` etc.);
