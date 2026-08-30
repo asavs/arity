@@ -442,6 +442,12 @@ def handle_race_command(args: argparse.Namespace) -> None:
         render_report(report, printer=safe_print)
 
 
+def show_standings(by: str = "model") -> None:
+    """Multi-axis standings: aggregates over trial_axes and judgement records, no composite."""
+    from .standings import render_standings, standings
+    safe_print(render_standings(standings(by=by), by=by))
+
+
 def show_tasks() -> None:
     """List the race task bank."""
     from .tasks import TaskBank
@@ -479,6 +485,8 @@ def main():
     race_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="After the isolated build, wake the candidates up together for ROUNDS rounds (peers' work visible, notes via message(to='peer:X')), then re-verify")
     race_parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
     subparsers.add_parser("tasks", help="List the race task bank")
+    standings_parser = subparsers.add_parser("standings", help="Multi-axis standings from the trial record (success, hidden pass, lies, cost, judge facts)")
+    standings_parser.add_argument("--by", choices=["model", "signature", "harness"], default="model")
 
     lock_parser = subparsers.add_parser("lock", help="Lock human presence on a seat")
     lock_parser.add_argument("seat_id", type=str, help="Seat ID to presence-lock")
@@ -506,6 +514,8 @@ def main():
         handle_race_command(args)
     elif args.command == "tasks":
         show_tasks()
+    elif args.command == "standings":
+        show_standings(by=args.by)
     elif args.command == "chat":
         interactive_chat()
     elif args.command == "status":
