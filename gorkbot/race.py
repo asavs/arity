@@ -734,7 +734,7 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True) -> tuple[RaceReport, Delivery]:
     """gorkbot run: race with the axis choices made, then deliver."""
     from .tools import get_config_value
-    cap = candidates or int(get_config_value("GORKBOT_CONCURRENCY") or 3)
+    cap = candidates or int(get_config_value("ARITY") or get_config_value("GORKBOT_CONCURRENCY") or 3)
     seats = placeholder_seats() if mock else pick_seats(live_seats(), cap)
     variants = ",".join(f"model={s.model}" for s in seats) if seats else "models"
     cfg = RaceConfig(prompt=brief, task_name=task_name, variants=variants, role=role, mock=mock, workers=cap,
