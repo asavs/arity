@@ -70,7 +70,7 @@ XAI_SCOPES = "openid profile email offline_access grok-cli:access api:access"
 # -----------------------------------------------------------------------------
 
 class TokenStore:
-    """Manage credentials in the legacy-compatible ``~/.gorkbot/auth.json`` state file."""
+    """Manage credentials in Arity's active ``~/.gorkbot/auth.json`` state file."""
 
     def __init__(self, auth_path: Optional[Path] = None):
         self.auth_path = auth_path or (Path.home() / ".gorkbot" / "auth.json")
@@ -185,7 +185,7 @@ class TokenStore:
         return discovered
 
     def import_all(self) -> dict[str, dict[str, Any]]:
-        """Import discovered credentials into Arity's compatibility state file."""
+        """Import discovered credentials into Arity's active state file."""
         discovered = self.discover_external_credentials()
         existing = self.load_all()
         merged = {**discovered, **existing}

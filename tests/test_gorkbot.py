@@ -33,8 +33,8 @@ from gorkbot.types import (
 )
 
 
-class TestPureTransition(unittest.TestCase):
-    """Test pure statechart transitions without I/O."""
+class TestTransition(unittest.TestCase):
+    """Test statechart transitions without I/O."""
 
     def setUp(self):
         self.state = State(session_id="test_001")

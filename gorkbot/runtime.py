@@ -39,7 +39,7 @@ from .types import (
 
 
 class Runtime:
-    """The execution chassis. Plugs seams together with the pure transition function."""
+    """The execution chassis. Plugs seams together with the I/O-free transition function."""
 
     def __init__(
         self,
@@ -67,7 +67,7 @@ class Runtime:
             except Exception:
                 pass
 
-        # 2. Pure state transition
+        # 2. I/O-free state transition
         new_state, effects = transition(state, event)
 
         # 3. Notify observers of generated effects

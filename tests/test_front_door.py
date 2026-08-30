@@ -33,7 +33,9 @@ class TestRunFrontDoor(unittest.TestCase):
     def test_mock_run_delivers_the_winners_files_with_a_receipt(self):
         with TemporaryDirectory() as d:
             out = Path(d) / "out"
-            rep, delivery = run_front_door("", task_name="lru_cache", mock=True, out_dir=out, interactive=False)
+            rep, delivery = run_front_door(
+                "", task_name="lru_cache", candidates=5, mock=True, out_dir=out, interactive=False,
+            )
         self.assertTrue(delivery.winner_name.endswith("[good]"))
         self.assertEqual(sorted(delivery.files), ["lru_cache.py", "test_lru_cache.py"])
         self.assertIsNone(delivery.answer)
@@ -41,6 +43,9 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertIn("[good]", delivery.receipt)
         self.assertFalse(delivery.asked_human)
         self.assertFalse(any("__pycache__" in f or ".hidden_tests" in f for f in delivery.files))
+        self.assertEqual(rep.to_dict()["arity"], {"requested_max": 5, "resolved": 3})
+        self.assertIn("arity requested max 5; resolved 3 unique candidates", rep.notes)
+        self.assertTrue(delivery.receipt.startswith("arity 3/5 resolved"))
 
     def test_answer_only_delivery_writes_answer_md(self):
         from gorkbot.race import RaceReport

@@ -48,8 +48,11 @@ class TestArityResolution(unittest.TestCase):
                 resolve_arity(default=1)
 
     def test_front_door_uses_resolved_arity_in_mock_mode(self):
-        report = SimpleNamespace(judgements=[], conference_winner=None, winner=None)
-        delivery = SimpleNamespace(asked_human=False)
+        report = SimpleNamespace(
+            judgements=[], conference_winner=None, winner=None,
+            candidates=[object(), object()], notes=[], requested_arity=None,
+        )
+        delivery = SimpleNamespace(asked_human=False, receipt="done")
         with (
             patch.dict(os.environ, {"ARITY": "2", "GORKBOT_CONCURRENCY": "1"}, clear=False),
             patch("gorkbot.race.run_race", return_value=report) as run_race,
@@ -59,6 +62,28 @@ class TestArityResolution(unittest.TestCase):
         config = run_race.call_args.args[0]
         self.assertEqual(config.workers, 2)
         self.assertEqual(len(config.variants.split(",")), 2)
+        self.assertEqual(config.requested_arity, 2)
+        self.assertEqual(report.requested_arity, 2)
+        self.assertEqual(report.notes, [])
+
+    def test_mock_arity_is_a_transparent_maximum(self):
+        report = SimpleNamespace(
+            judgements=[], conference_winner=None, winner=None,
+            candidates=[object(), object(), object()], notes=[], requested_arity=None,
+        )
+        delivery = SimpleNamespace(asked_human=False, receipt="done")
+        with (
+            patch("gorkbot.race.run_race", return_value=report) as run_race,
+            patch("gorkbot.race.deliver", return_value=delivery),
+        ):
+            run_front_door("brief", candidates=5, mock=True, interactive=False)
+        config = run_race.call_args.args[0]
+        self.assertEqual(config.workers, 3)
+        self.assertEqual(len(config.variants.split(",")), 3)
+        self.assertEqual(config.requested_arity, 5)
+        self.assertEqual(report.requested_arity, 5)
+        self.assertEqual(report.notes[0], "arity requested max 5; resolved 3 unique candidates")
+        self.assertTrue(delivery.receipt.startswith("arity 3/5 resolved"))
 
 
 class TestArityBranding(unittest.TestCase):
@@ -82,7 +107,16 @@ class TestArityBranding(unittest.TestCase):
                 main()
         self.assertEqual(stopped.exception.code, 0)
         self.assertIn("Arity 0.3.0", output.getvalue())
-        self.assertIn("Compatibility: the gorkbot command alias", output.getvalue())
+        self.assertIn("Python API: import gorkbot", output.getvalue())
+
+        run_help = io.StringIO()
+        with patch.object(sys, "argv", ["arity", "run", "--help"]), contextlib.redirect_stdout(run_help):
+            with self.assertRaises(SystemExit) as stopped:
+                main()
+        self.assertEqual(stopped.exception.code, 0)
+        normalized_help = " ".join(run_help.getvalue().split())
+        self.assertIn("Positive maximum candidate count", normalized_help)
+        self.assertIn("may resolve fewer unique seats", normalized_help)
 
     def test_cli_rejects_non_positive_arity(self):
         stderr = io.StringIO()
