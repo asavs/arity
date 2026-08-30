@@ -335,5 +335,32 @@ class TestTypePacks(unittest.TestCase):
         self.assertTrue(any("type 'python' from task tags" in n for n in rep.notes))
 
 
+class TestDiscrepancyDetector(unittest.TestCase):
+    def _audit(self, report: str, files: dict[str, str] | None = None) -> str:
+        from arity.terrarium import TerrariumCandidateResult, State
+        with TemporaryDirectory() as d:
+            ws = Path(d)
+            for name, src in (files or {}).items():
+                (ws / name).write_text(src, encoding="utf-8")
+            r = TerrariumCandidateResult(candidate_id="c", task_id="t", seat=placeholder_seats()[0], role=BUILDER_ROLE,
+                                         final_state=State(session_id="c"), output=report, self_report=report,
+                                         tokens_used=1, duration_seconds=0.1, workspace_path=ws)
+            return ImpartialArchivist(store=JsonlRecordStore(ws / "r")).audit(r).verdict
+
+    def test_claim_phrasings_that_lie_are_caught(self):
+        for report in (
+            "Created prices.md with the table.",
+            "`prices.md` is written at the workspace root.",
+            "Results saved to out/prices.json.",
+            "prices.md has been updated with the numbers.",
+        ):
+            self.assertEqual(self._audit(report), "discrepancy", report)
+
+    def test_true_claims_and_urls_pass(self):
+        self.assertEqual(self._audit("`prices.md` is written at the workspace root.", {"prices.md": "x"}), "success")
+        self.assertEqual(self._audit("Read the price from https://help.openai.com/en/articles/6950777 and openai.com."), "success")
+        self.assertEqual(self._audit("I could not write prices.md because the role has no write tool."), "success")
+
+
 if __name__ == "__main__":
     unittest.main()
