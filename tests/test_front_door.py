@@ -67,9 +67,9 @@ class TestRunFrontDoor(unittest.TestCase):
             self.assertEqual((Path(d) / "out" / "answer.md").read_text(encoding="utf-8").strip(), "Prices: $20/mo.")
             self.assertIn("no hidden tests", delivery.receipt)
 
-    def test_judge_split_asks_the_human_and_records_the_pick(self):
-        from arity.race import RaceConfig, run_race, human_pick, ScriptedProvider
-        from arity.handlers import JsonlRecordStore
+    def test_review_always_cannot_override_unique_facts(self):
+        from arity.evidence import ResolutionKind
+        from arity.race import RaceConfig, run_race, ScriptedProvider
         # Two judges that disagree: one says A, the other says B.
         answers = iter(['{"order": ["A", "B", "C"], "ties": []}', '{"order": ["B", "A", "C"], "ties": []}'])
         cfg = RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol", "claude-3-7-sonnet"], review="always",
@@ -79,13 +79,9 @@ class TestRunFrontDoor(unittest.TestCase):
             cfg.teardown = False
             rep = run_race(cfg)
             self.assertTrue(judges_split(rep))
-            printed: list[str] = []
-            pick = human_pick(rep, ask=lambda prompt: "2", printer=lambda *a, **k: printed.append(" ".join(map(str, a))))
-            self.assertIsNotNone(pick)
-            self.assertTrue(any("judges disagree" in line for line in printed))
-            picks = rep.archivist.store.query("human_pick")
-            self.assertEqual(len(picks), 1)
-            self.assertEqual(picks[0]["picked"], pick.candidate_id)
+            self.assertEqual(rep.resolution.kind, ResolutionKind.FACTS_WINNER)
+            self.assertEqual(rep.resolution.candidate_id, rep.winner.candidate_id)
+            self.assertEqual(rep.archivist.store.query("human_pick"), [])
 
 
 if __name__ == "__main__":
