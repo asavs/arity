@@ -66,6 +66,17 @@ from .tools import (
 )
 from .scorecard import Scorecard, ScorecardRecord
 from .archivist import ArchivistEntry, ImpartialArchivist
+from .evidence import (
+    ArtifactEvidence,
+    CandidateEvidence,
+    Evaluation,
+    EvidenceBundle,
+    Resolution,
+    ResolutionKind,
+    TrialEvaluator,
+    evaluate_bundle,
+    resolve_bundle,
+)
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
 from .orchestrator import ArityOrchestrator, GorkbotOrchestrator, OrchestrationResponse
@@ -177,6 +188,16 @@ __all__ = [
     "ScorecardRecord",
     "ArchivistEntry",
     "ImpartialArchivist",
+    # Frozen evidence, evaluation, and resolution
+    "ArtifactEvidence",
+    "CandidateEvidence",
+    "EvidenceBundle",
+    "Evaluation",
+    "TrialEvaluator",
+    "Resolution",
+    "ResolutionKind",
+    "evaluate_bundle",
+    "resolve_bundle",
     # Pulse & Keepalive
     "PulseEngine",
     "PulseAction",
