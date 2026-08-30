@@ -1,7 +1,8 @@
-"""arity stores — RecordStore seam implementations.
+"""Arity stores — RecordStore seam implementations.
 
-`sqlite.SqliteRecordStore` was built by a arity race (task `sqlite_record_store`, 2026-08-29):
-tester-authored hidden tests, three builders, one conference round, delivered by `arity run`.
+Historical provenance: ``sqlite.SqliteRecordStore`` was built by a pre-rename
+``arity race`` (task ``sqlite_record_store``, 2026-08-29), then delivered by
+``arity run`` after hidden tests, three builders, and one conference round.
 """
 from .sqlite import SqliteRecordStore
 

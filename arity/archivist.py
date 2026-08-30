@@ -1,4 +1,4 @@
-"""arity archivist — Impartial auditing of kernel claims against physical tool artifacts.
+"""Arity archivist — impartial audits of kernel claims against physical artifacts.
 
 Axiom 9: Two accounts of every kernel (kernel self-report + impartial archivist entry).
 The archivist reads the kernel's execution trace, checks claims against the tool log

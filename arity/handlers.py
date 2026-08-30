@@ -1,4 +1,4 @@
-"""Standard-library default handlers for arity seams.
+"""Standard-library default handlers for Arity seams.
 
 Zero third-party dependencies. Built purely on Python 3.13 stdlib.
 """
@@ -59,7 +59,7 @@ class OpenAIModelProvider:
         endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "arity/0.0.1",
+            "User-Agent": "arity/0.3.0",
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -536,10 +536,10 @@ class LocalToolRunner:
 # -----------------------------------------------------------------------------
 
 def default_record_store() -> "RecordStore":
-    """The store every default constructor uses. ARITY_STORE=sqlite (env or .arity/config.json)
-    selects arity/stores/sqlite.py at .arity/records.db; anything else is the JSONL store."""
+    """Select Arity's store while retaining legacy settings and state paths."""
     from .tools import get_config_value
-    if (get_config_value("ARITY_STORE") or "jsonl").lower() == "sqlite":
+    store_kind = get_config_value("ARITY_STORE") or get_config_value("ARITY_STORE") or "jsonl"
+    if store_kind.lower() == "sqlite":
         from .stores.sqlite import SqliteRecordStore
         return SqliteRecordStore(Path(".arity/records.db"))
     return JsonlRecordStore()

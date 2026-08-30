@@ -1,4 +1,4 @@
-"""arity standings — queries over the trial record, no formula.
+"""Arity standings — queries over the trial record, without a composite formula.
 
 Every race writes one `trial_axes` record per candidate (facts the archivist counted) and one
 `judgement` record per judge. Standings are aggregates of those, grouped however you ask.

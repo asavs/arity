@@ -1,4 +1,4 @@
-"""arity tasks — A bank of race tasks: a brief the builders see, hidden tests they don't.
+"""Arity tasks — briefs builders see paired with hidden tests they do not.
 
 A task directory looks like:
 
@@ -6,7 +6,7 @@ A task directory looks like:
         brief.md            frontmatter (name, description, module, entrypoint, tags) + the brief
         hidden_tests/       test_*.py files run against each candidate AFTER it finishes
 
-Project-local banks in `.arity/tasks/` and `~/.arity/tasks/` override the packaged one by name.
+Legacy-compatible banks in `.arity/tasks/` and `~/.arity/tasks/` override packaged tasks by name.
 """
 from __future__ import annotations
 

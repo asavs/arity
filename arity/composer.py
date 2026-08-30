@@ -1,4 +1,4 @@
-"""arity composer — Casting engine and multi-seat decision maker.
+"""Arity composer — casting engine and multi-seat decision maker.
 
 Axiom 3: The model behind a bot is chosen per prompt, on evidence (Provider, Model, Effort).
 Axiom 3 Corollary: Many kernels per task (A/B testing candidates on real tasks).

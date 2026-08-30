@@ -1,6 +1,6 @@
 ---
 name: sqlite_record_store
-description: A SQLite-backed append-only record store implementing arity's RecordStore seam, with lossless JSONL replay.
+description: A SQLite-backed append-only record store implementing Arity's RecordStore seam, with lossless JSONL replay.
 module: sqlite_record_store
 entrypoint: SqliteRecordStore
 tags: [python, sqlite, persistence, seam]

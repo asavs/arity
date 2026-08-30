@@ -1,4 +1,4 @@
-"""arity core types — Events, Effects, State, and Messages.
+"""Arity core types — events, effects, state, and messages.
 
 State transitions are pure functions: transition(state, event) -> (new_state, effects).
 Effects describe what side-effects need to happen (I/O, network, disk, timers).

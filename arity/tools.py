@@ -1,4 +1,4 @@
-"""arity tools — Sandbox tool runner, AST syntax validation, and MCP adapter.
+"""Arity tools — sandbox execution, AST validation, and MCP adapters.
 
 Axiom 2: Roles are denial sets (tools, paths, hosts).
 Axiom 12: Tool runners are pluggable seams (MCP, native Rust, local sandbox).
@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -449,7 +450,7 @@ class SandboxToolRunner(ToolRunner):
 # -----------------------------------------------------------------------------
 
 def get_config_value(key: str) -> Optional[str]:
-    """Resolve configuration value from environment or .arity/config.json."""
+    """Resolve an environment or legacy ``.arity/config.json`` setting."""
     val = os.environ.get(key)
     if val:
         return val
@@ -462,6 +463,33 @@ def get_config_value(key: str) -> Optional[str]:
             except Exception:
                 pass
     return None
+
+
+def positive_int(value: Any, *, name: str = "value") -> int:
+    """Parse a positive integer without silently truncating floats or accepting booleans."""
+    if isinstance(value, bool):
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"\+?[0-9]+", value.strip()):
+        parsed = int(value)
+    else:
+        parsed = None
+    if parsed is None or parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+    return parsed
+
+
+def resolve_arity(explicit: Optional[int] = None, *, default: int = 1) -> int:
+    """Resolve trial arity: explicit value, ``ARITY``, legacy concurrency, default."""
+    if explicit is not None:
+        return positive_int(explicit, name="arity")
+    for key in ("ARITY", "ARITY_CONCURRENCY"):
+        configured = get_config_value(key)
+        if configured is not None:
+            label = key if key == "ARITY" else f"{key} (legacy)"
+            return positive_int(configured, name=label)
+    return positive_int(default, name="default arity")
 
 
 def smart_web_search(query: str, limit: int = 5) -> str:
@@ -484,7 +512,7 @@ def stdlib_github_search(query: str, limit: int = 5) -> str:
     """Stdlib GitHub repository & skill search (zero dependencies)."""
     import urllib.request, urllib.parse, json
     url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
-    req = urllib.request.Request(url, headers={"User-Agent": "arity/0.1.2"})
+    req = urllib.request.Request(url, headers={"User-Agent": "arity/0.3.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -511,7 +539,7 @@ def tinyfish_search(query: str, limit: int = 5, api_key: Optional[str] = None) -
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "arity/0.1.2",
+            "User-Agent": "arity/0.3.0",
             "X-API-Key": key,
         },
     )
@@ -532,7 +560,7 @@ def tinyfish_search(query: str, limit: int = 5, api_key: Optional[str] = None) -
 # -----------------------------------------------------------------------------
 
 class McpToolAdapter(ToolRunner):
-    """Adapts external Model Context Protocol (MCP) tool servers into arity ToolRunner."""
+    """Adapt external Model Context Protocol servers into an Arity ToolRunner."""
 
     def __init__(self, mcp_client_callable: Optional[Callable[[str, dict], str]] = None):
         self._mcp_callable = mcp_client_callable or self._default_mcp_stub

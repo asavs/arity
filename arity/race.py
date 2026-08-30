@@ -1,4 +1,4 @@
-"""arity race — the `arity race` runner: one task, N candidates, one impartial judge.
+"""Arity trial runner: one task, N candidates, and evidence before opinion.
 
 Everything the CLI needs to turn flags into CandidateSpecs, run them through the
 TerrariumDispatcher, and render the side-by-side table. The kernel is untouched.
@@ -36,6 +36,7 @@ from .ledger import Seat, SeatLedger
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
 from .tasks import RaceTask, TaskBank
 from .terrarium import CONTEXT_MODES, CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .tools import resolve_arity
 from .types import CallModel, ModelCompleted
 
 PRESETS = ("models", "harness", "tools", "skills", "context")
@@ -368,7 +369,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
 
     # Mock runs never write to the real scorecard; live runs are the scorecard's whole purpose.
     ephemeral = cfg.mock
-    tmp_root = Path(tempfile.mkdtemp(prefix="arity_race_")) if ephemeral else None
+    tmp_root = Path(tempfile.mkdtemp(prefix="arity_trial_")) if ephemeral else None
     store = JsonlRecordStore(root=cfg.store_root or (tmp_root / "records" if tmp_root else None))
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
@@ -604,7 +605,7 @@ def _fmt_tests(tr: Optional[dict[str, Any]]) -> tuple[str, str]:
 
 
 # -----------------------------------------------------------------------------
-# Front door: arity run "<brief>"  ->  race with the axis choices made  ->  deliver
+# Front door: arity run "<brief>" -> trial with chosen axes -> delivery
 # -----------------------------------------------------------------------------
 
 def default_wire_capable(s: Seat) -> bool:
@@ -732,10 +733,9 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
                    candidates: Optional[int] = None, judges: Optional[list[str]] = None, conference: int = 0,
                    tester: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True) -> tuple[RaceReport, Delivery]:
-    """arity run: race with the axis choices made, then deliver."""
-    from .tools import get_config_value
-    cap = candidates or int(get_config_value("ARITY") or get_config_value("ARITY_CONCURRENCY") or 3)
-    seats = placeholder_seats() if mock else pick_seats(live_seats(), cap)
+    """Run an Arity trial with the chosen axes, then deliver the selected result."""
+    cap = resolve_arity(candidates, default=3)
+    seats = placeholder_seats()[:cap] if mock else pick_seats(live_seats(), cap)
     variants = ",".join(f"model={s.model}" for s in seats) if seats else "models"
     cfg = RaceConfig(prompt=brief, task_name=task_name, variants=variants, role=role, mock=mock, workers=cap,
                      judges=judges if judges is not None else [s.model for s in seats], review="tie",
@@ -758,7 +758,7 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
     bold, dim, green, red, yellow, cyan, reset = "\033[1m", "\033[2m", "\033[1;32m", "\033[1;31m", "\033[1;33m", "\033[1;36m", "\033[0m"
 
     p(f"\n{cyan}{'=' * 100}{reset}")
-    p(f"{bold}arity race{reset}  {rep.race_task.name if rep.race_task else 'ad-hoc'}"
+    p(f"{bold}Arity trial{reset}  {rep.race_task.name if rep.race_task else 'ad-hoc'}"
       f"  |  {len(rep.candidates)} candidates  |  hidden tests: {len(rep.task.hidden_tests) or 'none'}"
       f"  |  {'ephemeral' if rep.ephemeral else 'scorecard: live'}")
     p(f"{dim}{rep.task.brief.strip().splitlines()[0][:96]}{reset}")

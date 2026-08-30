@@ -1,4 +1,4 @@
-"""arity auth — Autonomous OAuth 2.0 & cross-tool credential management.
+"""Arity auth — OAuth 2.0 and cross-tool credential management.
 
 Implements native Python OAuth 2.0 (PKCE & RFC 8628 Device Authorization) for
 Google Antigravity (Cloud Code Assist), OpenAI Codex, and xAI Grok subscriptions,
@@ -70,7 +70,7 @@ XAI_SCOPES = "openid profile email offline_access grok-cli:access api:access"
 # -----------------------------------------------------------------------------
 
 class TokenStore:
-    """Manages persistent credentials in ~/.arity/auth.json with multi-account support."""
+    """Manage credentials in the legacy-compatible ``~/.arity/auth.json`` state file."""
 
     def __init__(self, auth_path: Optional[Path] = None):
         self.auth_path = auth_path or (Path.home() / ".arity" / "auth.json")
@@ -185,7 +185,7 @@ class TokenStore:
         return discovered
 
     def import_all(self) -> dict[str, dict[str, Any]]:
-        """Explicitly import all discovered credentials into ~/.arity/auth.json."""
+        """Import discovered credentials into Arity's compatibility state file."""
         discovered = self.discover_external_credentials()
         existing = self.load_all()
         merged = {**discovered, **existing}
@@ -239,7 +239,7 @@ class TokenStore:
                 return merged
         except Exception as e:
             # A silent failure here surfaced as a 2.5h hang downstream. Say it once, plainly.
-            print(f"[arity auth] token refresh failed for '{key}': {e}. Run: arity auth login {provider.split('-')[0]}", file=sys.stderr)
+            print(f"[Arity auth] token refresh failed for '{key}': {e}. Run: arity auth login {provider.split('-')[0]}", file=sys.stderr)
 
         return cred
 

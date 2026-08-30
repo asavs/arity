@@ -1,4 +1,4 @@
-"""arity skills — Modular skill definitions, dynamic prompt injection, and tool grants.
+"""Arity skills — modular definitions, dynamic prompt injection, and tool grants.
 
 Skills are specialized capabilities attached to roles and subagents on demand.
 """
@@ -95,7 +95,7 @@ SCOUT_RECON_SKILL = Skill(
 
 
 class SkillRegistry:
-    """Discovers and registers skills from built-ins, project .arity/skills, and global ~/.arity/skills."""
+    """Discover built-ins and legacy-compatible ``.arity/skills`` overrides."""
 
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = Path(skills_dir) if skills_dir else Path(".arity/skills")
@@ -108,7 +108,7 @@ class SkillRegistry:
             self.register(sk)
 
     def _discover_from_disk(self) -> None:
-        """Scan .arity/skills and ~/.arity/skills for skill manifests."""
+        """Scan the retained project and user compatibility paths for manifests."""
         search_dirs = [self.skills_dir, Path.home() / ".arity" / "skills"]
         for sdir in search_dirs:
             if not sdir.exists():

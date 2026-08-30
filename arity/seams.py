@@ -1,4 +1,4 @@
-"""arity seams — Explicit interfaces for pluggable infrastructure grafts.
+"""Arity seams — explicit interfaces for pluggable infrastructure grafts.
 
 Any external engine (e.g. LiteLLM router, OpenRouter gateway, Docker sandbox,
 SQLite/Vector memory store, Discord bot transport, blind eval scorecard)

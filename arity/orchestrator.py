@@ -1,4 +1,4 @@
-"""arity orchestrator — Master end-to-end engine integrating all 7 elemental parts.
+"""Arity orchestrator — the end-to-end engine integrating all seven parts.
 
 Axiom 1: One voice, a staff, and a door to each.
 Axiom 3: The model behind a bot is chosen per prompt, on evidence.
@@ -8,7 +8,6 @@ Axiom 11: The system has a pulse.
 """
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,7 +25,7 @@ from .scorecard import Scorecard
 from .seams import ModelProvider, RecordStore, Transport
 from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
 from .tiers import BriefCompiler, PredecessorAccounts
-from .tools import SandboxToolRunner
+from .tools import SandboxToolRunner, resolve_arity
 from .transports import RedphoneInbox
 from .types import (
     CallModel,
@@ -107,11 +106,8 @@ class ArityOrchestrator:
         curr_time = now if now is not None else time.time()
         self._last_turn_time = curr_time
 
-        # Modulate arity: default from ARITY (or ARITY_CONCURRENCE) env var
-        effective_arity = candidates_per_task
-        if effective_arity is None:
-            effective_arity = int(os.environ.get("ARITY", os.environ.get("ARITY_CONCURRENCE", "1")))
-        effective_arity = max(1, effective_arity)
+        # API argument > ARITY > legacy ARITY_CONCURRENCY > unary chat.
+        effective_arity = resolve_arity(candidates_per_task, default=1)
 
         # 1. Post to red phone public address (Axiom 10)
         self.inbox.post(channel=channel, sender=sender, text=user_text)
@@ -227,3 +223,7 @@ class ArityOrchestrator:
         actions.extend(quota_actions)
 
         return actions
+
+
+# Compatibility: the pre-Arity public class name remains importable.
+ArityOrchestrator = ArityOrchestrator

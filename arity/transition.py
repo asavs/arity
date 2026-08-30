@@ -1,4 +1,4 @@
-"""Pure state transition function for arity.
+"""Pure state transition function for Arity.
 
 transition(state, event) -> (new_state, list[effects])
 

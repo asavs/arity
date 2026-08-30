@@ -1,9 +1,7 @@
-# arity
+# Arity
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-40%20passing-brightgreen.svg)](tests/)
 [![Architecture](https://img.shields.io/badge/architecture-pure%20statechart-orange.svg)](#core-philosophy)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 ```
                  .  .  .  .
@@ -19,17 +17,19 @@
                  '  '  '  '
 ```
 
-A composable pure statechart chassis for autonomous AI agents.
+**One task. N agents. Facts first.**
 
-In mathematics and nature, **arity** modulates how elements compose: from a single singular voice (**unary: 1**), to A/B candidate races (**binary: 2**), to dense multi-kernel terrariums (**n-ary: $n$**). Just as nature packs sunflower seeds gaplessly at the Golden Angle ($137.5^\circ$), `arity` packs multipolar models, isolated sandboxes, and quota ledgers into an optimal, gapless coordination spiral.
+Arity is a small, provider-agnostic trial kernel for agent harnesses. Plug in a computer-use system, compaction strategy, memory layer, model router, tool runner, or evaluator; run candidate stacks against the same work; then keep the verified evidence needed to learn what is good for what.
+
+The name is the control surface. Unary (`--arity 1`) is one voice, binary (`--arity 2`) is an A/B trial, and n-ary (`--arity N`) is a multipolar trial. Arity is deliberately one composable piece of the broader effort to build agent harnesses: useful alone, more useful when its seams let independent work be tested together.
 
 ## Core Philosophy
 
-`arity` separates pure state transitions from side-effect execution:
+Arity separates pure state transitions from side-effect execution:
 
 $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_state}, \text{effects})$$
 
-Because the state machine is pure, you can graft on any external infrastructure (model routers, tool harnesses, vector memory, Discord/Slack transports, blind evaluators) without modifying the agent control loop.
+Because the state machine is pure, you can graft on external infrastructure (model routers, tool harnesses, memory, transports, blind evaluators) without modifying the control loop. Trials add isolated candidate workspaces, hidden verification, blind review on factual ties, conferences, delivery receipts, and empirical standings. The evaluator itself is a replaceable seam.
 
 ```
                   ┌────────────────────────┐
@@ -57,10 +57,14 @@ Because the state machine is pure, you can graft on any external infrastructure 
 
 ## Quickstart
 
-### Run the Architectural Demo
+### Run a trial
 ```bash
-python -m arity demo
+python -m pip install .
+arity --help
+arity run --mock --arity 3 --task lru_cache
 ```
+
+`--arity` must be a positive integer. Resolution order is explicit `--arity`, then `ARITY`, then the legacy `ARITY_CONCURRENCY` setting, then the command default.
 
 ### Python API Example
 ```python
@@ -73,11 +77,17 @@ runtime = Runtime(
 )
 
 # Run interactive or multi-turn turns
-output, state = runtime.chat("Create a hello.txt file with 'Hello from arity!'")
+output, state = runtime.chat("Create a hello.txt file with 'Hello from Arity!'")
 print(output)
 ```
 
 ### Run Unit Tests
 ```bash
-python -m unittest tests/test_arity.py
+python -m unittest discover -s tests -v
 ```
+
+## Compatibility Boundary
+
+The distribution and user-facing command are named **Arity**. The `arity` Python package, `python -m arity`, and the `arity` console-script alias remain supported so existing integrations do not break. Existing `.arity/` state directories and `ARITY_*` settings are also read in place; Arity does not rename, copy, or delete that user data. Remaining `arity` names in import paths, compatibility identifiers, state paths, and historical release notes are intentional.
+
+This repository does not yet include a license file. See [RELEASE.md](RELEASE.md) for historically named release notes.
