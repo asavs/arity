@@ -451,7 +451,7 @@ def handle_run_command(args: argparse.Namespace) -> None:
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and os.environ.get("GORKBOT_NONINTERACTIVE") != "1"
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
-        conference=args.conference, out_dir=_P(args.out) if args.out else None, mock=args.mock,
+        conference=args.conference, tester=args.tester, out_dir=_P(args.out) if args.out else None, mock=args.mock,
         printer=safe_print, interactive=interactive, quiet=not args.verbose,
     )
     if args.json:
@@ -526,6 +526,7 @@ def main():
     run_parser.add_argument("--candidates", "-n", type=int, default=None, help="How many different models (default: GORKBOT_CONCURRENCY or 3)")
     run_parser.add_argument("--judges", type=str, default=None, help="Judge models on a tie (default: the candidates themselves)")
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
+    run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
     run_parser.add_argument("--out", "-o", type=str, default=None, help="Where to deliver (default: deliveries/<task_id>/)")
     run_parser.add_argument("--mock", action="store_true", help="Canned providers, no tokens")
     run_parser.add_argument("--verbose", "-v", action="store_true", help="Also print the race table")
