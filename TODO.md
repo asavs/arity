@@ -17,6 +17,17 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
 - [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
 
+## Resolve (what happens after facts tie)
+- [ ] Refine the choices when models cannot settle on one implementation: present Asa the judges' cherry-picks as
+      concrete diffs to apply to the winner, offer conference as the merge path, and make "keep both" a valid
+      answer. Today: winner by cost tie-break, cherry-picks printed, human_pick only on a terminal.
+- [ ] Non-interactive runs should leave the question in the redphone inbox instead of silently keeping the
+      archivist's order.
+
+## Harnesses
+- [ ] The claude CLI is a real harness (own tools, own system prompt). Race it as cli:claude on purpose, with a
+      brief adapted to it, rather than as a wire stand-in. Out of scope until the wire seats are exhausted.
+
 ## Races
 - [ ] A brief that asks a write-denied role (scout) to write a file is a task-design error; the race
       should refuse or warn at resolve time (role.can_use_tool('write_file') vs brief mentions 'write').
