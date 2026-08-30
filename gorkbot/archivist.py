@@ -264,6 +264,8 @@ class ImpartialArchivist:
             "tokens": r.tokens_used,
             "seconds": round(r.duration_seconds, 2),
             "fallbacks": getattr(r, "fallbacks", 0),
+            **({"changed_files": len(r.changed_files), "phase_tokens": r.phase_tokens}
+               if getattr(r, "phase_tokens", 0) or getattr(r, "changed_files", None) else {}),
         }
 
     def trace_axes(self, r: TerrariumCandidateResult) -> dict[str, Any]:

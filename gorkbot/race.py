@@ -672,7 +672,8 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
             a = (e.axes if e else {}) or {}
             p(f"  {(e.rank if e else 0)}{'=' if e and e.tied_with else ' '} {(r.spec.name if r.spec else r.candidate_id):28} "
               f"{(e.verdict if e else r.status):11} own={own:9} hidden={hidden:9} loc={a.get('loc', '-')} "
-              f"tests={a.get('test_count', '-')} {r.duration_seconds:.0f}s {r.tokens_used:,} tok")
+              f"tests={a.get('test_count', '-')} changed={a.get('changed_files', '-')} "
+              f"{r.duration_seconds:.0f}s {r.tokens_used:,} tok total ({r.phase_tokens:,} this phase)")
         if rep.conference_winner and rep.conference_winner.spec:
             p(f"  {green}final draft:{reset} {bold}{rep.conference_winner.spec.name}{reset}")
         p()
