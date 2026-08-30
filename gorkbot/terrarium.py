@@ -585,6 +585,15 @@ class TerrariumDispatcher:
         # 9. Collect tool audit records
         tool_records = self.store.query("tool_result", session_id=candidate_id) if hasattr(self.store, "query") else []
 
+        # A kernel that ends its turn by message(to="user") has spoken; that text is its output.
+        # Claude in particular delivers rankings and reports this way and then stops with empty content.
+        if not (output or "").strip():
+            delivered = [m for m in final_state.messages if m.get("role") == "tool"
+                         and str(m.get("content", "")).startswith("[Delivered to Asa]")]
+            if delivered:
+                output = str(delivered[-1]["content"]).split("]: ", 1)[-1]
+                self_report = f"Candidate {spec.name} executed brief in {duration:.2f}s ({total_tokens} tokens).{test_summary} Output: {output}"
+
         # 10. Record trial entry in store
         if self.store:
             try:
