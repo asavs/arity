@@ -447,7 +447,8 @@ def handle_run_command(args: argparse.Namespace) -> None:
     from pathlib import Path as _P
     from .race import render_report, run_front_door
     judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
-    interactive = sys.stdin.isatty() and not args.json
+    # A background/piped run must never block on the secretary's question.
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and os.environ.get("GORKBOT_NONINTERACTIVE") != "1"
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
         conference=args.conference, out_dir=_P(args.out) if args.out else None, mock=args.mock,

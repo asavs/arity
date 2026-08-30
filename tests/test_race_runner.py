@@ -353,6 +353,8 @@ class TestDiscrepancyDetector(unittest.TestCase):
             "`prices.md` is written at the workspace root.",
             "Results saved to out/prices.json.",
             "prices.md has been updated with the numbers.",
+            "**Files written**" + chr(10) + "- `rate_limiter.py` - TokenBucket with per-key buckets" + chr(10) + "- `test_rate_limiter.py` - 14 tests",
+            "Done. Files written: rate_limiter.py, test_rate_limiter.py. 14 tests green.",
         ):
             self.assertEqual(self._audit(report), "discrepancy", report)
 

@@ -607,7 +607,17 @@ def _fmt_tests(tr: Optional[dict[str, Any]]) -> tuple[str, str]:
 # Front door: gorkbot run "<brief>"  ->  race with the axis choices made  ->  deliver
 # -----------------------------------------------------------------------------
 
-def pick_seats(seats: list[Seat], limit: int) -> list[Seat]:
+def default_wire_capable(s: Seat) -> bool:
+    """A seat whose provider can call tools. A bare CLI seat can only narrate work it cannot do."""
+    from .handlers import CLIModelProvider, OMPModelProvider
+    try:
+        from .wire import create_wire_model_provider
+        return not isinstance(create_wire_model_provider(s), (CLIModelProvider, OMPModelProvider))
+    except Exception:
+        return False
+
+
+def pick_seats(seats: list[Seat], limit: int, wire_capable: Callable[[Seat], bool] = default_wire_capable) -> list[Seat]:
     """One seat per model, fullest quota first (seats arrive sorted that way), capped at `limit`.
 
     Different models, not different accounts of one model: the point of a run is that a couple of
@@ -615,13 +625,15 @@ def pick_seats(seats: list[Seat], limit: int) -> list[Seat]:
     """
     chosen: list[Seat] = []
     seen: set[str] = set()
-    for s in seats:
-        if s.model in seen or s.remaining <= 0:
-            continue
-        seen.add(s.model)
-        chosen.append(s)
-        if len(chosen) >= limit:
-            break
+    # Wire-capable seats first (quota order preserved within each pass); CLI-only seats only fill gaps.
+    for pass_wire in (True, False):
+        for s in seats:
+            if s.model in seen or s.remaining <= 0 or wire_capable(s) != pass_wire:
+                continue
+            seen.add(s.model)
+            chosen.append(s)
+            if len(chosen) >= limit:
+                return chosen
     return chosen
 
 
