@@ -221,7 +221,9 @@ class AntigravityWireProvider:
                 usage_meta = res.get("response", {}).get("usageMetadata", {})
                 usage = {
                     "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+                    # thoughts are output the account pays for; candidatesTokenCount alone under-reports
+                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0) + usage_meta.get("thoughtsTokenCount", 0),
+                    "thought_tokens": usage_meta.get("thoughtsTokenCount", 0),
                     "total_tokens": usage_meta.get("totalTokenCount", 0),
                 }
 
@@ -368,12 +370,15 @@ class CodexWireProvider:
                                         "arguments": item.get("arguments", "{}"),
                                     },
                                 })
-                        elif etype == "response.done":
+                        elif etype in ("response.completed", "response.done", "response.incomplete"):
+                            # The Responses API's terminal event is response.completed; output_tokens
+                            # already includes reasoning tokens. Waiting for response.done alone meant
+                            # every GPT candidate was metered by len(text)/4, minus its tool arguments.
                             res = event.get("response", {})
-                            usage_raw = res.get("usage", {})
+                            usage_raw = res.get("usage", {}) or {}
                             if usage_raw:
-                                prompt_tokens = usage_raw.get("input_tokens", 0)
-                                completion_tokens = usage_raw.get("output_tokens", 0)
+                                prompt_tokens = int(usage_raw.get("input_tokens", 0) or 0)
+                                completion_tokens = int(usage_raw.get("output_tokens", 0) or 0)
                     except Exception:
                         continue
 
@@ -383,7 +388,10 @@ class CodexWireProvider:
                 tool_calls=tool_calls,
                 usage={
                     "prompt_tokens": prompt_tokens or (sum(len(str(m.get("content") or "")) for m in effect.messages) // 4),
-                    "completion_tokens": completion_tokens or (len(output_text) // 4 if output_text else 0),
+                    "completion_tokens": completion_tokens or (
+                        (len(output_text) + sum(len(str(tc["function"].get("arguments", ""))) for tc in tool_calls)) // 4
+                    ),
+                    "estimated": not (prompt_tokens and completion_tokens),
                 },
                 finish_reason="tool_calls" if tool_calls else "stop",
                 seat_id=f"wire:codex:{self.model}",
