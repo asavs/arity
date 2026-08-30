@@ -405,5 +405,35 @@ class TestMessageToUserIsOutput(unittest.TestCase):
         self.assertIn("## Ranking", res.self_report)
 
 
+class TestCliHarnessRunsInTheSandbox(unittest.TestCase):
+    def test_dispatcher_points_every_cli_in_the_chain_at_the_workspace(self):
+        from dataclasses import dataclass
+        from arity.wire import FallbackModelProvider
+
+        @dataclass
+        class FakeCli:
+            cwd: str | None = None
+            harness: str = "claude"
+
+            def call(self, effect: CallModel) -> ModelCompleted:
+                return ModelCompleted(content=f"ran in {self.cwd}", tool_calls=[], usage={})
+
+        bare, fallback = FakeCli(), FakeCli()
+        wire_fails = type("W", (), {"call": lambda self, e: __import__("arity.types", fromlist=["ModelFailed"]).ModelFailed(error="429 quota")})()
+        seen = {}
+        def factory(seat):
+            return bare if seat.model == "bare" else FallbackModelProvider(primary=wire_fails, fallback=fallback)
+        with TemporaryDirectory() as d:
+            disp = TerrariumDispatcher(ledger=SeatLedger(initial_seats=placeholder_seats(), auto_seed=False),
+                                       store=JsonlRecordStore(Path(d) / "r"), base_workspace=Path(d) / "t", model_factory=factory)
+            r1 = disp.dispatch_single(TaskRecord(brief="x"), CandidateSpec(seat=Seat(provider="p", model="bare"), role=BUILDER_ROLE), run_verification=False)
+            r2 = disp.dispatch_single(TaskRecord(brief="x"), CandidateSpec(seat=Seat(provider="p", model="wired"), role=BUILDER_ROLE), run_verification=False)
+        self.assertEqual(bare.cwd, str(r1.workspace_path))
+        self.assertEqual(fallback.cwd, str(r2.workspace_path))
+        self.assertEqual(r1.harness, "cli:claude")      # a bare CLI is filed as what it is
+        self.assertEqual(r2.fallbacks, 1)
+        self.assertTrue(r2.output.startswith("ran in "))
+
+
 if __name__ == "__main__":
     unittest.main()
