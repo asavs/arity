@@ -92,51 +92,9 @@ class AntigravityWireProvider:
         session_id = f"-{int(time.time() * 1000)}"
         request_id = f"agent/main/{int(time.time() * 1000)}/{str(uuid.uuid4())}/1"
 
-        contents: list[dict[str, Any]] = []
-        system_instruction: Optional[dict[str, Any]] = None
-
-        # Gemini function calling needs the tool name on every functionResponse; OpenAI-style
-        # tool messages only carry the call id, so remember the name from the assistant turn.
-        call_names: dict[str, str] = {}
-        for msg in effect.messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if role == "system":
-                system_instruction = {
-                    "role": "user",
-                    "parts": [{"text": str(content)}],
-                }
-            elif role == "assistant":
-                parts: list[dict[str, Any]] = []
-                if content:
-                    parts.append({"text": str(content)})
-                for tc in msg.get("tool_calls") or []:
-                    fn = tc.get("function", {})
-                    try:
-                        args = json.loads(fn.get("arguments") or "{}")
-                    except Exception:
-                        args = {"raw": fn.get("arguments")}
-                    call_names[tc.get("id", "")] = fn.get("name", "")
-                    # Claude behind this endpoint requires tool_use ids on both halves of the exchange.
-                    part: dict[str, Any] = {"functionCall": {"id": tc.get("id", ""), "name": fn.get("name", ""), "args": args}}
-                    if tc.get("thought_signature"):
-                        part["thoughtSignature"] = tc["thought_signature"]
-                    parts.append(part)
-                if not parts:
-                    continue  # Claude rejects an empty text part ("text.text: Field required"); an empty model turn carries nothing
-                contents.append({"role": "model", "parts": parts})
-            elif role == "tool":
-                call_id = msg.get("tool_call_id", "")
-                name = msg.get("name") or call_names.get(call_id, "tool")
-                contents.append({
-                    "role": "user",
-                    "parts": [{"functionResponse": {"id": call_id, "name": name, "response": {"output": str(content)}}}],
-                })
-            else:  # "user"
-                contents.append({
-                    "role": "user",
-                    "parts": [{"text": str(content)}],
-                })
+        from .gemini_format import to_contents, tool_declarations, parse_parts, usage_from
+        contents, system_text = to_contents(effect.messages)
+        system_instruction: Optional[dict[str, Any]] = {"role": "user", "parts": [{"text": system_text}]} if system_text else None
 
         inner_request: dict[str, Any] = {
             "sessionId": session_id,
@@ -153,20 +111,9 @@ class AntigravityWireProvider:
         if model_enum:
             inner_request["labels"] = {"model_enum": model_enum}
 
-        # Tool declarations (OpenAI schema -> Gemini functionDeclarations). Without these the
-        # model can only describe the work in prose; a live race graded that as an empty sandbox.
-        if effect.tools:
-            decls = []
-            for t in effect.tools:
-                fn = t.get("function", {})
-                if fn.get("name"):
-                    decls.append({
-                        "name": fn["name"],
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-                    })
-            if decls:
-                inner_request["tools"] = [{"functionDeclarations": decls}]
+        decls = tool_declarations(effect.tools)
+        if decls:
+            inner_request["tools"] = [{"functionDeclarations": decls}]
 
         if is_claude:
             inner_request["toolConfig"] = {
@@ -196,29 +143,9 @@ class AntigravityWireProvider:
                 if not candidates:
                     candidates = res.get("candidates", [])
 
-                content_text = ""
-                tool_calls: list[dict[str, Any]] = []
-
+                content_text, tool_calls = None, []
                 if candidates:
-                    first_cand = candidates[0]
-                    parts = first_cand.get("content", {}).get("parts", [])
-                    for p in parts:
-                        if "text" in p:
-                            content_text += p["text"]
-                        if "functionCall" in p:
-                            fc = p["functionCall"]
-                            tc: dict[str, Any] = {
-                                "id": fc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                                "type": "function",
-                                "function": {
-                                    "name": fc.get("name"),
-                                    "arguments": json.dumps(fc.get("args", {})),
-                                },
-                            }
-                            # Gemini 3 rejects a replayed functionCall without its thought signature.
-                            if p.get("thoughtSignature"):
-                                tc["thought_signature"] = p["thoughtSignature"]
-                            tool_calls.append(tc)
+                    content_text, tool_calls = parse_parts(candidates[0].get("content", {}).get("parts", []))
 
                 usage_meta = res.get("response", {}).get("usageMetadata", {})
                 usage = {
