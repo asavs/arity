@@ -380,5 +380,28 @@ class TestDiscrepancyDetector(unittest.TestCase):
         self.assertEqual(self._audit("I could not write prices.md because the role has no write tool."), "success")
 
 
+class TestMessageToUserIsOutput(unittest.TestCase):
+    def test_a_kernel_that_speaks_through_message_to_user_has_output(self):
+        class Speaker:
+            def __init__(self):
+                self.turn = 0
+
+            def call(self, effect: CallModel) -> ModelCompleted:
+                self.turn += 1
+                if self.turn == 1:
+                    return ModelCompleted(content="", tool_calls=[{"id": "m1", "type": "function", "function": {
+                        "name": "message", "arguments": json.dumps({"to": "user", "text": "## Ranking 1. A" + "x" * 500})}}],
+                        usage={}, finish_reason="tool_calls")
+                return ModelCompleted(content="", tool_calls=[], usage={})
+
+        with TemporaryDirectory() as d:
+            disp = TerrariumDispatcher(ledger=SeatLedger(initial_seats=placeholder_seats(), auto_seed=False),
+                                       store=JsonlRecordStore(Path(d) / "r"), base_workspace=Path(d) / "t")
+            res = disp.dispatch_single(TaskRecord(brief="rank"), CandidateSpec(seat=placeholder_seats()[0], role=BUILDER_ROLE, custom_model_provider=Speaker()), run_verification=False)
+        self.assertTrue(res.output.startswith("## Ranking"))
+        self.assertGreater(len(res.output), 400)   # full text, not the 200-char record preview
+        self.assertIn("## Ranking", res.self_report)
+
+
 if __name__ == "__main__":
     unittest.main()
