@@ -8,6 +8,7 @@ Axiom 11: The system has a pulse.
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -99,12 +100,18 @@ class GorkbotOrchestrator:
         user_text: str,
         sender: str = "user",
         channel: str = "main",
-        candidates_per_task: int = 1,
+        candidates_per_task: Optional[int] = None,
         now: Optional[float] = None,
     ) -> OrchestrationResponse:
         """Process an incoming message through the unified kernel runtime."""
         curr_time = now if now is not None else time.time()
         self._last_turn_time = curr_time
+
+        # Modulate arity: default from ARITY (or GORKBOT_CONCURRENCE) env var
+        effective_arity = candidates_per_task
+        if effective_arity is None:
+            effective_arity = int(os.environ.get("ARITY", os.environ.get("GORKBOT_CONCURRENCE", "1")))
+        effective_arity = max(1, effective_arity)
 
         # 1. Post to red phone public address (Axiom 10)
         self.inbox.post(channel=channel, sender=sender, text=user_text)
@@ -116,12 +123,12 @@ class GorkbotOrchestrator:
         casting = self.composer.cast(
             role=target_role,
             task=user_text,
-            candidates_count=candidates_per_task,
+            candidates_count=effective_arity,
             now=curr_time,
         )
 
         # 4. Multi-candidate trial or direct single-kernel turn
-        is_direct_chat = target_role.name in ("secretary", "voice") and candidates_per_task == 1
+        is_direct_chat = target_role.name in ("secretary", "voice") and effective_arity == 1
         if not is_direct_chat:
             task_record = TaskRecord(
                 from_role="user" if target_role.name in ("secretary", "voice") else "secretary",
