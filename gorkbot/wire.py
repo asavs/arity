@@ -45,16 +45,18 @@ class AntigravityWireProvider:
     project_id: str
     model: str = "gemini-3-flash-agent"
     timeout: float = 60.0
+    account_key: str = "google-antigravity"  # which account's token/project this seat spends
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         import uuid
         import time
 
-        # 1. Attempt token auto-refresh if available
+        # 1. Attempt token auto-refresh for THIS seat's account. Refreshing the bare provider key
+        #    returned the first account on file and silently moved every seat onto it.
         try:
             from .auth import TokenStore
             store = TokenStore()
-            refreshed = store.refresh_if_needed("google-antigravity")
+            refreshed = store.refresh_if_needed(self.account_key)
             if refreshed and refreshed.get("access"):
                 self.access_token = refreshed["access"]
                 if refreshed.get("projectId"):
@@ -489,6 +491,10 @@ class FallbackModelProvider:
     fallback_count: int = 0
     total_calls: int = 0
     last_latency_seconds: float = 0.0
+    # Same wire, other accounts. On a quota/rate error (429) the seat rotates here first;
+    # the CLI harness is the last resort because it changes the harness axis.
+    alternates: list = field(default_factory=list)
+    rotations: int = 0
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         import time
@@ -500,14 +506,29 @@ class FallbackModelProvider:
             self.last_latency_seconds = time.time() - start_t
             if isinstance(result, ModelCompleted):
                 return result
-            # Primary failed, attempt fallback
-            self.fallback_count += 1
-            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {result.error}. Shifting to fallback harness...", file=sys.stderr)
+            error = result.error
         except Exception as e:
-            self.fallback_count += 1
+            error = str(e)
             self.last_latency_seconds = time.time() - start_t
-            print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary exception: {e}. Shifting to fallback harness...", file=sys.stderr)
 
+        if "429" in error or "RESOURCE_EXHAUSTED" in error or "quota" in error.lower():
+            for alt in list(self.alternates):
+                try:
+                    alt_result = alt.call(effect)
+                except Exception as e:
+                    alt_result = ModelFailed(error=str(e))
+                if isinstance(alt_result, ModelCompleted):
+                    self.rotations += 1
+                    print(f"\033[1;33m[Seat Rotation #{self.rotations}]\033[0m '{getattr(self.primary, 'account_key', 'primary')}' is out of quota; "
+                          f"continuing on '{getattr(alt, 'account_key', 'alternate')}'.", file=sys.stderr)
+                    self.alternates.remove(alt)
+                    self.alternates.append(self.primary)
+                    self.primary = alt
+                    return alt_result
+                error = f"{error} | alternate {getattr(alt, 'account_key', '?')}: {alt_result.error}"
+
+        self.fallback_count += 1
+        print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {error}. Shifting to fallback harness...", file=sys.stderr)
         return self.fallback.call(effect)
 
 # -----------------------------------------------------------------------------
@@ -538,10 +559,22 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
                 access_token=token,
                 project_id=proj_id,
                 model=model or "gemini-3.6-flash",
+                account_key=account_key,
             )
+            # Sibling accounts with their own quota: tried on a 429 before any CLI fallback.
+            alternates: list[ModelProvider] = []
+            own_email = agy_data.get("email")
+            for key, acc in store.get_all_for_provider("google-antigravity"):
+                same = key == account_key or (own_email and acc.get("email") == own_email)
+                if same or not acc.get("access") or not (acc.get("projectId") or acc.get("project_id")):
+                    continue
+                alternates.append(AntigravityWireProvider(
+                    access_token=acc["access"], project_id=acc.get("projectId") or acc.get("project_id", ""),
+                    model=model or "gemini-3.6-flash", account_key=key,
+                ))
             fallback_harness = harness if harness in ("omp", "claude", "codex", "grok") else "omp"
             cli = CLIModelProvider(harness=fallback_harness, model=model or "gemini-3.6-flash")
-            return FallbackModelProvider(primary=wire, fallback=cli, name=f"google+{fallback_harness}")
+            return FallbackModelProvider(primary=wire, fallback=cli, name=f"google+{fallback_harness}", alternates=alternates)
         return CLIModelProvider(harness="omp", model=model or "gemini-3.6-flash")
 
     # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
