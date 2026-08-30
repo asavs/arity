@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gorkbot"
-version = "0.3.0"
+name = "arity"
+dynamic = ["version"]
 description = "A composable statechart chassis for autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,10 @@ authors = [
 dependencies = []
 
 [project.scripts]
+arity = "gorkbot.cli:main"
 gorkbot = "gorkbot.cli:main"
+[tool.setuptools.dynamic]
+version = {attr = "gorkbot.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
