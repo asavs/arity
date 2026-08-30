@@ -1,3 +1,93 @@
+# gorkbot 0.3.0 — Trials
+
+**Release Date:** 2026-08-29
+
+A trial is the primitive: a small harness, agent types with system prompts, skills and tools, run in
+parallel, then facts, then opinions, then you. This release makes that primitive a command, gives it
+a front door, and uses it to build one of gorkbot's own organs.
+
+### What changed:
+
+1. **`gorkbot race` — one task, N candidates, one archivist (`gorkbot/race.py`, `gorkbot/terrarium.py`)**
+   - `CandidateSpec` carries six axes: seat, harness, tool runner, skills, role, and `context` (`fresh` |
+     `accounts` | `fork`; `fork` replays the parent's exact prompt prefix for a cache hit).
+   - Presets vary exactly one axis at a time (`--variants models|harness|tools|skills|context`), so a result
+     is attributable. A custom grammar (`model=..+harness=..+tools=..+skills=a/b+ctx=..`) composes candidates.
+   - Sandboxes are per candidate; `--teardown` / `--keep`; `--mock` runs canned `good` / `slow` / `liar`
+     providers against an ephemeral store so demos never touch the scorecard.
+   - Three phases after the isolated build: **verify** (own tests plus a hidden suite the candidate never saw),
+     **review** (`--judges`: the reviewer role reads a blind bundle, letters shuffled, and ranks with cited
+     reasons; runs only when the facts tie), **conference** (`--conference N`: the candidates are woken up in
+     their own sandboxes with each other's work under `peers/` and notes via `message(to="peer:B")`, then
+     re-verified).
+
+2. **`gorkbot run` — the front door (`gorkbot/race.py`, `gorkbot/cli.py`)**
+   - One seat per model, fullest quota first, wire-capable first, capped by `--candidates` / `GORKBOT_CONCURRENCY`.
+   - Race → review on a facts tie → if the judges split, the secretary asks you on the terminal and the answer
+     is stored as a `human_pick` → **deliver**: the winner's files to `--out` (or `deliveries/<task_id>/`), or
+     `answer.md` when there are none, with a one-line receipt. `--tester`, `--conference`, `--verbose`, `--json`.
+
+3. **The archivist counts; the judge opines; you decide (`gorkbot/archivist.py`, `gorkbot/standings.py`)**
+   - Trials are ordered by tiers of fact — verdict, hidden pass rate, own pass rate — and cost only inside a
+     tier. Identical facts are reported as a tie. No summed score orders a trial.
+   - Every candidate gets a `trial_axes` record: prompt vs. completion tokens, turns, tool calls and errors,
+     test runs, LOC, test count, type-ignores, bare asserts, whether the brief's hard numbers appear in its own
+     tests, fallbacks, changed files (conference), fetch reach, **false claims** and **confessions**.
+   - `gorkbot standings [--by model|signature|harness]` aggregates those records — success and hidden-pass
+     rates, lie and confession rates, cost, fallbacks, and judge-side facts (ranked its own model first;
+     citations found true). No composite.
+   - Judgements are records too: the blind bundle states what is already counted so the judge spends
+     tokens on idiom and intent; each judge's cited identifiers are checked against the sandbox and printed
+     beside its ranking, never scored.
+
+4. **Types: a role plus a language (`gorkbot/definitions/types/`, `gorkbot/roles.py`)**
+   - `developer:python`, `tester:python`, `reviewer:python` share one pack (skills, prompt append, verify
+     commands). A task's tags pick the type; the tester and the judge in a race take the builders' type.
+     `python_developer.md` is replaced by `developer.md` + `types/python.md`; `types/rust.md` is a stub.
+
+5. **Task bank, tester, judge, secretary (`gorkbot/tasks.py`, `gorkbot/definitions/`)**
+   - `gorkbot tasks`: briefs with hidden acceptance tests (`lru_cache` with a 200k-ops time budget,
+     `sqlite_cache`, `rate_limiter`, `sqlite_record_store`).
+   - `tester` is a test engineer again (writes acceptance tests before and apart from the implementation);
+     `reviewer` is a read-only judge that must cite evidence and may say "tie"; the `secretary` shows you two
+     candidates and asks when the judges disagree, and never presents a provisional winner as decided.
+
+6. **Seats, wires, and metering (`gorkbot/ledger.py`, `gorkbot/wire.py`, `gorkbot/handlers.py`)**
+   - One Antigravity seat per (account, model) with `remaining` seeded from the live quota; the backend keeps
+     two quotas (Gemini; Claude+GPT-OSS together). Each seat spends its own account's token and rotates to a
+     sibling account on 429 before any CLI fallback. `live_seats()` returns fullest quota first.
+   - Gemini: tool declarations are sent, calls replay with thought signatures, Claude-behind-Antigravity
+     carries tool ids, empty model turns are never sent; one conversion (`gemini_format.py`) for both wires.
+   - Honest metering: Codex usage is read from `response.completed`; Gemini counts thought tokens; a wire
+     that had to guess marks `estimated`. CLI harnesses run non-interactively, killably, inside the candidate's
+     sandbox, and are filed as `cli:<harness>` when they had no wire. Fallbacks are recorded; a moved harness
+     is never attributed to the wire.
+   - `fetch_url` presents as a browser and falls back to a reader proxy for JS shells.
+
+7. **Stores (`gorkbot/stores/sqlite.py`)**
+   - `SqliteRecordStore` implements the `RecordStore` seam (append/query) plus `kinds()` and idempotent
+     `replay_jsonl()`. `GORKBOT_STORE=sqlite` selects it; the JSONL store (now locked against interleaved
+     writes) remains the default.
+   - **It was built by the trial system it records:** `gorkbot run --task sqlite_record_store --tester
+     --conference 1`. The tester wrote 18 hidden tests; three models built it; GPT-5.6-sol passed 24/24; one
+     conference round; the delivered file credits what it borrowed from a peer. It replays this release's
+     3,155 JSONL records losslessly and skips the 10 lines the pre-lock store had corrupted.
+
+### Numbers
+
+- 96 commits, one per fix or feature. 110 tests.
+- 9 live code races and 2 live scout races on the wire across GPT-5.6-sol, Grok 4.5, Claude Opus 4.6
+  (Antigravity) and Gemini 3.6 Flash; 2 front-door runs; 1 organ delivered.
+
+### Known limits
+
+See `TODO.md` — the issue tracker until there is a remote. The large ones: pre-flight casting against
+remaining quota; actual cost per quota window vs. API-equivalent; the resolve step when judges split
+(cherry-pick diffs, "keep both"); CLI harness tools bypass the role's denial set (contained by `cwd`, not
+enforced); a headless browser past the reader proxy; the claude CLI as a deliberate harness.
+
+---
+
 # gorkbot 0.2.0 — Direct Line
 
 **Release Date:** 2026-08-28
@@ -26,23 +116,6 @@
 
 5. **Terminal chat cache timer (`gorkbot/cli.py`)**
    - `python -m gorkbot chat` shows a countdown timer indicating how long the model's prompt cache stays warm before each input line.
-
-6. **`gorkbot race` — single-axis A/B/C trials with an impartial judge (`gorkbot/race.py`, `gorkbot/terrarium.py`, `gorkbot/archivist.py`)**
-   - `CandidateSpec` now carries six axes: seat, harness, tool runner, skills, role, and `context` (`fresh` | `accounts` | `fork`). `fork` replays the parent's exact prompt prefix for a cache hit.
-   - Presets vary exactly one axis at a time (`--variants models|harness|tools|skills|context`); a custom grammar (`model=..+harness=..+tools=..+skills=a/b+ctx=..`) composes candidates by hand.
-   - Candidates are drawn from the authenticated `SeatLedger`; sandbox directories are slug-safe on Windows.
-   - The archivist ignores verification side-effects (`__pycache__`, `.pytest_cache`, `.hidden_tests`), reports ties instead of crowning duration jitter, and weights hidden tests above a candidate's own.
-   - `--mock` runs canned `good` / `slow` / `liar` providers against an ephemeral store, so demos never touch the real scorecard. `--teardown` / `--keep` control sandbox lifetime.
-
-8. **`gorkbot run` — the front door, and the record store it built (`gorkbot/race.py`, `gorkbot/stores/sqlite.py`)**
-   - `gorkbot run "<brief>"`: one seat per model (fullest quota first, wire-capable first), race, review on a facts tie, the secretary's question when judges split, and delivery of the winner to `--out` with a one-line receipt.
-   - Type packs: a role plus a language (`developer:python`, `tester:python`, `reviewer:python`; `rust` stubbed). Conference phase: candidates woken up together with each other's work and queued notes, re-verified.
-   - Multi-axis record per trial (correctness tiers, own/hidden pass, prompt vs. completion tokens, turns, tool calls, false claims, confessions, fetch reach, fallbacks) and `gorkbot standings` over it — no composite.
-   - **The SQLite record store in this release was built by the trial system it records:** `gorkbot run --task sqlite_record_store --tester --conference 1` — a tester wrote 18 hidden tests, three models built it, GPT-5.6-sol passed 24/24, one conference round, delivered. It replays the JSONL records of this release losslessly (3,145 records; 10 corrupt lines from the pre-lock store skipped). `GORKBOT_STORE=sqlite` selects it.
-
-7. **Task bank and the tester role (`gorkbot/tasks.py`, `gorkbot/definitions/tasks/`, `gorkbot/definitions/roles/tester.md`)**
-   - `gorkbot tasks` lists briefs with hidden acceptance tests (`lru_cache`, `sqlite_cache`, `rate_limiter`); `gorkbot race --task <name>` grades every candidate against tests it never saw, including a time budget where the brief says "fast".
-   - `tester` is a real role again (test engineer, not a reviewer alias). `--tester` has it author the hidden suite before the builders run.
 
 ---
 ### What's New in 0.1.1:
