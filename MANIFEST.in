@@ -1,0 +1,3 @@
+include README.md
+include RELEASE.md
+recursive-include gorkbot/definitions *.md *.py

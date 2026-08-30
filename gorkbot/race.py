@@ -63,6 +63,8 @@ class RaceConfig:
     # Conference phase: wake the candidates up together for N rounds, then re-verify and re-audit.
     conference: int = 0
     quiet: bool = False  # suppress per-candidate console chatter (run does this unless --verbose)
+    # Set by the front door. ``--arity`` is a requested maximum; seat availability may resolve fewer.
+    requested_arity: Optional[int] = None
 
 
 @dataclass
@@ -75,6 +77,7 @@ class RaceReport:
     entries: list[ArchivistEntry]
     archivist: ImpartialArchivist
     ephemeral: bool
+    requested_arity: Optional[int] = None
     notes: list[str] = field(default_factory=list)
     judgements: list[dict[str, Any]] = field(default_factory=list)
     # Phase 2 (conference): the same candidates after talking; audited separately.
@@ -91,6 +94,10 @@ class RaceReport:
             "task_name": self.race_task.name if self.race_task else None,
             "hidden_tests": sorted(self.task.hidden_tests),
             "ephemeral": self.ephemeral,
+            "arity": {
+                "requested_max": self.requested_arity,
+                "resolved": len(self.candidates),
+            },
             "winner": self.winner.spec.name if self.winner and self.winner.spec else None,
             "winner_signature": self.winner.signature if self.winner else None,
             "notes": self.notes,
@@ -197,7 +204,7 @@ def resolve_candidates(variants: str, role: Role, seats: list[Seat]) -> tuple[li
         parts = [p.strip() for p in variants.split(",") if p.strip()]
         specs = [_parse_custom_variant(p, seats, role, i) for i, p in enumerate(parts)]
     if len(specs) < 2:
-        notes.append(f"only {len(specs)} candidate resolved; a race needs at least two to say anything")
+        notes.append(f"unary trial: {len(specs)} candidate resolved; comparison requires at least two")
     return specs, notes
 
 
@@ -331,6 +338,15 @@ def attach_mocks(candidates: list[CandidateSpec]) -> None:
         cand.name = f"{cand.name} [{label}]"
 
 
+def canned_mock_judgement(candidate_count: int) -> str:
+    """Build a valid canned blind ranking for exactly the candidates in a mock trial."""
+    labels = [chr(ord("A") + i) for i in range(candidate_count)]
+    reasons = [f"{i}. {label} - canned mock preference." for i, label in enumerate(labels, 1)]
+    cherry_picks = {"B": "its eviction test"} if "B" in labels else {}
+    payload = {"order": labels, "ties": [], "cherry_picks": cherry_picks}
+    return "\n".join([*reasons, json.dumps(payload)])
+
+
 # -----------------------------------------------------------------------------
 # Run
 # -----------------------------------------------------------------------------
@@ -362,10 +378,11 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         attach_mocks(candidates)
         notes.append("mock mode: canned providers, ephemeral store, sandboxes torn down")
         if cfg.judges and not cfg.judge_provider:
-            # Canned judge: ranks by letter and cherry-picks from B, so the review phase is visible offline.
+            # Match the resolved blind bundle exactly; smaller arities must not invent phantom labels.
+            canned_review = canned_mock_judgement(len(candidates))
             cfg.judge_provider = lambda model: ScriptedProvider(
-                {}, '1. A - fewest lines (lru_cache.py).\n2. B - broader tests.\n3. C - no artifacts.\n'
-                    '{"order": ["A", "B", "C"], "ties": [], "cherry_picks": {"B": "its eviction test"}}', f"judge-{model}")
+                {}, canned_review, f"judge-{model}"
+            )
 
     # Mock runs never write to the real scorecard; live runs are the scorecard's whole purpose.
     ephemeral = cfg.mock
@@ -400,8 +417,18 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         task=task, candidates=candidates, test_command=cfg.test_command, max_workers=cfg.workers,
         archivist=archivist, tester=tester_spec, teardown=False,
     )
-    report = RaceReport(task=task, race_task=race_task, candidates=candidates, winner=winner, results=results,
-                        entries=entries, archivist=archivist, ephemeral=ephemeral, notes=notes)
+    report = RaceReport(
+        task=task,
+        race_task=race_task,
+        candidates=candidates,
+        winner=winner,
+        results=results,
+        entries=entries,
+        archivist=archivist,
+        ephemeral=ephemeral,
+        requested_arity=cfg.requested_arity,
+        notes=notes,
+    )
 
     top = report.entry_for(winner) if winner else None
     facts_tie = bool(top and top.tied_with)
@@ -476,8 +503,16 @@ def blind_bundle(rep: RaceReport) -> tuple[str, dict[str, str]]:
 
 
 def parse_judgement(text: str, key: dict[str, str]) -> dict[str, Any]:
-    """Pull the trailing JSON line out of a judge's reply and map letters back to candidate ids."""
+    """Parse a complete blind-label permutation and map it back to candidate ids.
+
+    A ranking is accepted only when it contains every current label exactly once and no
+    tie or cherry-pick references an unknown label. Invalid model output remains recorded
+    as text by the caller, but cannot leak phantom candidates into resolved evidence.
+    """
     out: dict[str, Any] = {"order": [], "ties": [], "cherry_picks": {}, "parsed": False}
+    if not key:
+        return out
+    expected = set(key)
     decoder = json.JSONDecoder()
     text = text or ""
     # Try every '{' from the end backwards; the ranking object may nest (cherry_picks is a dict).
@@ -486,9 +521,44 @@ def parse_judgement(text: str, key: dict[str, str]) -> dict[str, Any]:
             data, _ = decoder.raw_decode(text[start:])
             if not isinstance(data, dict) or "order" not in data:
                 continue
-            out["order"] = [key.get(L, L) for L in data.get("order", [])]
-            out["ties"] = [[key.get(L, L) for L in t] for t in data.get("ties", [])]
-            out["cherry_picks"] = {key.get(L, L): v for L, v in (data.get("cherry_picks") or {}).items()}
+
+            order = data.get("order")
+            if (
+                not isinstance(order, list)
+                or len(order) != len(key)
+                or any(not isinstance(label, str) for label in order)
+                or len(set(order)) != len(order)
+                or set(order) != expected
+            ):
+                continue
+
+            ties = data.get("ties", [])
+            if ties is None:
+                ties = []
+            if not isinstance(ties, list):
+                continue
+            valid_ties = True
+            for tied in ties:
+                if (
+                    not isinstance(tied, list)
+                    or len(tied) < 2
+                    or any(not isinstance(label, str) or label not in expected for label in tied)
+                    or len(set(tied)) != len(tied)
+                ):
+                    valid_ties = False
+                    break
+            if not valid_ties:
+                continue
+
+            cherry_picks = data.get("cherry_picks", {})
+            if cherry_picks is None:
+                cherry_picks = {}
+            if not isinstance(cherry_picks, dict) or any(label not in expected for label in cherry_picks):
+                continue
+
+            out["order"] = [key[label] for label in order]
+            out["ties"] = [[key[label] for label in tied] for tied in ties]
+            out["cherry_picks"] = {key[label]: value for label, value in cherry_picks.items()}
             out["parsed"] = True
             break
         except Exception:
@@ -621,8 +691,8 @@ def default_wire_capable(s: Seat) -> bool:
 def pick_seats(seats: list[Seat], limit: int, wire_capable: Callable[[Seat], bool] = default_wire_capable) -> list[Seat]:
     """One seat per model, fullest quota first (seats arrive sorted that way), capped at `limit`.
 
-    Different models, not different accounts of one model: the point of a run is that a couple of
-    different minds attempt the thing.
+    Different models, not different accounts of one model: a run compares as many distinct minds
+    as are available, up to the requested maximum.
     """
     chosen: list[Seat] = []
     seen: set[str] = set()
@@ -733,14 +803,42 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
                    candidates: Optional[int] = None, judges: Optional[list[str]] = None, conference: int = 0,
                    tester: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True) -> tuple[RaceReport, Delivery]:
-    """Run an Arity trial with the chosen axes, then deliver the selected result."""
-    cap = resolve_arity(candidates, default=3)
-    seats = placeholder_seats()[:cap] if mock else pick_seats(live_seats(), cap)
-    variants = ",".join(f"model={s.model}" for s in seats) if seats else "models"
-    cfg = RaceConfig(prompt=brief, task_name=task_name, variants=variants, role=role, mock=mock, workers=cap,
-                     judges=judges if judges is not None else [s.model for s in seats], review="tie",
-                     conference=conference, teardown=False, quiet=quiet, tester=tester)
+    """Run up to the requested number of unique candidates, then deliver the selected result."""
+    requested_arity = resolve_arity(candidates, default=3)
+    selected_seats = (
+        placeholder_seats()[:requested_arity]
+        if mock
+        else pick_seats(live_seats(), requested_arity)
+    )
+    # With no authenticated seats, preserve the existing dry-run fallback while still honoring
+    # the requested maximum instead of allowing ``models`` to expand back to all placeholders.
+    variant_seats = selected_seats or placeholder_seats()[:requested_arity]
+    variants = ",".join(f"model={seat.model}" for seat in variant_seats)
+    resolved_arity = len(variant_seats)
+    cfg = RaceConfig(
+        prompt=brief,
+        task_name=task_name,
+        variants=variants,
+        role=role,
+        mock=mock,
+        workers=resolved_arity,
+        judges=judges if judges is not None else [seat.model for seat in variant_seats],
+        review="tie",
+        conference=conference,
+        teardown=False,
+        quiet=quiet,
+        tester=tester,
+        requested_arity=requested_arity,
+    )
     rep = run_race(cfg)
+    actual_arity = len(rep.candidates)
+    rep.requested_arity = requested_arity
+    underfilled = actual_arity < requested_arity
+    if underfilled:
+        rep.notes.insert(
+            0,
+            f"arity requested max {requested_arity}; resolved {actual_arity} unique candidates",
+        )
     final = rep.conference_winner or rep.winner
     asked = False
     if rep.judgements and judges_split(rep) and interactive:
@@ -749,6 +847,8 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
         if pick is not None:
             final = pick
     delivery = deliver(rep, out_dir=out_dir, final=final)
+    if underfilled:
+        delivery.receipt = f"arity {actual_arity}/{requested_arity} resolved · {delivery.receipt}"
     delivery.asked_human = asked
     return rep, delivery
 

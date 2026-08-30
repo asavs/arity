@@ -282,6 +282,53 @@ class TestTaskBankAndPresets(unittest.TestCase):
             self.assertNotIn(r.seat.model, text)
         self.assertEqual(parse_judgement("garbage", key)["parsed"], False)
 
+    def test_two_candidate_mock_review_has_no_phantom_candidate(self):
+        variants = "model=gemini-3.6-flash,model=gpt-5.6-sol"
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            rep = run_race(RaceConfig(
+                prompt="Implement an LRU cache.",
+                variants=variants,
+                mock=True,
+                judges=["gemini-3.6-flash", "gpt-5.6-sol"],
+                review="always",
+                workspace_root=root / "ws",
+                store_root=root / "records",
+            ))
+        ids = {result.candidate_id for result in rep.results}
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(rep.judgements), 2)
+        for judgement in rep.judgements:
+            self.assertTrue(judgement["parsed"])
+            self.assertEqual(set(judgement["order"]), ids)
+            self.assertTrue(set(judgement["cherry_picks"]) <= ids)
+
+    def test_judgement_rejects_non_exact_or_unknown_labels(self):
+        from gorkbot.race import parse_judgement
+
+        key = {"A": "candidate-a", "B": "candidate-b"}
+        invalid = (
+            '{"order": ["A"]}',
+            '{"order": ["A", "A"]}',
+            '{"order": ["A", "B", "C"]}',
+            '{"order": ["A", "B"], "ties": [["A", "C"]]}',
+            '{"order": ["A", "B"], "cherry_picks": {"C": "phantom"}}',
+        )
+        for text in invalid:
+            with self.subTest(text=text):
+                parsed = parse_judgement(text, key)
+                self.assertFalse(parsed["parsed"])
+                self.assertEqual(parsed["order"], [])
+
+        valid = parse_judgement(
+            '{"order": ["B", "A"], "ties": [["A", "B"]], "cherry_picks": {"A": "keep"}}',
+            key,
+        )
+        self.assertTrue(valid["parsed"])
+        self.assertEqual(valid["order"], ["candidate-b", "candidate-a"])
+        self.assertEqual(valid["ties"], [["candidate-a", "candidate-b"]])
+        self.assertEqual(valid["cherry_picks"], {"candidate-a": "keep"})
+
     def test_mock_race_is_ephemeral_and_ranks_good_slow_liar(self):
         with TemporaryDirectory() as d:
             rep = run_race(RaceConfig(task_name="lru_cache", mock=True, workspace_root=Path(d) / "ws"))

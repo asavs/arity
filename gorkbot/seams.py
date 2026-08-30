@@ -1,8 +1,8 @@
 """Arity seams — explicit interfaces for pluggable infrastructure grafts.
 
-Any external engine (e.g. LiteLLM router, OpenRouter gateway, Docker sandbox,
-SQLite/Vector memory store, Discord bot transport, blind eval scorecard)
-implements one of these protocols.
+External model routers, tool harnesses, record stores, transports, and telemetry
+integrations can implement these protocols. Trial verification and ranking remain
+built-in orchestration stages rather than implementations of these seams.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class Transport(Protocol):
 
 @runtime_checkable
 class Observer(Protocol):
-    """Graft point for archivists, blind judges, telemetry, and eval monitors."""
+    """Graft point for event/effect telemetry and evaluation monitoring."""
 
     def on_event(self, state: State, event: Event) -> None:
         """Invoked on every incoming event before transition."""

@@ -6,7 +6,7 @@ A task directory looks like:
         brief.md            frontmatter (name, description, module, entrypoint, tags) + the brief
         hidden_tests/       test_*.py files run against each candidate AFTER it finishes
 
-Legacy-compatible banks in `.gorkbot/tasks/` and `~/.gorkbot/tasks/` override packaged tasks by name.
+Active local banks in `.gorkbot/tasks/` and `~/.gorkbot/tasks/` override packaged tasks by name.
 """
 from __future__ import annotations
 

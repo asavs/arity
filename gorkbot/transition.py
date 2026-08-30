@@ -1,8 +1,9 @@
-"""Pure state transition function for Arity.
+"""I/O-free state transition function for Arity.
 
 transition(state, event) -> (new_state, list[effects])
 
-No I/O, no network calls, no subprocesses here. Pure logic and state transformations.
+No I/O, network calls, or subprocesses happen here. The function mutates the supplied
+``State`` while describing effects for the runtime to execute.
 """
 from __future__ import annotations
 

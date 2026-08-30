@@ -95,7 +95,7 @@ SCOUT_RECON_SKILL = Skill(
 
 
 class SkillRegistry:
-    """Discover built-ins and legacy-compatible ``.gorkbot/skills`` overrides."""
+    """Discover built-ins and active ``.gorkbot/skills`` overrides."""
 
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = Path(skills_dir) if skills_dir else Path(".gorkbot/skills")
