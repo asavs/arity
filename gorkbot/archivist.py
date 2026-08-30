@@ -243,10 +243,6 @@ class ImpartialArchivist:
                 except Exception:
                     pass
 
-        def fact_key(e: ArchivistEntry) -> tuple:
-            a = e.axes
-            return (a["tier"], a["hidden_rate"], a["own_rate"])
-
         def order_key(item: tuple[TerrariumCandidateResult, ArchivistEntry, float]):
             r, e, _ = item
             a = e.axes
@@ -256,13 +252,31 @@ class ImpartialArchivist:
         scored_candidates.sort(key=order_key)
         for rank, (r, e, _) in enumerate(scored_candidates, 1):
             e.rank = rank
-            e.tied_with = [o.candidate_id for (_, o, _) in scored_candidates if o is not e and fact_key(o) == fact_key(e)]
+            e.tied_with = [
+                o.candidate_id
+                for (_, o, _) in scored_candidates
+                if o is not e and self.fact_key(o) == self.fact_key(e)
+            ]
         top_r, top_e, _ = scored_candidates[0]
         if top_e.tied_with:
             top_e.tie_break = "same facts; ordered by tokens, then seconds, then prior standing"
 
         winner = top_r if top_e.axes["tier"] > 0 else None
         return winner, entries
+
+    @staticmethod
+    def fact_key(entry: ArchivistEntry) -> tuple[int, float, float]:
+        """Return the factual tier used to decide whether candidates truly tie.
+
+        Cost and historical standing deliberately do not appear here; they only provide a
+        stable provisional order inside a factual tie.
+        """
+        axes = entry.axes
+        return (
+            int(axes.get("tier", 0)),
+            float(axes.get("hidden_rate", 0.0)),
+            float(axes.get("own_rate", 0.0)),
+        )
 
     @staticmethod
     def axes(r: TerrariumCandidateResult, entry: ArchivistEntry) -> dict[str, Any]:

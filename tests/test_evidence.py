@@ -33,6 +33,8 @@ def candidate(candidate_id: str, *, rank: int, tied_with: tuple[str, ...] = ()) 
         test_results={"hidden": {"passed": 2, "total": 2}},
         axes={"tier": 3, "hidden_rate": 1.0},
         artifacts=(ArtifactEvidence.from_bytes("answer.py", candidate_id.encode()),),
+        arm_id=f"arm-{candidate_id}",
+        arm_ordinal=ord(candidate_id[0]) - ord("a"),
     )
 
 

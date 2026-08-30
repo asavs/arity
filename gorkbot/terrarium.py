@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Protocol, Union
 
 from .handlers import (
     default_record_store,
@@ -119,6 +119,24 @@ def skill_names(skills: list[Any]) -> list[str]:
 CONTEXT_MODES = ("fresh", "accounts", "fork")
 
 
+@dataclass(frozen=True)
+class ContextEnvelope:
+    """The compiled context a strategy may transform immediately before execution."""
+
+    system_prompt: str
+    messages: tuple[dict[str, Any], ...]
+    user_prompt: str
+
+
+class ContextAdapter(Protocol):
+    """A named, testable compaction/memory/context transform."""
+
+    adapter_id: str
+
+    def apply(self, envelope: ContextEnvelope) -> ContextEnvelope:
+        ...
+
+
 @dataclass
 class CandidateSpec:
     """A multidimensional candidate specification across stack axes (Axiom 3).
@@ -134,6 +152,7 @@ class CandidateSpec:
            "accounts" - brief + rendered predecessor self-report/archivist entry (default)
            "fork"     - parent's exact system prompt + message prefix replayed, brief appended
                         (prompt-cache hit; only meaningful when parent and child share a seat)
+         An optional context_adapter performs one named transform after this built-in inheritance.
     """
     seat: Seat
     name: str = ""
@@ -142,6 +161,7 @@ class CandidateSpec:
     tool_runner_type: Union[str, type[ToolRunner], ToolRunner, Callable[..., ToolRunner]] = "sandbox"
     skills: list[Union[str, Any]] = field(default_factory=list)
     context: str = "accounts"
+    context_adapter: Optional[ContextAdapter] = None
     system_prompt_override: Optional[str] = None
     custom_model_provider: Optional[ModelProvider] = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -149,6 +169,8 @@ class CandidateSpec:
     def __post_init__(self):
         if self.context not in CONTEXT_MODES:
             raise ValueError(f"CandidateSpec.context must be one of {CONTEXT_MODES}, got {self.context!r}")
+        if self.context_adapter is not None and not str(getattr(self.context_adapter, "adapter_id", "")).strip():
+            raise ValueError("CandidateSpec.context_adapter must expose a stable adapter_id")
         if not self.name:
             self.name = f"{self.seat.id}:{_label(self.harness)}:{_label(self.tool_runner_type)}"
 
@@ -164,6 +186,12 @@ class CandidateSpec:
     def skill_names(self) -> list[str]:
         return skill_names(self.skills)
 
+    @property
+    def context_adapter_id(self) -> Optional[str]:
+        if self.context_adapter is None:
+            return None
+        return str(self.context_adapter.adapter_id)
+
     def signature(self, default_role: str = "builder") -> str:
         """Compute the unique multidimensional combo signature for scorecard standings.
 
@@ -177,6 +205,8 @@ class CandidateSpec:
             parts.append(",".join(sorted(self.skill_names)))
         if self.context != "accounts":
             parts.append(f"ctx={self.context}")
+        if self.context_adapter_id:
+            parts.append(f"ctx_adapter={self.context_adapter_id}")
         return ":".join(parts)
 
     def display_tuple(self) -> tuple[str, str, str, str]:
@@ -465,6 +495,7 @@ class TerrariumDispatcher:
                 harness=spec.harness,
                 tool_runner_type=spec.tool_runner_type,
                 skills=spec.skills,
+                context_adapter=spec.context_adapter,
             )
             peer_res = self.dispatch_single(task=peer_task, candidate_or_seat=peer_spec)
             return peer_res.output or f"[{target_peer.name} replied with no output]"
@@ -548,11 +579,26 @@ class TerrariumDispatcher:
             initial_state.system_prompt = task.parent_system_prompt or compiled_brief.system_prompt
             initial_state.messages = [dict(m) for m in task.parent_messages]
 
+        user_prompt = compiled_brief.user_prompt
+        if spec.context_adapter is not None:
+            adapted = spec.context_adapter.apply(
+                ContextEnvelope(
+                    system_prompt=initial_state.system_prompt,
+                    messages=tuple(dict(message) for message in initial_state.messages),
+                    user_prompt=user_prompt,
+                )
+            )
+            if not isinstance(adapted, ContextEnvelope):
+                raise TypeError("ContextAdapter.apply() must return ContextEnvelope")
+            initial_state.system_prompt = adapted.system_prompt
+            initial_state.messages = [dict(message) for message in adapted.messages]
+            user_prompt = adapted.user_prompt
+
         # 5. Execute the multi-turn agent loop
         try:
             final_state = runtime.run(
                 initial_state,
-                initial_event=UserMessage(text=compiled_brief.user_prompt, sender=task.from_role),
+                initial_event=UserMessage(text=user_prompt, sender=task.from_role),
             )
             output = final_state.output
             error = None
@@ -677,7 +723,9 @@ class TerrariumDispatcher:
         if cap and str(cap).isdigit() and int(cap) > 0:
             max_workers = min(max_workers, int(cap))
 
-        results: list[TerrariumCandidateResult] = []
+        # Execute concurrently but return declaration order.  Completion timing is an observed
+        # metric, not a stable arm identity for evidence, evaluators, or replay.
+        ordered_results: list[Optional[TerrariumCandidateResult]] = [None] * len(candidates)
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), max_workers)) as executor:
             future_to_cand = {
                 executor.submit(
@@ -687,36 +735,33 @@ class TerrariumDispatcher:
                     None,
                     run_verification,
                     test_command,
-                ): cand
-                for cand in candidates
+                ): (index, cand)
+                for index, cand in enumerate(candidates)
             }
             for future in concurrent.futures.as_completed(future_to_cand):
-                cand = future_to_cand[future]
+                index, cand = future_to_cand[future]
                 try:
-                    res = future.result()
-                    results.append(res)
+                    ordered_results[index] = future.result()
                 except Exception as e:
                     actual_role = cand.role or PYTHON_DEVELOPER_ROLE
-                    results.append(
-                        TerrariumCandidateResult(
-                            candidate_id=f"cand_{cand.seat.id}_err",
-                            task_id=task.id,
-                            seat=cand.seat,
-                            role=actual_role,
-                            final_state=State(session_id=f"err_{cand.seat.id}", status=Status.HALTED),
-                            output=None,
-                            self_report=None,
-                            tokens_used=0,
-                            duration_seconds=0.0,
-                            workspace_path=self.base_workspace / task.id,
-                            status="failed",
-                            error=str(e),
-                            spec=cand,
-                            signature=cand.signature(default_role=actual_role.name),
-                        )
+                    ordered_results[index] = TerrariumCandidateResult(
+                        candidate_id=f"cand_{cand.seat.id}_err",
+                        task_id=task.id,
+                        seat=cand.seat,
+                        role=actual_role,
+                        final_state=State(session_id=f"err_{cand.seat.id}", status=Status.HALTED),
+                        output=None,
+                        self_report=None,
+                        tokens_used=0,
+                        duration_seconds=0.0,
+                        workspace_path=self.base_workspace / task.id,
+                        status="failed",
+                        error=str(e),
+                        spec=cand,
+                        signature=cand.signature(default_role=actual_role.name),
                     )
 
-        return results
+        return [result for result in ordered_results if result is not None]
 
     def dispatch_parallel(
         self,
@@ -920,7 +965,9 @@ class TerrariumDispatcher:
                 round_spec = CandidateSpec(
                     seat=spec.seat, name=spec.name, role=spec.role, harness=spec.harness,
                     tool_runner_type=spec.tool_runner_type, skills=spec.skills, context="fork",
+                    context_adapter=spec.context_adapter,
                     system_prompt_override=spec.system_prompt_override, custom_model_provider=spec.custom_model_provider,
+                    metadata=dict(spec.metadata),
                 )
                 round_task = TaskRecord(
                     id=task.id, from_role=task.from_role, to_role=task.to_role, brief=round_brief(L, rnd, deliveries[L]),

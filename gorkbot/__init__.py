@@ -49,6 +49,8 @@ from .terrarium import (
     CONTEXT_MODES,
     HIDDEN_TESTS_DIR,
     CandidateSpec,
+    ContextAdapter,
+    ContextEnvelope,
     TaskRecord,
     TerrariumCandidateResult,
     TerrariumDispatcher,
@@ -173,6 +175,8 @@ __all__ = [
     "CastingDecision",
     # Terrarium & Multi-Dimensional Trials
     "CandidateSpec",
+    "ContextAdapter",
+    "ContextEnvelope",
     "TaskRecord",
     "TerrariumCandidateResult",
     "TerrariumDispatcher",
