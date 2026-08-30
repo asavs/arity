@@ -188,8 +188,9 @@ def run_demo():
 
 
 def interactive_chat():
-    """Run a clean, responsive console chat with The Secretary and live cache warmth indicator."""
-    print("\033[1;36m=== Arity Switchboard (The Secretary) ===\033[0m")
+    """Run a clean, responsive console chat with The Voice and live cache warmth indicator."""
+    print(SUNFLOWER_ART)
+    print("\033[1;36m=== arity switchboard (The Voice) ===\033[0m")
     print("Type your message (or 'exit' / 'quit' to stop).\n")
 
     orchestrator = ArityOrchestrator()
@@ -234,13 +235,28 @@ def interactive_chat():
                 print(f"{resp.winning_candidate.output}\n")
         elif resp.reply_text:
             print(f"\n\033[1;36m[The Secretary | {latency:.2f}s]\033[0m\n{resp.reply_text}\n")
+SUNFLOWER_ART = "\033[1;33m" + r"""
+                 .  .  .  .
+             .  '  *  *  *  '  .
+          .  *  o  o  o  o  o  *  .
+        .  *  o  x  x  x  x  o  *  .
+       .  *  o  x  +  +  x  o  *  .
+       .  *  o  x  + [1] +  x  o  *  .    r_n = c √n
+       .  *  o  x  +  +  x  o  *  .      θ_n = n × 137.507764° (Golden Angle)
+        .  *  o  x  x  x  x  o  *  .      Fibonacci spirals: 21, 34, 55, 89, 144
+          .  *  o  o  o  o  o  *  .
+             .  '  *  *  *  '  .
+                 '  '  '  '
+""" + "\033[0m"
+
+
 def show_status():
     """Display real-time seat health, wire latency, and scorecard standings."""
     orchestrator = ArityOrchestrator()
+    print(SUNFLOWER_ART)
     print("\033[1;36m====================================================\033[0m")
-    print("\033[1;36m            arity System Health & Status          \033[0m")
+    print("\033[1;36m             arity System Health & Status           \033[0m")
     print("\033[1;36m====================================================\033[0m\n")
-
     print("\033[1;33m[1. Active Seats: Provider | Model | Fallback Harness]\033[0m")
     for s in orchestrator.ledger.list_seats():
         status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
@@ -523,7 +539,7 @@ def main():
     run_parser.add_argument("prompt", type=str, nargs="?", default="", help="What you want (or use --task)")
     run_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (brings hidden tests)")
     run_parser.add_argument("--role", "-r", type=str, default="developer:python", help="Role, optionally typed (developer:python, scout, secretary)")
-    run_parser.add_argument("--candidates", "-n", type=int, default=None, help="How many different models (default: ARITY_CONCURRENCY or 3)")
+    run_parser.add_argument("--arity", "-a", "--candidates", "-n", dest="candidates", type=int, default=None, help="Arity of the trial / candidate count (default: ARITY env or 3)")
     run_parser.add_argument("--judges", type=str, default=None, help="Judge models on a tie (default: the candidates themselves)")
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
     run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
