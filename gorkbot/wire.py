@@ -120,7 +120,9 @@ class AntigravityWireProvider:
                     if tc.get("thought_signature"):
                         part["thoughtSignature"] = tc["thought_signature"]
                     parts.append(part)
-                contents.append({"role": "model", "parts": parts or [{"text": ""}]})
+                if not parts:
+                    continue  # Claude rejects an empty text part ("text.text: Field required"); an empty model turn carries nothing
+                contents.append({"role": "model", "parts": parts})
             elif role == "tool":
                 call_id = msg.get("tool_call_id", "")
                 name = msg.get("name") or call_names.get(call_id, "tool")
