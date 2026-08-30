@@ -118,6 +118,9 @@ class CandidateEvidence:
     axes: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     artifacts: tuple[ArtifactEvidence, ...] = ()
     output: Optional[str] = None
+    arm_id: str = ""
+    arm_ordinal: int = 0
+    context_adapter: Optional[str] = None
 
     @classmethod
     def create(
@@ -144,6 +147,9 @@ class CandidateEvidence:
         axes: Optional[Mapping[str, Any]] = None,
         artifacts: Sequence[ArtifactEvidence] = (),
         output: Optional[str] = None,
+        arm_id: Optional[str] = None,
+        arm_ordinal: int = 0,
+        context_adapter: Optional[str] = None,
     ) -> "CandidateEvidence":
         return cls(
             candidate_id=str(candidate_id),
@@ -167,6 +173,9 @@ class CandidateEvidence:
             axes=_freeze_json(axes or {}),
             artifacts=tuple(artifacts),
             output=None if output is None else str(output),
+            arm_id=str(arm_id or candidate_id),
+            arm_ordinal=int(arm_ordinal),
+            context_adapter=None if context_adapter is None else str(context_adapter),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +201,9 @@ class CandidateEvidence:
             "axes": _thaw_json(self.axes),
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "output": self.output,
+            "arm_id": self.arm_id,
+            "arm_ordinal": self.arm_ordinal,
+            "context_adapter": self.context_adapter,
         }
 
     @classmethod
@@ -218,6 +230,9 @@ class CandidateEvidence:
             axes=value.get("axes") or {},
             artifacts=tuple(ArtifactEvidence.from_dict(item) for item in value.get("artifacts") or ()),
             output=value.get("output"),
+            arm_id=value.get("arm_id"),
+            arm_ordinal=int(value.get("arm_ordinal", 0)),
+            context_adapter=value.get("context_adapter"),
         )
 
 
@@ -249,12 +264,16 @@ class EvidenceBundle:
     ) -> "EvidenceBundle":
         frozen_hashes = _freeze_json(hidden_test_hashes or {})
         frozen_metadata = _freeze_json(metadata or {})
-        candidate_tuple = tuple(candidates)
+        candidate_tuple = tuple(sorted(candidates, key=lambda candidate: candidate.arm_ordinal))
         if not candidate_tuple:
             raise ValueError("an evidence bundle requires at least one candidate")
         ids = [candidate.candidate_id for candidate in candidate_tuple]
         if len(ids) != len(set(ids)):
             raise ValueError("candidate ids must be unique within an evidence bundle")
+        arm_ids = [candidate.arm_id for candidate in candidate_tuple]
+        ordinals = [candidate.arm_ordinal for candidate in candidate_tuple]
+        if len(arm_ids) != len(set(arm_ids)) or len(ordinals) != len(set(ordinals)):
+            raise ValueError("arm ids and ordinals must be unique within an evidence bundle")
         body = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "trial_id": str(trial_id),
