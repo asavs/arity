@@ -560,7 +560,7 @@ class JsonlRecordStore:
         rec = dict(effect.record)
         rec.setdefault("timestamp", time.time())
         p = self._path(effect.kind)
-        with p.open("a", encoding="utf-8") as f:
+        with self._lock, p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     def query(self, kind: str, **filters: Any) -> list[dict[str, Any]]:
@@ -568,7 +568,9 @@ class JsonlRecordStore:
         if not p.exists():
             return []
         results = []
-        for line in p.read_text(encoding="utf-8").splitlines():
+        with self._lock:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
