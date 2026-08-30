@@ -1,4 +1,4 @@
-"""gorkbot wire — Direct provider wire protocols & transparent harness fallbacks.
+"""Arity wire — direct provider protocols and transparent harness fallbacks.
 
 Axiom 13: The Seam Test — Own the pure from-scratch wire protocol, keep the
 external harness swappable as a seamless fallback and A/B benchmark.
@@ -199,7 +199,7 @@ class CodexWireProvider:
             "OpenAI-Beta": "responses=true",
             "originator": "codex",
             "version": "0.144.1",
-            "User-Agent": "gorkbot/0.0.1",
+            "User-Agent": "arity/0.3.0",
             "accept": "text/event-stream",
         }
 
@@ -357,7 +357,7 @@ class GrokWireProvider:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
-            "User-Agent": "gorkbot/0.0.1",
+            "User-Agent": "arity/0.3.0",
         }
 
         payload: dict[str, Any] = {
@@ -467,7 +467,7 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
     provider = getattr(seat, "provider", "").lower()
     model = getattr(seat, "model", "")
     account = getattr(seat, "account", None)
-    harness = getattr(seat, "harness", "gorkbot")
+    harness = getattr(seat, "harness", "arity")
     api_key = getattr(seat, "api_key", None)
     endpoint = getattr(seat, "endpoint", "")
 

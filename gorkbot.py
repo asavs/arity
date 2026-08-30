@@ -1,4 +1,4 @@
-"""gorkbot v0 — the whole system in one file.
+"""Arity's legacy v0 prototype, retained in its original single-file location.
 
 Read .wiki/spine.md and .wiki/tier-two.md first; this is those pages made to run.
 Every seam from axiom 12 is a class you can swap:
@@ -9,7 +9,8 @@ Every seam from axiom 12 is a class you can swap:
     Transport — how a channel reaches a human            (ConsoleTransport prints)
 
 No fakes. Every kernel turn is a real call to whatever seat the caster picked.
-Run `python gorkbot.py demo` to play S1, S3, S7, S36, S39 against the seats you have.
+The filename and ``.gorkbot`` state directory are compatibility surfaces. Run
+``python gorkbot.py demo`` to play S1, S3, S7, S36, S39 against available seats.
 """
 from __future__ import annotations
 

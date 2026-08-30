@@ -1,4 +1,4 @@
-"""Standard-library default handlers for gorkbot seams.
+"""Standard-library default handlers for Arity seams.
 
 Zero third-party dependencies. Built purely on Python 3.13 stdlib.
 """
@@ -59,7 +59,7 @@ class OpenAIModelProvider:
         endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "gorkbot/0.0.1",
+            "User-Agent": "arity/0.3.0",
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -536,10 +536,10 @@ class LocalToolRunner:
 # -----------------------------------------------------------------------------
 
 def default_record_store() -> "RecordStore":
-    """The store every default constructor uses. GORKBOT_STORE=sqlite (env or .gorkbot/config.json)
-    selects gorkbot/stores/sqlite.py at .gorkbot/records.db; anything else is the JSONL store."""
+    """Select Arity's store while retaining legacy settings and state paths."""
     from .tools import get_config_value
-    if (get_config_value("GORKBOT_STORE") or "jsonl").lower() == "sqlite":
+    store_kind = get_config_value("ARITY_STORE") or get_config_value("GORKBOT_STORE") or "jsonl"
+    if store_kind.lower() == "sqlite":
         from .stores.sqlite import SqliteRecordStore
         return SqliteRecordStore(Path(".gorkbot/records.db"))
     return JsonlRecordStore()
@@ -588,7 +588,7 @@ class JsonlRecordStore:
 class ConsoleTransport:
     """Prints incoming and outgoing messages to stdout with styling."""
 
-    def __init__(self, bot_name: str = "gorkbot"):
+    def __init__(self, bot_name: str = "arity"):
         self.bot_name = bot_name
 
     def emit(self, effect: EmitMessage) -> None:

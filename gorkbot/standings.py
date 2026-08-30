@@ -1,12 +1,12 @@
-"""gorkbot standings — queries over the trial record, no formula.
+"""Arity standings — queries over the trial record, without a composite formula.
 
 Every race writes one `trial_axes` record per candidate (facts the archivist counted) and one
 `judgement` record per judge. Standings are aggregates of those, grouped however you ask.
 The composite score is never used here: this is the raw multi-axis view.
 
-    gorkbot standings                 by model
-    gorkbot standings --by signature  by role:model:harness:tools[:skills]
-    gorkbot standings --by harness    by the harness the candidate actually ran on
+    arity standings                 by model
+    arity standings --by signature  by role:model:harness:tools[:skills]
+    arity standings --by harness    by the harness the candidate actually ran on
 """
 from __future__ import annotations
 

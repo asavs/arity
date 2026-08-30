@@ -1,4 +1,4 @@
-"""gorkbot ledger — Seat registry, quota reset management, and presence tracking.
+"""Arity ledger — seat registry, quota reset management, and presence tracking.
 
 Axiom 3: Provider quota remainders — use seats about to reset first.
 Axiom 36: Presence — a seat a human is live on is never chosen for a fresh cast.
@@ -18,7 +18,7 @@ class Seat:
     """A model capacity slice: provider, model, harness, and quota state."""
     provider: str                      # "google", "openai", "xai", "anthropic", "nvidia"
     model: str                         # "gemini-3.6-flash", "gpt-5.6-sol", "grok-4.5", "claude-3-7-sonnet"
-    harness: str = "gorkbot"           # Fallback harness: "omp", "claude", "codex", "grok", "gorkbot"
+    harness: str = "arity"             # "gorkbot" remains accepted as the legacy Arity harness ID
     account: Optional[str] = None      # Optional account email (e.g. for multi-account Google)
     endpoint: str = ""                 # Optional base URL / endpoint
     kind: str = "quota"                # "quota" (subscription window) | "metered_api" (pay-per-token)
@@ -91,7 +91,7 @@ class SeatLedger:
     @staticmethod
     def _antigravity_quota(store: Any, key: str, acc: dict[str, Any]) -> dict[str, Any]:
         """Live per-model quota for one account; {} when unreachable (seats then keep defaults)."""
-        if os.environ.get("GORKBOT_SKIP_QUOTA"):
+        if os.environ.get("ARITY_SKIP_QUOTA", os.environ.get("GORKBOT_SKIP_QUOTA")):
             return {}
         try:
             from .auth import fetch_antigravity_quota
@@ -253,7 +253,7 @@ class SeatLedger:
                 Seat(
                     provider="google-api",
                     model="gemini-3.6-flash",
-                    harness="gorkbot",
+                    harness="arity",
                     kind="metered_api",
                     base_price_per_m=0.10,
                     api_key=gemini_key,
@@ -266,7 +266,7 @@ class SeatLedger:
                 Seat(
                     provider="nvidia",
                     model="nvidia/nemotron-3-nano-30b-a3b",
-                    harness="gorkbot",
+                    harness="arity",
                     kind="metered_api",
                     base_price_per_m=0.05,
                     api_key=nim_key,

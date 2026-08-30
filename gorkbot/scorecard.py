@@ -1,4 +1,4 @@
-"""gorkbot scorecard — Model standing ledger, rankings, and trial evidence.
+"""Arity scorecard — model standings, rankings, and trial evidence.
 
 Axiom 3: The model behind a bot is chosen per prompt, on evidence.
 Axiom 9: Standing goes DOWN when a model is caught claiming changes it never made.

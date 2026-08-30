@@ -1,4 +1,4 @@
-"""gorkbot roles — Role registry, denial sets, and capability enforcement.
+"""Arity roles — role registry, denial sets, and capability enforcement.
 
 A bot is a role with a stable name and memory (Axiom 3).
 Roles are defined by what they're good at and what they are denied (Axiom 2).
@@ -229,7 +229,7 @@ class RoleRegistry:
         ]
 
     def _discover_from_definitions(self) -> None:
-        """Discover roles and types from packaged definitions, project .gorkbot/, and ~/.gorkbot/."""
+        """Discover packaged definitions plus legacy-compatible ``.gorkbot`` overrides."""
         for rdir in self._definition_dirs("roles"):
             if not rdir.exists():
                 continue
@@ -304,7 +304,9 @@ class RoleRegistry:
         return self.get(f"{role.base_name}:{type_name}") or role
 
     def list_roles(self) -> list[Role]:
-        return list(set(self._roles.values()))
+        # Aliases share Role instances, whose mapping fields intentionally make them unhashable.
+        unique = {id(role): role for role in self._roles.values()}
+        return sorted(unique.values(), key=lambda role: role.name)
 
     def list_types(self) -> list[TypePack]:
         return sorted(self._types.values(), key=lambda p: p.name)
