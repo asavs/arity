@@ -1,6 +1,6 @@
 """gorkbot — A composable statechart chassis for autonomous AI agents.
 
-Version: 0.0.1
+Version: 0.3.0
 """
 from .handlers import (
     ConsoleTransport,
@@ -98,7 +98,7 @@ from .types import (
     UserMessage,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Core types
