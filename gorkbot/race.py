@@ -59,6 +59,8 @@ class RaceConfig:
     judges: list[str] = field(default_factory=list)  # model names to seat as judges
     review: str = "tie"  # "tie" (only when facts tie) | "always" | "never"
     judge_provider: Optional[Callable[[str], Any]] = None  # tests: model name -> ModelProvider
+    # Conference phase: wake the candidates up together for N rounds, then re-verify and re-audit.
+    conference: int = 0
 
 
 @dataclass
@@ -73,9 +75,13 @@ class RaceReport:
     ephemeral: bool
     notes: list[str] = field(default_factory=list)
     judgements: list[dict[str, Any]] = field(default_factory=list)
+    # Phase 2 (conference): the same candidates after talking; audited separately.
+    conference_results: list[TerrariumCandidateResult] = field(default_factory=list)
+    conference_entries: list[ArchivistEntry] = field(default_factory=list)
+    conference_winner: Optional[TerrariumCandidateResult] = None
 
     def entry_for(self, r: TerrariumCandidateResult) -> Optional[ArchivistEntry]:
-        return next((e for e in self.entries if e.candidate_id == r.candidate_id), None)
+        return next((e for e in self.entries + self.conference_entries if e.candidate_id == r.candidate_id), None)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,28 +93,35 @@ class RaceReport:
             "winner_signature": self.winner.signature if self.winner else None,
             "notes": self.notes,
             "judgements": self.judgements,
-            "results": [
-                {
-                    "name": r.spec.name if r.spec else r.candidate_id,
-                    "signature": r.signature,
-                    "status": r.status,
-                    "error": r.error,
-                    "harness_actual": r.harness,
-                    "fallbacks": r.fallbacks,
-                    "verdict": (self.entry_for(r).verdict if self.entry_for(r) else None),
-                    "score": (self.entry_for(r).score if self.entry_for(r) else None),
-                    "axes": (self.entry_for(r).axes if self.entry_for(r) else {}),
-                    "rank": (self.entry_for(r).rank if self.entry_for(r) else None),
-                    "tied_with": (self.entry_for(r).tied_with if self.entry_for(r) else []),
-                    "duration_seconds": r.duration_seconds,
-                    "tokens_used": r.tokens_used,
-                    "test_results": r.test_results,
-                    "artifacts": (self.entry_for(r).verified_artifacts if self.entry_for(r) else []),
-                    "output": r.output,
-                }
-                for r in self.results
-            ],
+            "conference": {
+                "rounds_run": bool(self.conference_results),
+                "winner": (self.conference_winner.spec.name if self.conference_winner and self.conference_winner.spec else None),
+                "results": [self._result_dict(r) for r in self.conference_results],
+            },
+            "results": [self._result_dict(r) for r in self.results],
         }
+
+    def _result_dict(self, r: TerrariumCandidateResult) -> dict[str, Any]:
+        return {
+            "name": r.spec.name if r.spec else r.candidate_id,
+            "candidate_id": r.candidate_id,
+            "signature": r.signature,
+            "status": r.status,
+            "error": r.error,
+            "harness_actual": r.harness,
+            "fallbacks": r.fallbacks,
+            "verdict": (self.entry_for(r).verdict if self.entry_for(r) else None),
+            "score": (self.entry_for(r).score if self.entry_for(r) else None),
+            "axes": (self.entry_for(r).axes if self.entry_for(r) else {}),
+            "rank": (self.entry_for(r).rank if self.entry_for(r) else None),
+            "tied_with": (self.entry_for(r).tied_with if self.entry_for(r) else []),
+            "duration_seconds": r.duration_seconds,
+            "tokens_used": r.tokens_used,
+            "test_results": r.test_results,
+            "artifacts": (self.entry_for(r).verified_artifacts if self.entry_for(r) else []),
+            "output": r.output,
+        }
+
 
 
 # -----------------------------------------------------------------------------
@@ -395,6 +408,12 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     elif cfg.judges and not facts_tie:
         notes.append("review skipped: the facts already separated the candidates (use --review always to force)")
 
+    if cfg.conference > 0 and results:
+        phase2 = dispatcher.conference(task, results, entries=entries, rounds=cfg.conference,
+                                       max_workers=cfg.workers, test_command=cfg.test_command)
+        c_winner, c_entries = archivist.evaluate_trial(phase2)
+        report.conference_results, report.conference_entries, report.conference_winner = phase2, c_entries, c_winner
+
     if teardown:
         dispatcher.teardown(results + ([results[0].tester_result] if results and results[0].tester_result else []))
     if tmp_root and teardown:
@@ -643,6 +662,19 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
             for cid, note in (j.get("cherry_picks") or {}).items():
                 if note:
                     p(f"      {dim}cherry-pick from {names.get(cid, cid)}: {note}{reset}")
+        p()
+
+    if rep.conference_results:
+        p(f"{bold}conference{reset} (same candidates, woken up together; final drafts re-verified)")
+        for r in sorted(rep.conference_results, key=lambda r: (rep.entry_for(r).rank if rep.entry_for(r) else 99)):
+            e = rep.entry_for(r)
+            own, hidden = _fmt_tests(r.test_results)
+            a = (e.axes if e else {}) or {}
+            p(f"  {(e.rank if e else 0)}{'=' if e and e.tied_with else ' '} {(r.spec.name if r.spec else r.candidate_id):28} "
+              f"{(e.verdict if e else r.status):11} own={own:9} hidden={hidden:9} loc={a.get('loc', '-')} "
+              f"tests={a.get('test_count', '-')} {r.duration_seconds:.0f}s {r.tokens_used:,} tok")
+        if rep.conference_winner and rep.conference_winner.spec:
+            p(f"  {green}final draft:{reset} {bold}{rep.conference_winner.spec.name}{reset}")
         p()
 
     if rep.winner and rep.winner.spec:

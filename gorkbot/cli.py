@@ -433,6 +433,7 @@ def handle_race_command(args: argparse.Namespace) -> None:
         teardown=(True if getattr(args, "teardown", False) else (False if getattr(args, "keep", False) else None)),
         judges=[j.strip() for j in (getattr(args, "judges", "") or "").split(",") if j.strip()],
         review=getattr(args, "review", None) or "tie",
+        conference=int(getattr(args, "conference", 0) or 0),
     )
     report = run_race(cfg)
     if cfg.as_json:
@@ -475,6 +476,7 @@ def main():
     race_parser.add_argument("--teardown", action="store_true", help="Delete sandboxes after the race (default for --mock)")
     race_parser.add_argument("--judges", type=str, default="", help="Review phase: comma-separated judge models that read a blind bundle and rank (reviewer role)")
     race_parser.add_argument("--review", choices=["tie", "always", "never"], default="tie", help="When the review phase runs (default: only when facts tie)")
+    race_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="After the isolated build, wake the candidates up together for ROUNDS rounds (peers' work visible, notes via message(to='peer:X')), then re-verify")
     race_parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
     subparsers.add_parser("tasks", help="List the race task bank")
 

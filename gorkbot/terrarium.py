@@ -52,7 +52,10 @@ HIDDEN_TESTS_DIR = ".hidden_tests"
 """Directory inside a candidate sandbox where tester-authored tests are dropped after the build."""
 
 # Files the archivist must not attribute to a candidate: verification side-effects.
-ARTIFACT_IGNORE_PARTS = ("__pycache__", ".pytest_cache", HIDDEN_TESTS_DIR, ".hypothesis")
+PEERS_DIR = "peers"
+"""Inside a conference-round sandbox: read-only copies of the other candidates' work, by letter."""
+
+ARTIFACT_IGNORE_PARTS = ("__pycache__", ".pytest_cache", HIDDEN_TESTS_DIR, ".hypothesis", PEERS_DIR)
 
 
 @dataclass
@@ -379,8 +382,17 @@ class TerrariumDispatcher:
         role: Optional[Role] = None,
         run_verification: bool = True,
         test_command: Optional[str] = None,
+        workspace: Optional[Path] = None,
+        candidate_id: Optional[str] = None,
+        mailbox: Optional[dict[str, list[str]]] = None,
+        peer_letter: Optional[str] = None,
     ) -> TerrariumCandidateResult:
-        """Run a single candidate kernel in an isolated sandbox with multidimensional seams."""
+        """Run a single candidate kernel in an isolated sandbox with multidimensional seams.
+
+        `workspace`/`candidate_id` let a later phase (conference) wake a candidate up in the
+        sandbox it already built. `mailbox`/`peer_letter` enable message(to="peer:B"): the note
+        is queued for B's next round rather than spawning a new kernel.
+        """
         spec = self._resolve_candidate_spec(candidate_or_seat, role)
         seat = spec.seat
         actual_role = spec.role or role or PYTHON_DEVELOPER_ROLE
@@ -388,8 +400,8 @@ class TerrariumDispatcher:
         start_time = time.time()
         # Seat ids like "google:asa:gemini-3.6-flash" are not valid directory names on Windows.
         seat_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seat.id)).strip("-")
-        candidate_id = f"cand_{seat_slug}_{uuid.uuid4().hex[:6]}"
-        workspace = self.base_workspace / task.id / candidate_id
+        candidate_id = candidate_id or f"cand_{seat_slug}_{uuid.uuid4().hex[:6]}"
+        workspace = Path(workspace) if workspace else self.base_workspace / task.id / candidate_id
         workspace.mkdir(parents=True, exist_ok=True)
 
         sig = spec.signature(default_role=actual_role.name)
@@ -420,6 +432,15 @@ class TerrariumDispatcher:
 
         # 1. Peer message router for cross-kernel delegation
         def route_peer_message(to_peer: str, text_msg: str) -> str:
+            target = to_peer.strip()
+            if target.lower().startswith("peer:") and mailbox is not None:
+                letter = target.split(":", 1)[1].strip().upper()
+                if letter == (peer_letter or ""):
+                    return "That is you. Address a different peer letter."
+                if letter not in mailbox:
+                    return f"No peer '{letter}' in this conference. Peers: {', '.join(sorted(k for k in mailbox if k != peer_letter))}."
+                mailbox[letter].append(f"[from {peer_letter or '?'}] {text_msg}")
+                return f"Queued for {letter}; delivered at the start of their next round."
             if task.depth + 1 >= task.max_depth:
                 return f"Error: Maximum message hop limit ({task.max_depth}) reached."
             from .roles import RoleRegistry
@@ -779,3 +800,123 @@ class TerrariumDispatcher:
         if teardown:
             self.teardown(results + ([tester_result] if tester_result else []))
         return winner, results, entries
+
+    def conference(
+        self,
+        task: TaskRecord,
+        results: list[TerrariumCandidateResult],
+        entries: Optional[list[Any]] = None,
+        rounds: int = 2,
+        max_workers: int = 4,
+        test_command: Optional[str] = None,
+    ) -> list[TerrariumCandidateResult]:
+        """Wake the candidates back up, together, and let them sort out a final draft.
+
+        Each round, every candidate is resumed in its own sandbox (context="fork": its phase-1
+        transcript is replayed, so the provider cache is hit) with read-only copies of the
+        others' work under peers/<letter>/, the archivist's axes for everyone (blind letters),
+        and whatever notes peers sent it via message(to="peer:X"). Messages are queued between
+        rounds - there is no live channel, so nothing can deadlock. Verification runs after the
+        last round; the returned results are phase-2 results ready for the archivist.
+        """
+        if not results or rounds <= 0:
+            return []
+        letters = [chr(ord("A") + i) for i in range(len(results))]
+        by_letter = dict(zip(letters, results))
+        entry_of = {e.candidate_id: e for e in (entries or [])}
+        mailbox: dict[str, list[str]] = {L: [] for L in letters}
+        current: dict[str, TerrariumCandidateResult] = dict(by_letter)
+
+        def facts(L: str) -> str:
+            e = entry_of.get(by_letter[L].candidate_id)
+            a = (e.axes if e else {}) or {}
+            keep = ("tier", "hidden_rate", "own_rate", "loc", "test_count", "type_ignores", "brief_numbers_in_own_tests")
+            return ", ".join(f"{k}={a[k]}" for k in keep if k in a) or (e.verdict if e else "unknown")
+
+        def stage_peers(L: str) -> None:
+            ws = Path(by_letter[L].workspace_path)
+            peers_root = ws / PEERS_DIR
+            shutil.rmtree(peers_root, ignore_errors=True)
+            for M, other in by_letter.items():
+                if M == L:
+                    continue
+                src = Path(other.workspace_path)
+                if not src.is_dir():
+                    continue
+                for p in src.rglob("*"):
+                    rel = p.relative_to(src)
+                    if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in rel.parts):
+                        dst = peers_root / M / rel
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(p, dst)
+
+        def round_brief(L: str, rnd: int, inbox: list[str]) -> str:
+            notes = "\n".join(f"- {m}" for m in inbox) if inbox else "- (none)"
+            others = ", ".join(M for M in letters if M != L)
+            return (
+                f"# Conference round {rnd}/{rounds}\n"
+                f"You are candidate {L}. You and {others} each built the brief below in isolation; all attempts are now "
+                f"open. The other attempts are under `{PEERS_DIR}/<letter>/` in your workspace (read-only copies). "
+                f"Archivist facts, by letter:\n" + "\n".join(f"- {M}: {facts(M)}" for M in letters) + "\n\n"
+                f"Notes sent to you by peers:\n{notes}\n\n"
+                f"Produce the final draft in YOUR workspace: keep what is best, borrow from peers with credit in a "
+                f"comment, drop what is worse. You may send short notes to peers with message(to=\"peer:{others.split(', ')[0]}\") "
+                f"- they arrive next round. Do not edit `{PEERS_DIR}/`. Finish with a closing report naming every file you changed.\n\n"
+                f"## Original brief\n{task.brief}"
+            )
+
+        for rnd in range(1, rounds + 1):
+            last = rnd == rounds
+            for L in letters:
+                stage_peers(L)
+            # Notes sent last round are delivered now; notes sent this round wait for the next.
+            deliveries = {L: list(mailbox[L]) for L in letters}
+            for L in letters:
+                mailbox[L] = []
+
+            def run_one(L: str) -> tuple[str, TerrariumCandidateResult]:
+                prev = current[L]
+                spec = prev.spec
+                if spec is None:
+                    return L, prev
+                round_spec = CandidateSpec(
+                    seat=spec.seat, name=spec.name, role=spec.role, harness=spec.harness,
+                    tool_runner_type=spec.tool_runner_type, skills=spec.skills, context="fork",
+                    system_prompt_override=spec.system_prompt_override, custom_model_provider=spec.custom_model_provider,
+                )
+                round_task = TaskRecord(
+                    id=task.id, from_role=task.from_role, to_role=task.to_role, brief=round_brief(L, rnd, deliveries[L]),
+                    depth=task.depth, max_depth=task.max_depth, hidden_tests=task.hidden_tests, metadata=dict(task.metadata),
+                    parent_system_prompt=prev.final_state.system_prompt, parent_messages=list(prev.final_state.messages),
+                )
+                res = self.dispatch_single(
+                    round_task, round_spec, run_verification=False, test_command=test_command,
+                    workspace=prev.workspace_path, candidate_id=f"{by_letter[L].candidate_id}_c{rnd}",
+                    mailbox=mailbox, peer_letter=L,
+                )
+                res.brief = task.brief
+                return L, res
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(letters), max_workers)) as ex:
+                for L, res in ex.map(run_one, letters):
+                    current[L] = res
+
+        # Verification only after the staged peer copies are gone: pytest would otherwise collect
+        # peers/B/test_*.py and report import mismatches as failures.
+        finals = []
+        for L in letters:
+            res = current[L]
+            ws = Path(res.workspace_path)
+            shutil.rmtree(ws / PEERS_DIR, ignore_errors=True)
+            res.test_results = run_sandbox_verification(
+                ws, test_command=test_command, hidden_tests=task.hidden_tests or None,
+                verify=getattr(res.role, "verify", None) or None,
+            )
+            hidden = res.test_results.get("hidden") or {}
+            res.self_report = (
+                f"Candidate {res.spec.name if res.spec else res.candidate_id} after conference: "
+                f"own tests {res.test_results.get('own', {}).get('passed', 0)}/{res.test_results.get('own', {}).get('total', 0)}, "
+                f"hidden tests {hidden.get('passed', 0)}/{hidden.get('total', 0)}. Output: {res.output}"
+            )
+            finals.append(res)
+        return finals
