@@ -97,9 +97,10 @@ class ImpartialArchivist:
             report = result.self_report or ""
             verbs = r"(?:creat|wrote|writ|modif|sav|plac|add|generat|updat|emitt|produc|output|deliver)\w*"
             fname = r"[`'\"]?([\w\-./]+\.[A-Za-z]\w{0,5})[`'\"]?"
-            lead = r"(?:to\s+|at\s+|in\s+|as\s+|(?:the\s+|a\s+|new\s+)?files?\s+)?"
+            # "Files written:\n- `rate_limiter.py`" - punctuation, bullets and line breaks may sit between verb and name.
+            lead = r"[\s:\-*\u2022]*(?:to\s+|at\s+|in\s+|as\s+|(?:the\s+|a\s+|new\s+)?files?\s*)?[\s:\-*\u2022]*"
             claimed_files = []
-            for m in re.finditer(rf"{verbs}\s+{lead}{fname}", report, re.IGNORECASE):
+            for m in re.finditer(rf"{verbs}\s*{lead}{fname}", report, re.IGNORECASE):
                 # "could not write prices.md" is a confession, not a claim
                 if re.search(r"\b(not|no|never|couldn't|cannot|can't|unable|failed|without)\b", report[max(0, m.start() - 30):m.start()], re.I):
                     continue

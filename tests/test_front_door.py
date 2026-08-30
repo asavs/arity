@@ -18,10 +18,15 @@ class TestPickSeats(unittest.TestCase):
             Seat(provider="xai", model="grok-4.5", remaining=0),                 # empty: skipped
             Seat(provider="google", model="gemini-3.6-flash", remaining=500_000),
         ]
-        picked = pick_seats(seats, 3)
+        wire = lambda s: s.provider != "anthropic"   # deterministic stand-in for "has a tool-capable wire"
+        picked = pick_seats(seats, 3, wire_capable=wire)
+        # a CLI-only seat can only narrate work it cannot do, so it fills gaps last
+        cli_only = Seat(provider="anthropic", model="claude-3-7-sonnet", remaining=2_000_000)
+        ordered = pick_seats([cli_only] + seats, 4, wire_capable=wire)
+        self.assertEqual(ordered[-1].model, "claude-3-7-sonnet")
         self.assertEqual([s.model for s in picked], ["claude-opus-4.6", "gpt-5.6-sol", "gemini-3.6-flash"])
         self.assertEqual(picked[0].account, "a@x")
-        self.assertEqual(len(pick_seats(seats, 2)), 2)
+        self.assertEqual(len(pick_seats(seats, 2, wire_capable=wire)), 2)
 
 
 class TestRunFrontDoor(unittest.TestCase):
