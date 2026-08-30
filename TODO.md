@@ -12,10 +12,10 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
 - [ ] Tie-break inside a correctness tier by actual cost when measured, API-equivalent otherwise; show both.
 
 ## Front door
-- [ ] `arity run "<brief>"` goes through the race pipeline (models preset capped by `ARITY_CONCURRENCY`,
+- [x] `arity run "<brief>"` goes through the race pipeline (models preset capped by `ARITY_CONCURRENCY`,
       review on tie, conference off) and then **delivers**: winning sandbox copied to `--out` or
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
-- [ ] Secretary asks Asa on a review disagreement (definition written; code not).
+- [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
 
 ## Races
 - [ ] A brief that asks a write-denied role (scout) to write a file is a task-design error; the race

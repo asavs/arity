@@ -442,6 +442,30 @@ def handle_race_command(args: argparse.Namespace) -> None:
         render_report(report, printer=safe_print)
 
 
+def handle_run_command(args: argparse.Namespace) -> None:
+    """arity run: ask for a thing, get the thing. Race underneath; deliver on top."""
+    from pathlib import Path as _P
+    from .race import render_report, run_front_door
+    judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
+    interactive = sys.stdin.isatty() and not args.json
+    rep, delivery = run_front_door(
+        args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
+        conference=args.conference, out_dir=_P(args.out) if args.out else None, mock=args.mock,
+        printer=safe_print, interactive=interactive, quiet=not args.verbose,
+    )
+    if args.json:
+        safe_print(json.dumps({"delivery": {**delivery.__dict__, "out_dir": str(delivery.out_dir)}, "report": rep.to_dict()}, indent=2, default=str))
+        return
+    if args.verbose:
+        render_report(rep, printer=safe_print)
+    if delivery.answer:
+        safe_print(delivery.answer)
+        safe_print()
+    elif delivery.files:
+        safe_print("delivered: " + ", ".join(delivery.files))
+    safe_print(f"[2mreceipt: {delivery.receipt}[0m")
+
+
 def show_standings(by: str = "model") -> None:
     """Multi-axis standings: aggregates over trial_axes and judgement records, no composite."""
     from .standings import render_standings, standings
@@ -494,8 +518,17 @@ def main():
     unlock_parser = subparsers.add_parser("unlock", help="Release human presence on a seat")
     unlock_parser.add_argument("seat_id", type=str, help="Seat ID to unlock")
 
-    run_parser = subparsers.add_parser("run", help="Run a single prompt through the orchestrator")
-    run_parser.add_argument("prompt", type=str, help="Prompt text")
+    run_parser = subparsers.add_parser("run", help="Front door: a couple of different models attempt the brief, facts and judges decide, the winner is delivered")
+    run_parser.add_argument("prompt", type=str, nargs="?", default="", help="What you want (or use --task)")
+    run_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (brings hidden tests)")
+    run_parser.add_argument("--role", "-r", type=str, default="developer:python", help="Role, optionally typed (developer:python, scout, secretary)")
+    run_parser.add_argument("--candidates", "-n", type=int, default=None, help="How many different models (default: ARITY_CONCURRENCY or 3)")
+    run_parser.add_argument("--judges", type=str, default=None, help="Judge models on a tie (default: the candidates themselves)")
+    run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
+    run_parser.add_argument("--out", "-o", type=str, default=None, help="Where to deliver (default: deliveries/<task_id>/)")
+    run_parser.add_argument("--mock", action="store_true", help="Canned providers, no tokens")
+    run_parser.add_argument("--verbose", "-v", action="store_true", help="Also print the race table")
+    run_parser.add_argument("--json", action="store_true", help="Emit the report and delivery as JSON")
     auth_parser = subparsers.add_parser("auth", help="Manage OAuth subscriptions and credentials")
     auth_subparsers = auth_parser.add_subparsers(dest="auth_action")
     auth_subparsers.add_parser("status", help="Show active credentials and expiry status")
@@ -537,12 +570,7 @@ def main():
     elif args.command == "redphone":
         show_redphone()
     elif args.command == "run":
-        orchestrator = ArityOrchestrator()
-        resp = orchestrator.handle_message(user_text=args.prompt, sender="Asa")
-        if resp.delegated_task and resp.winning_candidate and resp.winning_candidate.output:
-            print(resp.winning_candidate.output)
-        elif resp.reply_text:
-            print(resp.reply_text)
+        handle_run_command(args)
     else:
         run_demo()
 

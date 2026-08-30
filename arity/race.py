@@ -61,6 +61,7 @@ class RaceConfig:
     judge_provider: Optional[Callable[[str], Any]] = None  # tests: model name -> ModelProvider
     # Conference phase: wake the candidates up together for N rounds, then re-verify and re-audit.
     conference: int = 0
+    quiet: bool = False  # suppress per-candidate console chatter (run does this unless --verbose)
 
 
 @dataclass
@@ -371,7 +372,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     store = JsonlRecordStore(root=cfg.store_root or (tmp_root / "records" if tmp_root else None))
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
-    dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json)
+    dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json or cfg.quiet)
     archivist = ImpartialArchivist(store=store)
 
     task = TaskRecord(
@@ -600,6 +601,144 @@ def _fmt_tests(tr: Optional[dict[str, Any]]) -> tuple[str, str]:
         return f"{res.get('passed', 0)}/{res.get('total', 0)} {mark}"
 
     return cell(own), cell(hidden)
+
+
+# -----------------------------------------------------------------------------
+# Front door: arity run "<brief>"  ->  race with the axis choices made  ->  deliver
+# -----------------------------------------------------------------------------
+
+def pick_seats(seats: list[Seat], limit: int) -> list[Seat]:
+    """One seat per model, fullest quota first (seats arrive sorted that way), capped at `limit`.
+
+    Different models, not different accounts of one model: the point of a run is that a couple of
+    different minds attempt the thing.
+    """
+    chosen: list[Seat] = []
+    seen: set[str] = set()
+    for s in seats:
+        if s.model in seen or s.remaining <= 0:
+            continue
+        seen.add(s.model)
+        chosen.append(s)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+@dataclass
+class Delivery:
+    task_id: str
+    out_dir: Path
+    files: list[str]
+    answer: Optional[str]
+    winner_name: str
+    signature: str
+    receipt: str
+    asked_human: bool = False
+
+
+def judges_split(rep: RaceReport) -> bool:
+    """True when the parsed judgements do not share a first place."""
+    firsts = {j["order"][0] for j in rep.judgements if j.get("parsed") and j.get("order")}
+    return len(firsts) > 1
+
+
+def human_pick(rep: RaceReport, ask: Callable[[str], str] = input, printer: Callable[..., None] = print) -> Optional[TerrariumCandidateResult]:
+    """The secretary's question: facts tied and the judges disagree, so Asa picks. Records the pick."""
+    from .types import StoreRecord
+    names = {r.candidate_id: (r.spec.name if r.spec else r.candidate_id) for r in rep.results}
+    firsts: dict[str, list[str]] = {}
+    for j in rep.judgements:
+        if j.get("parsed") and j.get("order"):
+            firsts.setdefault(j["order"][0], []).append(j["judge"])
+    options = [r for r in rep.results if r.candidate_id in firsts]
+    printer("The facts tie and the judges disagree. Two candidates, one difference per line:")
+    for i, r in enumerate(options, 1):
+        e = rep.entry_for(r)
+        a = (e.axes if e else {}) or {}
+        printer(f"  [{i}] {names[r.candidate_id]}: loc={a.get('loc', '-')} tests={a.get('test_count', '-')} "
+                f"tokens={r.tokens_used:,} {r.duration_seconds:.0f}s  (preferred by {', '.join(firsts[r.candidate_id])})")
+        printer(f"      {(r.output or '').strip().splitlines()[0][:110] if (r.output or '').strip() else '(no closing report)'}")
+    try:
+        answer = ask("Which do you prefer? [number, or blank to keep the archivist's order] ").strip()
+        idx = int(answer) - 1
+        pick = options[idx] if 0 <= idx < len(options) else None
+    except Exception:
+        pick = None
+    try:
+        rep.archivist.store.append(StoreRecord(kind="human_pick", record={
+            "task_id": rep.task.id, "options": [r.candidate_id for r in options],
+            "picked": pick.candidate_id if pick else None, "judges": {k: v for k, v in firsts.items()},
+        }))
+    except Exception:
+        pass
+    return pick
+
+
+def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Optional[TerrariumCandidateResult] = None) -> Delivery:
+    """Copy the final candidate's work to out_dir (default deliveries/<task_id>/); if it wrote no files,
+    write its closing report as answer.md. Verification side-effects are never delivered."""
+    from .terrarium import ARTIFACT_IGNORE_PARTS
+    final = final or rep.conference_winner or rep.winner
+    out = Path(out_dir) if out_dir else Path("deliveries") / rep.task.id
+    out.mkdir(parents=True, exist_ok=True)
+    files: list[str] = []
+    if final is not None:
+        ws = Path(final.workspace_path)
+        if ws.is_dir():
+            for p in sorted(ws.rglob("*")):
+                rel = p.relative_to(ws)
+                if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in rel.parts):
+                    dst = out / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(p, dst)
+                    files.append(rel.as_posix())
+    answer = None
+    if final is not None and not files:
+        answer = (final.output or "").strip() or None
+        if answer:
+            (out / "answer.md").write_text(answer + "\n", encoding="utf-8")
+    e = rep.entry_for(final) if final else None
+    a = (e.axes if e else {}) or {}
+    tr = (final.test_results if final else None) or {}
+    hidden = tr.get("hidden") or {}
+    parts = [
+        (final.spec.name if final and final.spec else "no winner"),
+        (e.verdict if e else "-"),
+        (f"hidden {hidden.get('passed', 0)}/{hidden.get('total', 0)}" if hidden.get("has_tests") else "no hidden tests"),
+        f"{final.duration_seconds:.0f}s" if final else "",
+        f"{final.tokens_used:,} tok" if final else "",
+        (f"tie of {len(e.tied_with) + 1}, {len([j for j in rep.judgements if j.get('parsed')])} judges" if e and e.tied_with else "decided on facts"),
+        f"-> {out}",
+    ]
+    return Delivery(task_id=rep.task.id, out_dir=out, files=files, answer=answer,
+                    winner_name=parts[0], signature=(final.signature if final else ""),
+                    receipt=" · ".join(p for p in parts if p))
+
+
+def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "developer:python",
+                   candidates: Optional[int] = None, judges: Optional[list[str]] = None, conference: int = 0,
+                   out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
+                   printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True) -> tuple[RaceReport, Delivery]:
+    """arity run: race with the axis choices made, then deliver."""
+    from .tools import get_config_value
+    cap = candidates or int(get_config_value("ARITY_CONCURRENCY") or 3)
+    seats = placeholder_seats() if mock else pick_seats(live_seats(), cap)
+    variants = ",".join(f"model={s.model}" for s in seats) if seats else "models"
+    cfg = RaceConfig(prompt=brief, task_name=task_name, variants=variants, role=role, mock=mock, workers=cap,
+                     judges=judges if judges is not None else [s.model for s in seats], review="tie",
+                     conference=conference, teardown=False, quiet=quiet)
+    rep = run_race(cfg)
+    final = rep.conference_winner or rep.winner
+    asked = False
+    if rep.judgements and judges_split(rep) and interactive:
+        pick = human_pick(rep, ask=ask, printer=printer)
+        asked = True
+        if pick is not None:
+            final = pick
+    delivery = deliver(rep, out_dir=out_dir, final=final)
+    delivery.asked_human = asked
+    return rep, delivery
 
 
 def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None:
