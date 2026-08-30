@@ -514,6 +514,10 @@ class TerrariumDispatcher:
         else:
             # Default wire / factory provider
             model_provider = self._model_factory(seat)
+            # A seat with no wire at all gets a bare CLI provider that cannot call tools; say so in
+            # the record instead of filing it under "wire". (A wire that later falls back is handled below.)
+            if isinstance(model_provider, (CLIModelProvider, OMPModelProvider)):
+                harness_name = f"cli:{getattr(model_provider, 'harness', 'omp')}"
 
         metrics = MetricsObserver()
         runtime = Runtime(
