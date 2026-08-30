@@ -127,24 +127,9 @@ class GeminiModelProvider:
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
 
-        system_parts: list[str] = []
-        contents: list[dict[str, Any]] = []
-
-        for msg in effect.messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if role == "system":
-                if content:
-                    system_parts.append(content)
-            elif role in ("user", "assistant", "model"):
-                gemini_role = "user" if role == "user" else "model"
-                contents.append({
-                    "role": gemini_role,
-                    "parts": [{"text": str(content)}],
-                })
-
-        if not contents:
-            contents.append({"role": "user", "parts": [{"text": "Hello"}]})
+        from .gemini_format import to_contents, tool_declarations, parse_parts, usage_from
+        contents, system_text = to_contents(effect.messages)
+        system_parts = [system_text] if system_text else []
 
         payload: dict[str, Any] = {
             "contents": contents,
@@ -159,19 +144,10 @@ class GeminiModelProvider:
         if effect.max_tokens:
             payload["generationConfig"]["maxOutputTokens"] = effect.max_tokens
 
-        # Convert OpenAI tools format to Gemini functionDeclarations format
-        if effect.tools:
-            function_decls = []
-            for t in effect.tools:
-                fn = t.get("function", {})
-                if fn:
-                    function_decls.append({
-                        "name": fn.get("name"),
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-                    })
-            if function_decls:
-                payload["tools"] = [{"functionDeclarations": function_decls}]
+        decls = tool_declarations(effect.tools)
+        if decls:
+            payload["tools"] = [{"functionDeclarations": decls}]
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
 
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
@@ -184,31 +160,11 @@ class GeminiModelProvider:
                 candidate = candidates[0] if candidates else {}
                 parts = candidate.get("content", {}).get("parts", [])
 
-                text_parts = []
-                tool_calls = []
-                import uuid
-                for idx, p in enumerate(parts):
-                    if "text" in p and p["text"]:
-                        text_parts.append(p["text"])
-                    if "functionCall" in p:
-                        fc = p["functionCall"]
-                        tool_calls.append({
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                            "type": "function",
-                            "function": {
-                                "name": fc.get("name"),
-                                "arguments": json.dumps(fc.get("args", {})),
-                            },
-                        })
-
-                usage_meta = res.get("usageMetadata", {})
-                usage = {
-                    "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
-                }
+                content, tool_calls = parse_parts(parts)
+                usage = usage_from(res.get("usageMetadata", {}))
 
                 return ModelCompleted(
-                    content="".join(text_parts) if text_parts else None,
+                    content=content,
                     tool_calls=tool_calls,
                     usage=usage,
                     finish_reason=candidate.get("finishReason", "STOP").lower(),
