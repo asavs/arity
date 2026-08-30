@@ -484,7 +484,7 @@ def show_tasks() -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="arity 0.2.0 CLI")
+    parser = argparse.ArgumentParser(description="arity 0.3.0 CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("demo", help="Run the architectural demo")
