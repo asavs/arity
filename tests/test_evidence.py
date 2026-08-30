@@ -137,6 +137,7 @@ def test_resolution_facts_then_consensus_then_human() -> None:
     )
     assert consensus.kind is ResolutionKind.JUDGE_CONSENSUS
     assert consensus.candidate_id == "b"
+    assert consensus.eligible_candidate_ids == ("a", "b")
     assert consensus.to_dict()["status"] == "resolved"
 
     split = resolve_bundle(
@@ -157,6 +158,45 @@ def test_resolution_facts_then_consensus_then_human() -> None:
     )
     assert human.kind is ResolutionKind.HUMAN_PICK
     assert human.candidate_id == "a"
+
+
+def test_consensus_requires_the_complete_panel_and_a_unique_eligible_first() -> None:
+    evidence = bundle()
+    judge_one = Evaluation.create(evidence, evaluator_id="j1", order=("b", "a"))
+
+    missing = resolve_bundle(
+        evidence,
+        facts_candidate_id="a",
+        facts_tied_with=("b",),
+        evaluations=(judge_one,),
+        expected_evaluator_ids=("j1", "j2"),
+    )
+    assert missing.kind is ResolutionKind.UNRESOLVED
+    assert "incomplete" in missing.reason
+
+    explicit_tie = Evaluation.create(
+        evidence,
+        evaluator_id="j1",
+        order=("b", "a"),
+        ties=(("a", "b"),),
+    )
+    tied = resolve_bundle(
+        evidence,
+        facts_candidate_id="a",
+        facts_tied_with=("b",),
+        evaluations=(explicit_tie,),
+        expected_evaluator_ids=("j1",),
+    )
+    assert tied.kind is ResolutionKind.UNRESOLVED
+    assert "unique" in tied.reason
+
+    with pytest.raises(ValueError, match="eligible"):
+        resolve_bundle(
+            evidence,
+            facts_candidate_id="a",
+            facts_tied_with=(),
+            human_candidate_id="b",
+        )
 
 
 def test_no_supported_factual_candidate_stays_unresolved() -> None:

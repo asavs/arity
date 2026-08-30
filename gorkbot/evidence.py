@@ -422,6 +422,7 @@ class Resolution:
     candidate_id: Optional[str]
     evidence_hash: str
     reason: str
+    eligible_candidate_ids: tuple[str, ...] = ()
     evaluator_ids: tuple[str, ...] = ()
     evaluation_ids: tuple[str, ...] = ()
     schema_version: int = RESOLUTION_SCHEMA_VERSION
@@ -438,6 +439,7 @@ class Resolution:
             "candidate_id": self.candidate_id,
             "evidence_hash": self.evidence_hash,
             "reason": self.reason,
+            "eligible_candidate_ids": list(self.eligible_candidate_ids),
             "evaluator_ids": list(self.evaluator_ids),
             "evaluation_ids": list(self.evaluation_ids),
         }
@@ -450,25 +452,35 @@ def resolve_bundle(
     facts_tied_with: Sequence[str] = (),
     facts_supported: bool = True,
     evaluations: Sequence[Evaluation] = (),
+    expected_evaluator_ids: Sequence[str] = (),
     human_candidate_id: Optional[str] = None,
 ) -> Resolution:
     """Resolve facts first, then evaluator consensus, then an explicit human pick."""
     candidate_ids = {candidate.candidate_id for candidate in bundle.candidates}
     if facts_candidate_id is not None and facts_candidate_id not in candidate_ids:
         raise ValueError("facts candidate is not present in the evidence bundle")
+    checked_evaluations = tuple(evaluations)
+    for evaluation in checked_evaluations:
+        evaluation.validate(bundle)
+
+    tied = (
+        {facts_candidate_id, *(str(candidate_id) for candidate_id in facts_tied_with)}
+        if facts_candidate_id is not None
+        else set(candidate_ids)
+    )
+    if not tied <= candidate_ids:
+        raise ValueError("facts tie references a candidate outside the evidence bundle")
+    eligible = tuple(candidate.candidate_id for candidate in bundle.candidates if candidate.candidate_id in tied)
     if human_candidate_id is not None:
-        if human_candidate_id not in candidate_ids:
-            raise ValueError("human-picked candidate is not present in the evidence bundle")
+        if human_candidate_id not in tied:
+            raise ValueError("human-picked candidate is not eligible under the factual evidence")
         return Resolution(
             kind=ResolutionKind.HUMAN_PICK,
             candidate_id=human_candidate_id,
             evidence_hash=bundle.evidence_hash,
             reason="human selected a candidate after reviewing the recorded evidence",
+            eligible_candidate_ids=eligible,
         )
-
-    checked_evaluations = tuple(evaluations)
-    for evaluation in checked_evaluations:
-        evaluation.validate(bundle)
 
     if facts_candidate_id is None or not facts_supported:
         return Resolution(
@@ -476,29 +488,48 @@ def resolve_bundle(
             candidate_id=None,
             evidence_hash=bundle.evidence_hash,
             reason="no candidate had sufficient factual evidence for resolution",
+            eligible_candidate_ids=eligible,
             evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
             evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
         )
 
-    tied = {facts_candidate_id, *(str(candidate_id) for candidate_id in facts_tied_with)}
-    if not tied <= candidate_ids:
-        raise ValueError("facts tie references a candidate outside the evidence bundle")
     if len(tied) == 1:
         return Resolution(
             kind=ResolutionKind.FACTS_WINNER,
             candidate_id=facts_candidate_id,
             evidence_hash=bundle.evidence_hash,
             reason="verified facts uniquely ranked this candidate first",
+            eligible_candidate_ids=eligible,
         )
 
+    expected = tuple(str(evaluator_id) for evaluator_id in expected_evaluator_ids)
+    actual = tuple(evaluation.evaluator_id for evaluation in checked_evaluations)
+    complete_panel = (
+        len(actual) == len(set(actual))
+        and (not expected or len(expected) == len(set(expected)) and set(actual) == set(expected))
+    )
     first_choices = [evaluation.order[0] for evaluation in checked_evaluations if evaluation.order]
-    consensus = first_choices[0] if first_choices and len(set(first_choices)) == 1 else None
+    unique_top = all(
+        not any(
+            evaluation.order[0] in group and len(set(group) & tied) > 1
+            for group in evaluation.ties
+        )
+        for evaluation in checked_evaluations
+        if evaluation.order
+    )
+    eligible_tops = all(candidate_id in tied for candidate_id in first_choices)
+    consensus = (
+        first_choices[0]
+        if complete_panel and unique_top and eligible_tops and first_choices and len(set(first_choices)) == 1
+        else None
+    )
     if consensus is not None and consensus in tied:
         return Resolution(
             kind=ResolutionKind.JUDGE_CONSENSUS,
             candidate_id=consensus,
             evidence_hash=bundle.evidence_hash,
             reason="all recorded evaluators selected the same candidate within the factual tie",
+            eligible_candidate_ids=eligible,
             evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
             evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
         )
@@ -508,10 +539,17 @@ def resolve_bundle(
         candidate_id=None,
         evidence_hash=bundle.evidence_hash,
         reason=(
-            "evaluators disagreed within the factual tie"
+            "the expected evaluator panel was incomplete"
+            if expected and not complete_panel
+            else "an evaluator did not select a unique candidate within the factual tie"
+            if not unique_top
+            else "an evaluator selected a candidate outside the factual tie"
+            if not eligible_tops
+            else "evaluators disagreed within the factual tie"
             if first_choices
             else "verified facts tied and no valid evaluator decision was recorded"
         ),
+        eligible_candidate_ids=eligible,
         evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
         evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
     )
