@@ -52,6 +52,8 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
 - [ ] Judge with `type` skills for non-code domains (`reviewer:design`?) once a non-code race exists.
 
 ## Kernel
+- [ ] xAI wire read timeout (60s) tripped four times in one conference round on long tool-heavy turns; the
+      grok CLI fallback then took 807s. Raise/stream the wire timeout before touching the CLI.
 - [ ] CLI harnesses (claude/codex/omp) bring their own tools, which bypass the role's denial set. cwd now
       confines them to the sandbox (a live run wrote into the repo root before this), but that is containment,
       not enforcement - the wiki's answer is a leaf user that cannot see the repo.
