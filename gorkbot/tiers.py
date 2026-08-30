@@ -1,4 +1,4 @@
-"""gorkbot tiers — Distance-from-Asa memory tiers, brief compilation, and identity.
+"""Arity tiers — distance-from-Asa memory, brief compilation, and identity.
 
 Axiom 8: Memory is tiered by distance from Asa.
 Axiom 9: Two accounts of every kernel (self-report + impartial archivist entry).
@@ -70,8 +70,8 @@ class BriefCompiler:
 
     def __init__(
         self,
-        tier0_context: str = "Asa: Creator of gorkbot. Working on autonomous agent statecharts.",
-        tier1_context: str = "Project gorkbot: Composable statechart agent chassis with 5 explicit seams.",
+        tier0_context: str = "Asa: Creator of Arity. Working on autonomous agent statecharts.",
+        tier1_context: str = "Project Arity: a composable trial kernel with explicit seams.",
         skills_registry: Optional[Any] = None,
         scorecard: Optional[Any] = None,
     ):

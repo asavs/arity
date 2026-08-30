@@ -290,7 +290,7 @@ class TestTaskBankAndPresets(unittest.TestCase):
         self.assertTrue(by_rank[0].spec.name.endswith("[good]"))
         self.assertEqual({rep.entry_for(r).verdict for r in by_rank[1:]}, {"failed", "discrepancy"})
         # The mock race wrote its scorecard into a throwaway root, not .gorkbot/records
-        self.assertIn("gorkbot_race_", str(rep.archivist.store.root))
+        self.assertIn("arity_trial_", str(rep.archivist.store.root))
         self.assertNotEqual(Path(rep.archivist.store.root).resolve(), Path(".gorkbot/records").resolve())
 
 

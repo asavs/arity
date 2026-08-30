@@ -1,4 +1,4 @@
-"""gorkbot pulse — Economic keepalive engine, cache pricing, and expiring quota harvester.
+"""Arity pulse — keepalive economics, cache pricing, and quota harvesting.
 
 Axiom 11: The system has a pulse. Keepalive while p(return) * cold_cost > ping_cost;
 otherwise let the kernel die. The keepalive text is "hi luv u".

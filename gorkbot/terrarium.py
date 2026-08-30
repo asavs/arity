@@ -1,4 +1,4 @@
-"""gorkbot terrarium — Multi-kernel parallel execution and task delegation.
+"""Arity terrarium — multi-kernel parallel execution and task delegation.
 
 Axiom 3 Corollary: Many kernels per task (run candidates side-by-side for evidence).
 Axiom 1: One voice, a staff, and structured handoffs between them.
@@ -109,7 +109,7 @@ def normalize_tool_runner(obj: Any) -> str:
 def normalize_harness(obj: Any) -> str:
     """Canonical scorecard name for a harness axis value."""
     raw = _label(obj).lower()
-    return {"codex": "cli", "claude": "cli"}.get(raw, raw)
+    return {"codex": "cli", "claude": "cli", "gorkbot": "arity"}.get(raw, raw)
 
 
 def skill_names(skills: list[Any]) -> list[str]:
@@ -671,7 +671,7 @@ class TerrariumDispatcher:
         if not candidates:
             return []
 
-        # GORKBOT_CONCURRENCY (env or .gorkbot/config.json) caps every trial, whatever the caller asks for.
+        # Legacy GORKBOT_CONCURRENCY remains a parallel-worker safety cap.
         from .tools import get_config_value
         cap = get_config_value("GORKBOT_CONCURRENCY")
         if cap and str(cap).isdigit() and int(cap) > 0:

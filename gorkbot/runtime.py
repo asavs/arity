@@ -1,4 +1,4 @@
-"""gorkbot runtime — Event loop and pluggable effect dispatcher.
+"""Arity runtime — event loop and pluggable effect dispatcher.
 
 The runtime coordinates state transitions and dispatches side-effects
 to the injected seam handlers (Model, Tools, Store, Transport, Observers).

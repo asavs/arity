@@ -1,4 +1,4 @@
-"""gorkbot auth — Autonomous OAuth 2.0 & cross-tool credential management.
+"""Arity auth — OAuth 2.0 and cross-tool credential management.
 
 Implements native Python OAuth 2.0 (PKCE & RFC 8628 Device Authorization) for
 Google Antigravity (Cloud Code Assist), OpenAI Codex, and xAI Grok subscriptions,
@@ -70,7 +70,7 @@ XAI_SCOPES = "openid profile email offline_access grok-cli:access api:access"
 # -----------------------------------------------------------------------------
 
 class TokenStore:
-    """Manages persistent credentials in ~/.gorkbot/auth.json with multi-account support."""
+    """Manage credentials in the legacy-compatible ``~/.gorkbot/auth.json`` state file."""
 
     def __init__(self, auth_path: Optional[Path] = None):
         self.auth_path = auth_path or (Path.home() / ".gorkbot" / "auth.json")
@@ -185,7 +185,7 @@ class TokenStore:
         return discovered
 
     def import_all(self) -> dict[str, dict[str, Any]]:
-        """Explicitly import all discovered credentials into ~/.gorkbot/auth.json."""
+        """Import discovered credentials into Arity's compatibility state file."""
         discovered = self.discover_external_credentials()
         existing = self.load_all()
         merged = {**discovered, **existing}
@@ -239,7 +239,7 @@ class TokenStore:
                 return merged
         except Exception as e:
             # A silent failure here surfaced as a 2.5h hang downstream. Say it once, plainly.
-            print(f"[gorkbot auth] token refresh failed for '{key}': {e}. Run: gorkbot auth login {provider.split('-')[0]}", file=sys.stderr)
+            print(f"[Arity auth] token refresh failed for '{key}': {e}. Run: arity auth login {provider.split('-')[0]}", file=sys.stderr)
 
         return cred
 
@@ -383,7 +383,7 @@ def login_google_antigravity(
                     self.end_headers()
                     self.wfile.write(
                         b"<html><body><h1>Authentication Successful!</h1>"
-                        b"<p>You can close this tab and return to Gorkbot.</p></body></html>"
+                        b"<p>You can close this tab and return to Arity.</p></body></html>"
                     )
                 else:
                     callback_error = qs.get("error", ["Unknown OAuth error"])[0]
@@ -698,7 +698,7 @@ def login_openai_codex(
                     self.end_headers()
                     self.wfile.write(
                         b"<html><body><h1>OpenAI Authentication Successful!</h1>"
-                        b"<p>You can close this tab and return to Gorkbot.</p></body></html>"
+                        b"<p>You can close this tab and return to Arity.</p></body></html>"
                     )
                 else:
                     callback_error = qs.get("error", ["Unknown OAuth error"])[0]
@@ -840,7 +840,7 @@ def login_anthropic(
                     self.end_headers()
                     self.wfile.write(
                         b"<html><body><h1>Claude Authentication Successful!</h1>"
-                        b"<p>You can close this tab and return to Gorkbot.</p></body></html>"
+                        b"<p>You can close this tab and return to Arity.</p></body></html>"
                     )
                 else:
                     callback_error = qs.get("error", ["Unknown OAuth error"])[0]

@@ -1,6 +1,8 @@
-"""gorkbot — A composable statechart chassis for autonomous AI agents.
+"""Arity — a small, composable trial kernel for autonomous agent harnesses.
 
 Version: 0.3.0
+
+The ``gorkbot`` import namespace is retained for compatibility.
 """
 from .handlers import (
     ConsoleTransport,
@@ -66,7 +68,7 @@ from .scorecard import Scorecard, ScorecardRecord
 from .archivist import ArchivistEntry, ImpartialArchivist
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
-from .orchestrator import GorkbotOrchestrator, OrchestrationResponse
+from .orchestrator import ArityOrchestrator, GorkbotOrchestrator, OrchestrationResponse
 from .runtime import Runtime
 from .seams import (
     ModelProvider,
@@ -185,6 +187,7 @@ __all__ = [
     "RedphoneMessage",
     "WebhookTransport",
     # Orchestrator
+    "ArityOrchestrator",
     "GorkbotOrchestrator",
     "OrchestrationResponse",
 ]

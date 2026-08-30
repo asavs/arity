@@ -1,4 +1,4 @@
-"""CLI interface for gorkbot."""
+"""Command-line interface for Arity."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import json
 import time
+
+from . import __version__
 
 # -----------------------------------------------------------------------------
 # Terminal & Encoding Safeguards for Windows & Cross-Platform Consoles
@@ -41,7 +43,9 @@ def safe_print(*args, **kwargs) -> None:
             pass
 
 from .ledger import Seat, SeatLedger
-from .orchestrator import GorkbotOrchestrator
+from .orchestrator import ArityOrchestrator
+from .spirals import render_brand_mark
+from .tools import positive_int, resolve_arity
 from .handlers import (
     ConsoleTransport,
     JsonlRecordStore,
@@ -63,8 +67,9 @@ from .types import (
 
 def run_demo():
     """Run a deterministic end-to-end demo of all 7 elemental parts."""
+    print(render_brand_mark())
     print("\033[1;32m====================================================\033[0m")
-    print("\033[1;32m   gorkbot End-to-End Orchestration Demo (7 Parts)  \033[0m")
+    print("\033[1;32m    Arity End-to-End Orchestration Demo (7 Parts)   \033[0m")
     print("\033[1;32m====================================================\033[0m\n")
 
     demo_ws = Path("./.demo_workspace")
@@ -143,7 +148,7 @@ def run_demo():
 
         return MockBuilderProvider(seat.id)
 
-    orchestrator = GorkbotOrchestrator(
+    orchestrator = ArityOrchestrator(
         ledger=ledger,
         store=store,
         base_workspace=demo_ws / "terrarium",
@@ -189,11 +194,11 @@ def run_demo():
 
 def interactive_chat():
     """Run a clean, responsive console chat with The Voice and live cache warmth indicator."""
-    print(SUNFLOWER_ART)
-    print("\033[1;36m=== arity switchboard (The Voice) ===\033[0m")
+    print(render_brand_mark())
+    print("\033[1;36m=== Arity switchboard (The Voice) ===\033[0m")
     print("Type your message (or 'exit' / 'quit' to stop).\n")
 
-    orchestrator = GorkbotOrchestrator()
+    orchestrator = ArityOrchestrator()
     last_turn_time: Optional[float] = None
     current_model = "gemini-3.6-flash"
     warm_window = 300.0  # 5-minute sliding cache window (Axiom 7)
@@ -235,34 +240,22 @@ def interactive_chat():
                 print(f"{resp.winning_candidate.output}\n")
         elif resp.reply_text:
             print(f"\n\033[1;36m[The Secretary | {latency:.2f}s]\033[0m\n{resp.reply_text}\n")
-SUNFLOWER_ART = "\033[1;33m" + r"""
-                 .  .  .  .
-             .  '  *  *  *  '  .
-          .  *  o  o  o  o  o  *  .
-        .  *  o  x  x  x  x  o  *  .
-       .  *  o  x  +  +  x  o  *  .
-       .  *  o  x  + [1] +  x  o  *  .    r_n = c √n
-       .  *  o  x  +  +  x  o  *  .      θ_n = n × 137.507764° (Golden Angle)
-        .  *  o  x  x  x  x  o  *  .      Fibonacci spirals: 21, 34, 55, 89, 144
-          .  *  o  o  o  o  o  *  .
-             .  '  *  *  *  '  .
-                 '  '  '  '
-""" + "\033[0m"
 
 
 def show_status():
     """Display real-time seat health, wire latency, and scorecard standings."""
-    orchestrator = GorkbotOrchestrator()
-    print(SUNFLOWER_ART)
+    orchestrator = ArityOrchestrator()
+    print(render_brand_mark())
     print("\033[1;36m====================================================\033[0m")
-    print("\033[1;36m             arity System Health & Status           \033[0m")
+    print("\033[1;36m             Arity System Health & Status           \033[0m")
     print("\033[1;36m====================================================\033[0m\n")
     print("\033[1;33m[1. Active Seats: Provider | Model | Fallback Harness]\033[0m")
     for s in orchestrator.ledger.list_seats():
         status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
         acc_str = f" ({s.account.split('@')[0]})" if s.account else ""
         prov_str = f"{s.provider}{acc_str}"
-        print(f"  • {prov_str:25} | {s.model:24} | harness: {s.harness:8} | {status_str} | ${s.base_price_per_m:.4f}/M")
+        harness_label = "arity" if s.harness == "gorkbot" else s.harness
+        print(f"  • {prov_str:25} | {s.model:24} | harness: {harness_label:8} | {status_str} | ${s.base_price_per_m:.4f}/M")
     print("\n\033[1;33m[2. Empirical Scorecard Standings (Axiom 9)]\033[0m")
     standings = getattr(orchestrator.scorecard, "_standings", {})
     if standings:
@@ -284,7 +277,7 @@ def show_status():
 
 def show_redphone():
     """Inspect Red Phone channels and messages."""
-    orchestrator = GorkbotOrchestrator()
+    orchestrator = ArityOrchestrator()
     print("\033[1;35m====================================================\033[0m")
     print("\033[1;35m       Red Phone Public Address Channel Log         \033[0m")
     print("\033[1;35m====================================================\033[0m\n")
@@ -307,7 +300,7 @@ def show_skills():
     from .skills import SkillRegistry
     registry = SkillRegistry()
     print("\033[1;36m====================================================\033[0m")
-    print("\033[1;36m             Registered gorkbot Skills              \033[0m")
+    print("\033[1;36m              Registered Arity Skills               \033[0m")
     print("\033[1;36m====================================================\033[0m\n")
     for sk in registry.list_skills():
         tags_str = f"[{', '.join(sk.tags)}]" if sk.tags else ""
@@ -324,7 +317,7 @@ def show_roles():
     print("\033[1;35m====================================================\033[0m")
     print("\033[1;35m                 Registered Staff Roles             \033[0m")
     print("\033[1;35m====================================================\033[0m\n")
-    for role in sorted(set(registry._roles.values()), key=lambda r: r.name):
+    for role in registry.list_roles():
         runner = SandboxToolRunner(role=role)
         granted_tools = [s["function"]["name"] for s in runner.get_schemas() if s.get("function", {}).get("name") != "search"]
         print(f"  \033[1;33m• {role.name:20}\033[0m")
@@ -345,7 +338,7 @@ def show_roles():
 
 
 def handle_auth_command(args: argparse.Namespace) -> None:
-    """Handle gorkbot auth subcommands."""
+    """Handle Arity authentication subcommands."""
     from .auth import (
         TokenStore,
         fetch_antigravity_quota,
@@ -358,10 +351,10 @@ def handle_auth_command(args: argparse.Namespace) -> None:
 
     if action == "status":
         creds = store.load_all() or store.discover_external_credentials()
-        print("\n\033[1;36m================== Gorkbot Auth Status ==================\033[0m")
+        print("\n\033[1;36m=================== Arity Auth Status ===================\033[0m")
         if not creds:
             print("  No saved or discovered credentials found.")
-            print("  Run \033[1;33mgorkbot auth login <google|openai|xai>\033[0m or \033[1;33mgorkbot auth import\033[0m.")
+            print("  Run \033[1;33marity auth login <google|openai|xai>\033[0m or \033[1;33marity auth import\033[0m.")
         else:
             for prov, data in creds.items():
                 email = data.get("email", "unknown")
@@ -392,9 +385,9 @@ def handle_auth_command(args: argparse.Namespace) -> None:
                         pass
         print("\033[1;36m=========================================================\033[0m\n")
     elif action == "import":
-        print("\n\033[1;36m[Gorkbot Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
+        print("\n\033[1;36m[Arity Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
         imported = store.import_all()
-        print(f"\033[1;32m[Gorkbot Auth]\033[0m Imported {len(imported)} credentials into ~/.gorkbot/auth.json:")
+        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into compatibility state file ~/.gorkbot/auth.json:")
         for p in imported:
             print(f"  - {p}")
         print()
@@ -427,13 +420,13 @@ def handle_auth_command(args: argparse.Namespace) -> None:
         }
         key = prov_map.get(provider, provider)
         if store.delete_credential(key):
-            print(f"\033[1;32m[Gorkbot Auth]\033[0m Removed credential for '{key}'.")
+            print(f"\033[1;32m[Arity Auth]\033[0m Removed credential for '{key}'.")
         else:
-            print(f"\033[1;33m[Gorkbot Auth]\033[0m No saved credential found for '{key}'.")
+            print(f"\033[1;33m[Arity Auth]\033[0m No saved credential found for '{key}'.")
 
 
 def handle_race_command(args: argparse.Namespace) -> None:
-    """gorkbot race: one task, N single-axis candidates, one impartial judge. Logic lives in race.py."""
+    """Run one task across N single-axis candidates; implementation lives in race.py."""
     from .race import RaceConfig, render_report, run_race
 
     cfg = RaceConfig(
@@ -459,12 +452,13 @@ def handle_race_command(args: argparse.Namespace) -> None:
 
 
 def handle_run_command(args: argparse.Namespace) -> None:
-    """gorkbot run: ask for a thing, get the thing. Race underneath; deliver on top."""
+    """Arity's front door: ask for a thing, trial underneath, delivery on top."""
     from pathlib import Path as _P
     from .race import render_report, run_front_door
     judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
     # A background/piped run must never block on the secretary's question.
-    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and os.environ.get("GORKBOT_NONINTERACTIVE") != "1"
+    noninteractive = os.environ.get("ARITY_NONINTERACTIVE", os.environ.get("GORKBOT_NONINTERACTIVE")) == "1"
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and not noninteractive
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
         conference=args.conference, tester=args.tester, out_dir=_P(args.out) if args.out else None, mock=args.mock,
@@ -492,15 +486,31 @@ def show_standings(by: str = "model") -> None:
 def show_tasks() -> None:
     """List the race task bank."""
     from .tasks import TaskBank
-    safe_print("\n\033[1;36m================== Race Task Bank ==================\033[0m")
+    safe_print("\n\033[1;36m================= Arity Task Bank ==================\033[0m")
     for t in TaskBank().list_tasks():
         safe_print(f"  \033[1;33m{t.name:16}\033[0m {t.description}")
         safe_print(f"  {'':16} module={t.module} entrypoint={t.entrypoint} hidden_tests={len(t.hidden_tests)} tags={', '.join(t.tags)}")
     safe_print("\033[1;36m=====================================================\033[0m\n")
 
 
+def _positive_arity_arg(value: str) -> int:
+    try:
+        return positive_int(value, name="--arity")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def main():
-    parser = argparse.ArgumentParser(description="gorkbot 0.3.0 CLI")
+    parser = argparse.ArgumentParser(
+        prog="arity",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            render_brand_mark(width=23, height=9, seeds=55)
+            + f"\n\nArity {__version__}: a small, provider-agnostic trial kernel for agent harnesses."
+        ),
+        epilog="Compatibility: the gorkbot command alias and Python import namespace remain supported.",
+    )
+    parser.add_argument("--version", action="version", version=f"Arity {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("demo", help="Run the architectural demo")
@@ -512,7 +522,7 @@ def main():
 
     race_parser = subparsers.add_parser("race", help="Race one task across single-axis candidates with an impartial judge")
     race_parser.add_argument("prompt", type=str, nargs="?", default="", help="Ad-hoc task brief (or use --task)")
-    race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `gorkbot tasks`); brings hidden tests")
+    race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `arity tasks`); brings hidden tests")
     race_parser.add_argument("--variants", "-v", type=str, default="models", help="Preset: models | harness | tools | skills | context, or custom 'model=..+harness=..+tools=..+skills=a/b+ctx=..' list")
     race_parser.add_argument("--role", "-r", type=str, default="builder", help="Builder role (default: builder)")
     race_parser.add_argument("--tester", action="store_true", help="Have the tester role author hidden tests before the race")
@@ -539,7 +549,7 @@ def main():
     run_parser.add_argument("prompt", type=str, nargs="?", default="", help="What you want (or use --task)")
     run_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (brings hidden tests)")
     run_parser.add_argument("--role", "-r", type=str, default="developer:python", help="Role, optionally typed (developer:python, scout, secretary)")
-    run_parser.add_argument("--arity", "-a", "--candidates", "-n", dest="candidates", type=int, default=None, help="Arity of the trial / candidate count (default: ARITY env or 3)")
+    run_parser.add_argument("--arity", "-a", "--candidates", "-n", dest="candidates", type=_positive_arity_arg, default=None, help="Positive candidate count (precedence: this flag, ARITY, legacy GORKBOT_CONCURRENCY, then 3)")
     run_parser.add_argument("--judges", type=str, default=None, help="Judge models on a tie (default: the candidates themselves)")
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
     run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
@@ -558,6 +568,14 @@ def main():
     logout_cmd.add_argument("provider", type=str, help="Provider to remove")
 
     args = parser.parse_args()
+
+    try:
+        if args.command == "run":
+            resolve_arity(args.candidates, default=3)
+        elif args.command == "chat":
+            resolve_arity(default=1)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.command == "demo":
         run_demo()
@@ -578,11 +596,11 @@ def main():
     elif args.command == "auth":
         handle_auth_command(args)
     elif args.command == "lock":
-        orchestrator = GorkbotOrchestrator()
+        orchestrator = ArityOrchestrator()
         orchestrator.ledger.set_presence(args.seat_id, True)
         print(f"\033[1;33m[Presence Lock]\033[0m Seat '{args.seat_id}' is now locked for human use.")
     elif args.command == "unlock":
-        orchestrator = GorkbotOrchestrator()
+        orchestrator = ArityOrchestrator()
         orchestrator.ledger.set_presence(args.seat_id, False)
         print(f"\033[1;32m[Presence Unlock]\033[0m Seat '{args.seat_id}' released for autonomous bot casting.")
     elif args.command == "redphone":

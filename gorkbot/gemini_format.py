@@ -1,4 +1,4 @@
-"""gorkbot gemini_format — one conversion between OpenAI-style messages and Gemini `contents`.
+"""Arity Gemini formatting — one conversion from OpenAI messages to ``contents``.
 
 Used by both Gemini wires (the API-key endpoint and the Antigravity backend) so they cannot drift:
 tool calls become functionCall parts, tool results become functionResponse parts, Gemini 3's

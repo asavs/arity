@@ -1,4 +1,4 @@
-"""Pure state transition function for gorkbot.
+"""Pure state transition function for Arity.
 
 transition(state, event) -> (new_state, list[effects])
 

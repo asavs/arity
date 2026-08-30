@@ -1,4 +1,4 @@
-"""gorkbot transports — Red phone public address, webhook front-door, and omnichannel ingress.
+"""Arity transports — red-phone address, webhook front door, and channel ingress.
 
 Axiom 10: The red phone is a public address, not an alarm (redphone.com/asas).
 Axiom 6: The front door is a phone (SMS, voice, webhooks).
