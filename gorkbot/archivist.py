@@ -282,12 +282,24 @@ class ImpartialArchivist:
         by_tool: dict[str, int] = {}
         for t in tools:
             by_tool[t.get("tool_name", "?")] = by_tool.get(t.get("tool_name", "?"), 0) + 1
+        prompt = sum(int((t.get("usage") or {}).get("prompt_tokens", 0) or 0) for t in turns)
+        completion = sum(int((t.get("usage") or {}).get("completion_tokens", 0) or 0) for t in turns)
+        # A test run is a run_command whose output looks like a test runner's.
+        test_runs = sum(1 for t in tools if t.get("tool_name") == "run_command"
+                        and re.search(r"\b(passed|failed|error)s?\b|pytest|cargo test", str(t.get("output_preview", "")), re.I))
         return {
             "model_turns": len(turns),
             "tool_calls": len(tools),
             "tool_errors": sum(1 for t in tools if t.get("is_error")),
             "friction": len(friction),
             "tools_by_name": by_tool,
+            # Thoroughness vs. re-reading: completion tokens are what the model wrote; prompt tokens
+            # are mostly its own growing context re-sent every turn. A high prompt/completion ratio
+            # with many turns is context replay (a harness cost), not thinking.
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "prompt_per_turn": round(prompt / len(turns)) if turns else 0,
+            "test_runs": test_runs,
         }
 
     @staticmethod
