@@ -27,6 +27,12 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
 - [ ] Conference: nobody has used `message(to="peer:X")` yet in a live run; watch whether it matters.
 - [ ] Conference cost is ~99% context replay per turn; measure with a provider that reports cache hits.
 
+## Scout
+- [ ] Headless browser (or a tiny VM) as the escalation past fetch_url's reader fallback. Concrete trigger:
+      https://grok.com/plans is a JS shell directly and Cloudflare 403s the reader proxy. Pricing pages for
+      Google/OpenAI/Anthropic read fine without it; do not build for one page yet.
+- [ ] Scout citations: check URLs in the closing report against the fetch_url log (fetched vs. merely named).
+
 ## Judge
 - [ ] Citation check is code-shaped (backticked identifiers). For prose/scout output check cited URLs
       against the fetch_url tool log instead - the scout race scored 0/0 citations.
