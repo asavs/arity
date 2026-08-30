@@ -333,6 +333,11 @@ class TerrariumCandidateResult:
     fallbacks: int = 0  # wire -> CLI harness fallbacks during the run; >0 means the harness axis moved
     brief: str = ""  # the brief this candidate was given (archivist checks its hard numbers against own tests)
     task_metadata: dict[str, Any] = field(default_factory=dict)  # e.g. module/entrypoint from the task bank
+    # Conference (phase 2) only: files changed vs. phase 1, and this phase's own cost
+    # (tokens_used/duration_seconds are cumulative across phases for a phase-2 result).
+    changed_files: list[str] = field(default_factory=list)
+    phase_tokens: int = 0
+    phase_seconds: float = 0.0
 
 
 class TerrariumDispatcher:
@@ -823,6 +828,18 @@ class TerrariumDispatcher:
             return []
         letters = [chr(ord("A") + i) for i in range(len(results))]
         by_letter = dict(zip(letters, results))
+
+        def snapshot(ws: Path) -> dict[str, str]:
+            import hashlib
+            out: dict[str, str] = {}
+            if ws.is_dir():
+                for p in ws.rglob("*"):
+                    rel = p.relative_to(ws)
+                    if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in rel.parts):
+                        out[rel.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+            return out
+
+        before = {L: snapshot(Path(r.workspace_path)) for L, r in by_letter.items()}
         entry_of = {e.candidate_id: e for e in (entries or [])}
         mailbox: dict[str, list[str]] = {L: [] for L in letters}
         current: dict[str, TerrariumCandidateResult] = dict(by_letter)
@@ -913,10 +930,19 @@ class TerrariumDispatcher:
                 verify=getattr(res.role, "verify", None) or None,
             )
             hidden = res.test_results.get("hidden") or {}
+            # What the conference actually changed, and what the whole draft cost. Without the
+            # cumulative cost a candidate that did nothing in phase 2 looks cheapest and wins the tie.
+            after = snapshot(ws)
+            res.changed_files = sorted(f for f in set(before[L]) | set(after) if before[L].get(f) != after.get(f))
+            res.phase_tokens = res.tokens_used
+            res.phase_seconds = res.duration_seconds
+            res.tokens_used += by_letter[L].tokens_used
+            res.duration_seconds += by_letter[L].duration_seconds
             res.self_report = (
                 f"Candidate {res.spec.name if res.spec else res.candidate_id} after conference: "
                 f"own tests {res.test_results.get('own', {}).get('passed', 0)}/{res.test_results.get('own', {}).get('total', 0)}, "
-                f"hidden tests {hidden.get('passed', 0)}/{hidden.get('total', 0)}. Output: {res.output}"
+                f"hidden tests {hidden.get('passed', 0)}/{hidden.get('total', 0)}; changed {len(res.changed_files)} file(s). "
+                f"Output: {res.output}"
             )
             finals.append(res)
         return finals
