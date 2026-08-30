@@ -1,4 +1,14 @@
-# arity 0.3.0 — Trials
+# Arity rename and compatibility boundary
+
+The distribution and primary CLI are now `arity`. Python imports remain exclusively under
+`arity`, and `.arity/` remains the active state/config location. Historical entries below
+retain the names used when they were published.
+
+Architecture correction: `transition` mutates `State` and emits effect descriptions; it is
+I/O-free, not referentially pure. Verification, archival, and blind review are built-in trial
+stages; `Observer` is a telemetry hook.
+
+## arity 0.3.0 — Trials
 
 **Release Date:** 2026-08-29
 

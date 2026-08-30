@@ -450,7 +450,7 @@ class SandboxToolRunner(ToolRunner):
 # -----------------------------------------------------------------------------
 
 def get_config_value(key: str) -> Optional[str]:
-    """Resolve an environment or legacy ``.arity/config.json`` setting."""
+    """Resolve an environment or active ``.arity/config.json`` setting."""
     val = os.environ.get(key)
     if val:
         return val
@@ -481,7 +481,7 @@ def positive_int(value: Any, *, name: str = "value") -> int:
 
 
 def resolve_arity(explicit: Optional[int] = None, *, default: int = 1) -> int:
-    """Resolve trial arity: explicit value, ``ARITY``, legacy concurrency, default."""
+    """Resolve the requested maximum arity: explicit, ``ARITY``, compatibility fallback, default."""
     if explicit is not None:
         return positive_int(explicit, name="arity")
     for key in ("ARITY", "ARITY_CONCURRENCY"):

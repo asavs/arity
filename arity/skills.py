@@ -95,7 +95,7 @@ SCOUT_RECON_SKILL = Skill(
 
 
 class SkillRegistry:
-    """Discover built-ins and legacy-compatible ``.arity/skills`` overrides."""
+    """Discover built-ins and active ``.arity/skills`` overrides."""
 
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = Path(skills_dir) if skills_dir else Path(".arity/skills")

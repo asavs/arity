@@ -229,7 +229,7 @@ class RoleRegistry:
         ]
 
     def _discover_from_definitions(self) -> None:
-        """Discover packaged definitions plus legacy-compatible ``.arity`` overrides."""
+        """Discover packaged definitions plus active ``.arity`` overrides."""
         for rdir in self._definition_dirs("roles"):
             if not rdir.exists():
                 continue

@@ -193,9 +193,9 @@ def run_demo():
 
 
 def interactive_chat():
-    """Run a clean, responsive console chat with The Voice and live cache warmth indicator."""
+    """Run a clean, responsive console chat with the Secretary and live cache warmth indicator."""
     print(render_brand_mark())
-    print("\033[1;36m=== Arity switchboard (The Voice) ===\033[0m")
+    print("\033[1;36m=== Arity switchboard (The Secretary) ===\033[0m")
     print("Type your message (or 'exit' / 'quit' to stop).\n")
 
     orchestrator = ArityOrchestrator()
@@ -387,7 +387,7 @@ def handle_auth_command(args: argparse.Namespace) -> None:
     elif action == "import":
         print("\n\033[1;36m[Arity Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
         imported = store.import_all()
-        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into compatibility state file ~/.arity/auth.json:")
+        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into Arity state file ~/.arity/auth.json:")
         for p in imported:
             print(f"  - {p}")
         print()
@@ -426,7 +426,7 @@ def handle_auth_command(args: argparse.Namespace) -> None:
 
 
 def handle_race_command(args: argparse.Namespace) -> None:
-    """Run one task across N single-axis candidates; implementation lives in race.py."""
+    """Compare one task across candidate variants; implementation lives in race.py."""
     from .race import RaceConfig, render_report, run_race
 
     cfg = RaceConfig(
@@ -452,7 +452,7 @@ def handle_race_command(args: argparse.Namespace) -> None:
 
 
 def handle_run_command(args: argparse.Namespace) -> None:
-    """Arity's front door: ask for a thing, trial underneath, delivery on top."""
+    """Run a front-door trial and deliver the fact-ranked or human-selected result."""
     from pathlib import Path as _P
     from .race import render_report, run_front_door
     judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
@@ -508,7 +508,10 @@ def main():
             render_brand_mark(width=23, height=9, seeds=55)
             + f"\n\nArity {__version__}: a small, provider-agnostic trial kernel for agent harnesses."
         ),
-        epilog="Compatibility: the arity command alias and Python import namespace remain supported.",
+        epilog=(
+            "Python API: import arity (there is no arity import package). "
+            "The arity command remains available as a compatibility alias."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"Arity {__version__}")
     subparsers = parser.add_subparsers(dest="command")
@@ -520,7 +523,10 @@ def main():
     subparsers.add_parser("roles", help="List staff roles, capabilities, and denial sets")
     subparsers.add_parser("redphone", help="Inspect Red Phone channels")
 
-    race_parser = subparsers.add_parser("race", help="Race one task across single-axis candidates with an impartial judge")
+    race_parser = subparsers.add_parser(
+        "race",
+        help="Compare one task across candidate variants; facts rank first and blind review is optional",
+    )
     race_parser.add_argument("prompt", type=str, nargs="?", default="", help="Ad-hoc task brief (or use --task)")
     race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `arity tasks`); brings hidden tests")
     race_parser.add_argument("--variants", "-v", type=str, default="models", help="Preset: models | harness | tools | skills | context, or custom 'model=..+harness=..+tools=..+skills=a/b+ctx=..' list")
@@ -545,12 +551,27 @@ def main():
     unlock_parser = subparsers.add_parser("unlock", help="Release human presence on a seat")
     unlock_parser.add_argument("seat_id", type=str, help="Seat ID to unlock")
 
-    run_parser = subparsers.add_parser("run", help="Front door: a couple of different models attempt the brief, facts and judges decide, the winner is delivered")
+    run_parser = subparsers.add_parser(
+        "run",
+        help=(
+            "Front door: trial a brief across a candidate limit, deliver the fact-ranked result, "
+            "and ask the Secretary when tie reviewers disagree"
+        ),
+    )
     run_parser.add_argument("prompt", type=str, nargs="?", default="", help="What you want (or use --task)")
     run_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (brings hidden tests)")
     run_parser.add_argument("--role", "-r", type=str, default="developer:python", help="Role, optionally typed (developer:python, scout, secretary)")
-    run_parser.add_argument("--arity", "-a", "--candidates", "-n", dest="candidates", type=_positive_arity_arg, default=None, help="Positive candidate count (precedence: this flag, ARITY, legacy ARITY_CONCURRENCY, then 3)")
-    run_parser.add_argument("--judges", type=str, default=None, help="Judge models on a tie (default: the candidates themselves)")
+    run_parser.add_argument(
+        "--arity", "-a", "--candidates", "-n", dest="candidates", type=_positive_arity_arg, default=None,
+        help=(
+            "Positive maximum candidate count; may resolve fewer unique seats "
+            "(precedence: this flag, ARITY, compatibility ARITY_CONCURRENCY, then 3)"
+        ),
+    )
+    run_parser.add_argument(
+        "--judges", type=str, default=None,
+        help="Blind reviewer models on a factual tie (default: the resolved candidates)",
+    )
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
     run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
     run_parser.add_argument("--out", "-o", type=str, default=None, help="Where to deliver (default: deliveries/<task_id>/)")

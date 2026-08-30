@@ -1,7 +1,7 @@
 # Arity
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Architecture](https://img.shields.io/badge/architecture-pure%20statechart-orange.svg)](#core-philosophy)
+[![Architecture](https://img.shields.io/badge/architecture-event%2Feffect%20runtime-orange.svg)](#core-philosophy)
 
 ```
                  .  .  .  .
@@ -19,22 +19,22 @@
 
 **One task. N agents. Facts first.**
 
-Arity is a small, provider-agnostic trial kernel for agent harnesses. Plug in a computer-use system, compaction strategy, memory layer, model router, tool runner, or evaluator; run candidate stacks against the same work; then keep the verified evidence needed to learn what is good for what.
+Arity is a small, provider-agnostic trial kernel for agent harnesses. Today it compares models, harnesses, tool runners, skills, roles, and context modes against the same work, then records verified evidence. Computer-use integrations fit behind tool and harness seams; compaction and pluggable memory policies are future trial axes.
 
-The name is the control surface. Unary (`--arity 1`) is one voice, binary (`--arity 2`) is an A/B trial, and n-ary (`--arity N`) is a multipolar trial. Arity is deliberately one composable piece of the broader effort to build agent harnesses: useful alone, more useful when its seams let independent work be tested together.
+The name is the control surface. Unary (`--arity 1`) requests one voice, binary (`--arity 2`) requests an A/B trial, and n-ary (`--arity N`) requests a multipolar trial of up to N distinct candidates. A trial can resolve fewer seats than requested when fewer unique candidates are available. Arity is deliberately one composable piece of the broader effort to build agent harnesses: useful alone, more useful when its seams let independent work be tested together.
 
 ## Core Philosophy
 
-Arity separates pure state transitions from side-effect execution:
+Arity separates transition decisions from effect execution:
 
 $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_state}, \text{effects})$$
 
-Because the state machine is pure, you can graft on external infrastructure (model routers, tool harnesses, memory, transports, blind evaluators) without modifying the control loop. Trials add isolated candidate workspaces, hidden verification, blind review on factual ties, conferences, delivery receipts, and empirical standings. The evaluator itself is a replaceable seam.
+`transition` updates the supplied state while deciding which effects are required; `Runtime` performs the I/O. This boundary lets callers supply model providers, tool runners, record stores, transports, and event/effect observers. Trials layer on built-in verification, archival, blind tie review, conferences, delivery receipts, and empirical standings. The current trial evaluator is built in around `ImpartialArchivist`, verification, and reviewer candidates rather than exposed as a replaceable evaluator seam.
 
 ```
                   ┌────────────────────────┐
    Events ───────►│  transition(s, e)     │───────► Effects
-(User, Model,     │  (Pure Statechart)     │    (CallModel, ExecuteTool,
+(User, Model,     │  (Transition Logic)    │    (CallModel, ExecuteTool,
  Tool, Pulse)     └────────────────────────┘     EmitMessage, StoreRecord)
                              │
                              ▼
@@ -53,7 +53,7 @@ Because the state machine is pure, you can graft on external infrastructure (mod
 2. **`ToolRunner`** (`arity.seams.ToolRunner`): Protocol for tool execution (MCP, local Python functions, Docker/WSL sandboxes).
 3. **`RecordStore`** (`arity.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
 4. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
-5. **`Observer`** (`arity.seams.Observer`): Protocol for telemetry, evaluators, and blind scorecard judges.
+5. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
 
 ## Quickstart
 
@@ -64,9 +64,9 @@ arity --help
 arity run --mock --arity 3 --task lru_cache
 ```
 
-`--arity` must be a positive integer. Resolution order is explicit `--arity`, then `ARITY`, then the legacy `ARITY_CONCURRENCY` setting, then the command default.
+`--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the compatibility fallback `ARITY_CONCURRENCY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
 
-### Python API Example
+### Python API (`arity` namespace)
 ```python
 from arity import Runtime, LocalToolRunner, OpenAIModelProvider
 
@@ -81,13 +81,13 @@ output, state = runtime.chat("Create a hello.txt file with 'Hello from Arity!'")
 print(output)
 ```
 
-### Run Unit Tests
+### Run Tests
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest -q tests
 ```
 
 ## Compatibility Boundary
 
-The distribution and user-facing command are named **Arity**. The `arity` Python package, `python -m arity`, and the `arity` console-script alias remain supported so existing integrations do not break. Existing `.arity/` state directories and `ARITY_*` settings are also read in place; Arity does not rename, copy, or delete that user data. Remaining `arity` names in import paths, compatibility identifiers, state paths, and historical release notes are intentional.
+The distribution and primary command are named **Arity**. The Python API remains available only from the `arity` package (`import arity` is not provided); `python -m arity` and the `arity` console command remain supported entry points. `.arity/` remains Arity's active state/config location: credentials, records, configuration, and local definition overrides are read or written there. `ARITY_*` settings remain compatibility fallbacks where `ARITY_*` counterparts exist; no state migration is performed. Historical release notes keep the names used when they were published.
 
 This repository does not yet include a license file. See [RELEASE.md](RELEASE.md) for historically named release notes.
