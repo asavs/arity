@@ -294,5 +294,46 @@ class TestTaskBankAndPresets(unittest.TestCase):
         self.assertNotEqual(Path(rep.archivist.store.root).resolve(), Path(".arity/records").resolve())
 
 
+class TestTypePacks(unittest.TestCase):
+    def test_role_plus_type_composes_skills_prompt_and_verify(self):
+        reg = RoleRegistry()
+        dev = reg.get("developer:python")
+        self.assertEqual(dev.name, "developer:python")
+        self.assertEqual(dev.base_name, "developer")
+        self.assertEqual(dev.key_name, "developer.python")
+        self.assertIn("pytest-tdd", dev.skills)
+        self.assertIn("# Type: python", dev.system_prompt)
+        self.assertTrue(dev.verify["test_command"].startswith("python -m pytest"))
+        self.assertEqual(reg.get("developer:python"), dev)  # cached, same object
+        self.assertIsNone(reg.get("developer:cobol"))
+
+    def test_same_pack_attaches_to_tester_and_reviewer(self):
+        reg = RoleRegistry()
+        self.assertEqual(reg.get("reviewer:python").skills, reg.get("developer:python").skills)
+        self.assertEqual(reg.get("tester:python").type_name, "python")
+        self.assertEqual(reg.with_type(reg.get("reviewer"), "rust").name, "reviewer:rust")
+        self.assertEqual(reg.with_type(reg.get("reviewer"), None).name, "reviewer")
+
+    def test_task_tags_pick_the_type_and_aliases_default_to_python(self):
+        reg = RoleRegistry()
+        self.assertEqual(reg.type_for_tags(TaskBank().get("lru_cache").tags).name, "python")
+        self.assertEqual(reg.get("builder").name, "developer:python")
+        self.assertEqual(reg.get("python_developer").name, "developer:python")
+        self.assertEqual(reg.resolve("build a rust crate for parsing").name, "developer:rust")
+
+    def test_rust_stub_verify_block_is_wired_but_untested(self):
+        rust = RoleRegistry().get("developer:rust")
+        self.assertEqual(rust.verify["hidden_dir"], "tests")
+        self.assertTrue(rust.verify["test_command"].startswith("cargo test"))
+
+    def test_race_on_a_task_uses_typed_roles_for_builder_tester_and_judge(self):
+        with TemporaryDirectory() as d:
+            rep = run_race(RaceConfig(task_name="lru_cache", mock=True, role="developer", tester=True,
+                                      judges=["gpt-5.6-sol"], review="always", workspace_root=Path(d) / "ws"))
+        self.assertEqual({c.role.name for c in rep.candidates}, {"developer:python"})
+        self.assertEqual(rep.results[0].tester_result.role.name, "tester:python")
+        self.assertTrue(any("type 'python' from task tags" in n for n in rep.notes))
+
+
 if __name__ == "__main__":
     unittest.main()
