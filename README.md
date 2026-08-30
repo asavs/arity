@@ -1,6 +1,27 @@
-# arity (0.2.0)
+# arity
 
-A composable statechart chassis for autonomous AI agents.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-40%20passing-brightgreen.svg)](tests/)
+[![Architecture](https://img.shields.io/badge/architecture-pure%20statechart-orange.svg)](#core-philosophy)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
+```
+                 .  .  .  .
+             .  '  *  *  *  '  .
+          .  *  o  o  o  o  o  *  .
+        .  *  o  x  x  x  x  o  *  .
+       .  *  o  x  +  +  x  o  *  .
+       .  *  o  x  + [1] +  x  o  *  .    r_n = c √n
+       .  *  o  x  +  +  x  o  *  .      θ_n = n × 137.507764° (Golden Angle)
+        .  *  o  x  x  x  x  o  *  .      Fibonacci spirals: 21, 34, 55, 89, 144
+          .  *  o  o  o  o  o  *  .
+             .  '  *  *  *  '  .
+                 '  '  '  '
+```
+
+A composable pure statechart chassis for autonomous AI agents.
+
+In mathematics and nature, **arity** modulates how elements compose: from a single singular voice (**unary: 1**), to A/B candidate races (**binary: 2**), to dense multi-kernel terrariums (**n-ary: $n$**). Just as nature packs sunflower seeds gaplessly at the Golden Angle ($137.5^\circ$), `arity` packs multipolar models, isolated sandboxes, and quota ledgers into an optimal, gapless coordination spiral.
 
 ## Core Philosophy
 
