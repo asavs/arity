@@ -232,6 +232,37 @@ def test_replay_rejects_a_consensus_that_shrinks_the_declared_panel() -> None:
         replay_trial(resolved_events(declared_panel=("judge", "missing-judge")), "trial-1")
 
 
+def test_replay_rejects_partial_or_late_arm_completion() -> None:
+    lifecycle = resolved_events()
+    full_evidence = bundle()
+    partial = EvidenceBundle.create(
+        trial_id=full_evidence.trial_id,
+        task_id=full_evidence.task_id,
+        task_name=full_evidence.task_name,
+        brief=full_evidence.brief,
+        candidates=(full_evidence.candidates[0],),
+    )
+    partial_freeze = TrialEvent.create(
+        trial_id="trial-1",
+        sequence=3,
+        event_type="evidence.frozen",
+        payload={"bundle": partial.to_dict()},
+        timestamp=3,
+    )
+    with pytest.raises(ValueError, match="every declared"):
+        replay_trial((lifecycle[0], lifecycle[1], partial_freeze), "trial-1")
+
+    late_completion = TrialEvent.create(
+        trial_id="trial-1",
+        sequence=5,
+        event_type="arm.completed",
+        payload=arm_completion(full_evidence.candidates[0]),
+        timestamp=5,
+    )
+    with pytest.raises(ValueError, match="after.*frozen"):
+        replay_trial((*lifecycle[:4], late_completion), "trial-1")
+
+
 def test_unknown_events_are_preserved_and_mark_replay_incomplete() -> None:
     events = (
         TrialEvent.create(trial_id="t", sequence=1, event_type="trial.started", payload={}, timestamp=1),
