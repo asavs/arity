@@ -1229,6 +1229,14 @@ _AUTO_FINAL = object()
 
 
 def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = _AUTO_FINAL) -> Delivery:
+    """Deliver once while serializing journal preflight, filesystem writes, and event append."""
+    if rep.journal is None:
+        return _deliver_once(rep, out_dir=out_dir, final=final)
+    with rep.journal.serialized():
+        return _deliver_once(rep, out_dir=out_dir, final=final)
+
+
+def _deliver_once(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = _AUTO_FINAL) -> Delivery:
     """Copy the final candidate's work to out_dir (default deliveries/<task_id>/); if it wrote no files,
     write its closing report as answer.md. A present unresolved Resolution withholds delivery.
 
