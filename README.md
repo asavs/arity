@@ -97,10 +97,11 @@ configuration at invocation time:
 - xAI Grok: `ARITY_XAI_CLIENT_ID`.
 - Anthropic Claude: `ARITY_ANTHROPIC_CLIENT_ID`.
 
-A successful native login stores the resolved client configuration with the resulting tokens so
-later refreshes can reuse it. That makes `~/.gorkbot/auth.json` especially sensitive: it is
-plaintext, owner-only (`0600`) on POSIX when Arity writes it, and protected only by the destination
-directory's ACLs on Windows. See [SECURITY.md](SECURITY.md) before using these adapters.
+A successful native login stores the resolved client configuration with the resulting tokens.
+Google, OpenAI, and xAI reuse that configuration during automatic refresh; Anthropic automatic
+refresh is not currently implemented. That makes `~/.gorkbot/auth.json` especially sensitive: it
+is plaintext, owner-only (`0600`) on POSIX when Arity writes it, and protected only by the
+destination directory's ACLs on Windows. See [SECURITY.md](SECURITY.md) before using these adapters.
 
 ### Python API (`gorkbot` namespace)
 ```python

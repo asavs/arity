@@ -55,7 +55,8 @@ happened.
      builds validate both source distributions and installed wheels.
    - No provider OAuth client identity or secret is bundled. Experimental native OAuth adapters
      require caller-supplied configuration, fail before opening a browser, callback server, or
-     network request when it is absent, and retain the supplied configuration for later refreshes.
+     network request when it is absent, and retain the supplied configuration. Google, OpenAI, and
+     xAI reuse it for automatic refresh; Anthropic automatic refresh is not currently implemented.
    - Credential-file updates use same-directory atomic replacement and POSIX owner-only mode where
      supported. Credentials remain plaintext, and model-directed tools remain outside any OS-level
      sandbox; these limits are explicit in `SECURITY.md`.
