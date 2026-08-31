@@ -65,6 +65,30 @@ class RecordChanged(RecordReadError):
     code = "record_store_changed"
 
 
+class RecordLimitExceeded(RecordReadError):
+    """A configured inspection budget was exceeded before projection."""
+
+    code = "record_store_limit_exceeded"
+
+
+@dataclass(frozen=True)
+class RecordReadLimits:
+    """Optional hard bounds for one query-only reader snapshot."""
+
+    max_snapshot_bytes: int | None = None
+    max_query_records: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("max_snapshot_bytes", "max_query_records"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if type(value) is not int:
+                raise TypeError(f"{name} must be an exact integer or None")
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+
+
 @dataclass(frozen=True)
 class StoreSpec:
     """The configured built-in backend and its active Arity path."""
@@ -209,8 +233,16 @@ def _sqlite_failure(
 class JsonlRecordReader:
     """Strict snapshot reader that never creates or repairs a JSONL store."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        limits: RecordReadLimits | None = None,
+    ) -> None:
+        if limits is not None and type(limits) is not RecordReadLimits:
+            raise TypeError("limits must be an exact RecordReadLimits or None")
         self.root = Path(root)
+        self.limits = limits
         try:
             root_stat = self.root.stat()
         except FileNotFoundError as exc:
@@ -264,9 +296,28 @@ class JsonlRecordReader:
         for _attempt in range(2):
             try:
                 before = self._marker(path)
-                content = path.read_bytes()
+                byte_limit = (
+                    None
+                    if self.limits is None
+                    else self.limits.max_snapshot_bytes
+                )
+                if byte_limit is not None and before[0] > byte_limit:
+                    raise RecordLimitExceeded(
+                        f"JSONL record snapshot exceeds the configured byte limit: {path}",
+                        path=path,
+                    )
+                if byte_limit is None:
+                    content = path.read_bytes()
+                else:
+                    with path.open("rb") as source:
+                        content = source.read(byte_limit + 1)
+                    if len(content) > byte_limit:
+                        raise RecordLimitExceeded(
+                            f"JSONL record snapshot exceeds the configured byte limit: {path}",
+                            path=path,
+                        )
                 after = self._marker(path)
-            except RecordCorruption:
+            except (RecordCorruption, RecordLimitExceeded):
                 raise
             except FileNotFoundError as exc:
                 raise RecordChanged(
@@ -304,7 +355,16 @@ class JsonlRecordReader:
         # JSON permits raw U+0085/U+2028/U+2029 characters inside strings;
         # str.splitlines() would incorrectly split those valid records.
         lines = [] if not text else text[:-1].split("\n")
+        record_limit = (
+            None if self.limits is None else self.limits.max_query_records
+        )
         for line_number, encoded in enumerate(lines, 1):
+            if record_limit is not None and line_number > record_limit:
+                raise RecordLimitExceeded(
+                    f"JSONL query exceeds the configured record limit: {path}",
+                    path=path,
+                    line=line_number,
+                )
             if encoded.endswith("\r"):
                 encoded = encoded[:-1]
             if not encoded.strip():
@@ -338,8 +398,16 @@ class JsonlRecordReader:
 class SqliteRecordReader:
     """SQLite reader opened without ever creating state beside the source DB."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        limits: RecordReadLimits | None = None,
+    ) -> None:
+        if limits is not None and type(limits) is not RecordReadLimits:
+            raise TypeError("limits must be an exact RecordReadLimits or None")
         self.path = Path(path)
+        self.limits = limits
         self._connection: sqlite3.Connection | None = None
         self._snapshot_directory: tempfile.TemporaryDirectory[str] | None = None
 
@@ -426,6 +494,21 @@ class SqliteRecordReader:
             ) from exc
         return private_root / self.path.name
 
+    def _read_snapshot_file(self, path: Path, byte_limit: int | None) -> bytes:
+        if byte_limit is None:
+            return path.read_bytes()
+        with path.open("rb") as source:
+            content = source.read(byte_limit + 1)
+        if len(content) > byte_limit:
+            raise RecordLimitExceeded(
+                f"SQLite record snapshot exceeds the configured byte limit: {self.path}",
+                path=self.path,
+            )
+        return content
+
+    def _snapshot_byte_limit(self) -> int | None:
+        return None if self.limits is None else self.limits.max_snapshot_bytes
+
     def _private_snapshot(self) -> Path:
         wal_path = self.path.with_name(f"{self.path.name}-wal")
         journal_path = self.path.with_name(f"{self.path.name}-journal")
@@ -442,11 +525,17 @@ class SqliteRecordReader:
                     return self._private_wal_snapshot(wal_path)
 
                 before = self._file_marker(self.path)
-                content = self.path.read_bytes()
+                byte_limit = self._snapshot_byte_limit()
+                if byte_limit is not None and before[0] > byte_limit:
+                    raise RecordLimitExceeded(
+                        f"SQLite record snapshot exceeds the configured byte limit: {self.path}",
+                        path=self.path,
+                    )
+                content = self._read_snapshot_file(self.path, byte_limit)
                 after = self._file_marker(self.path)
                 wal_after = self._optional_file_marker(wal_path)
                 journal_after = self._optional_file_marker(journal_path)
-            except (RecordChanged, RecordCorruption):
+            except (RecordChanged, RecordCorruption, RecordLimitExceeded):
                 raise
             except FileNotFoundError as exc:
                 raise RecordChanged(
@@ -486,10 +575,24 @@ class SqliteRecordReader:
                         path=self.path,
                     )
                 before = {path: self._file_marker(path) for path in paths}
-                content = {path: path.read_bytes() for path in paths}
+                byte_limit = self._snapshot_byte_limit()
+                if byte_limit is not None and sum(
+                    marker[0] for marker in before.values()
+                ) > byte_limit:
+                    raise RecordLimitExceeded(
+                        f"SQLite record snapshot exceeds the configured byte limit: {self.path}",
+                        path=self.path,
+                    )
+                remaining = byte_limit
+                content: dict[Path, bytes] = {}
+                for path in paths:
+                    value = self._read_snapshot_file(path, remaining)
+                    content[path] = value
+                    if remaining is not None:
+                        remaining -= len(value)
                 after = {path: self._file_marker(path) for path in paths}
                 journal_after = self._optional_file_marker(journal_path)
-            except (RecordChanged, RecordCorruption):
+            except (RecordChanged, RecordCorruption, RecordLimitExceeded):
                 raise
             except FileNotFoundError as exc:
                 raise RecordChanged(
@@ -571,15 +674,29 @@ class SqliteRecordReader:
                 f"SQLite record reader is closed: {self.path}", path=self.path,
             )
         try:
-            rows = self._connection.execute(
+            record_limit = (
+                None if self.limits is None else self.limits.max_query_records
+            )
+            statement = (
                 "SELECT id, record FROM records "
-                "WHERE kind COLLATE BINARY = ? ORDER BY id",
-                (kind,),
-            ).fetchall()
+                "WHERE kind COLLATE BINARY = ? ORDER BY id"
+            )
+            parameters: tuple[Any, ...] = (kind,)
+            if record_limit is not None:
+                statement += " LIMIT ?"
+                parameters += (record_limit + 1,)
+            rows = self._connection.execute(statement, parameters).fetchall()
         except sqlite3.DatabaseError as exc:
             failure = _sqlite_failure(exc, path=self.path, action="query")
             self.close()
             raise failure from exc
+
+        if record_limit is not None and len(rows) > record_limit:
+            raise RecordLimitExceeded(
+                f"SQLite query exceeds the configured record limit: {self.path}",
+                path=self.path,
+                record_id=_diagnostic_record_id(rows[-1][0]),
+            )
 
         records: list[dict[str, Any]] = []
         for record_id, encoded in rows:
@@ -616,14 +733,18 @@ class SqliteRecordReader:
 
 
 @contextmanager
-def open_record_reader(spec: StoreSpec | None = None) -> Iterator[RecordReader]:
+def open_record_reader(
+    spec: StoreSpec | None = None,
+    *,
+    limits: RecordReadLimits | None = None,
+) -> Iterator[RecordReader]:
     """Open and always close one strict reader for a built-in store specification."""
     selected = spec or configured_store_spec()
     reader: JsonlRecordReader | SqliteRecordReader
     if selected.backend == "sqlite":
-        reader = SqliteRecordReader(selected.path)
+        reader = SqliteRecordReader(selected.path, limits=limits)
     else:
-        reader = JsonlRecordReader(selected.path)
+        reader = JsonlRecordReader(selected.path, limits=limits)
     try:
         yield reader
     finally:
