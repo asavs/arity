@@ -91,7 +91,7 @@ class SeatLedger:
     @staticmethod
     def _antigravity_quota(store: Any, key: str, acc: dict[str, Any]) -> dict[str, Any]:
         """Live per-model quota for one account; {} when unreachable (seats then keep defaults)."""
-        if os.environ.get("ARITY_SKIP_QUOTA", os.environ.get("GORKBOT_SKIP_QUOTA")):
+        if os.environ.get("ARITY_SKIP_QUOTA"):
             return {}
         try:
             from .auth import fetch_antigravity_quota

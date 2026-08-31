@@ -95,10 +95,10 @@ SCOUT_RECON_SKILL = Skill(
 
 
 class SkillRegistry:
-    """Discover built-ins and active ``.gorkbot/skills`` overrides."""
+    """Discover built-ins and active ``.arity/skills`` overrides."""
 
     def __init__(self, skills_dir: Optional[Path] = None):
-        self.skills_dir = Path(skills_dir) if skills_dir else Path(".gorkbot/skills")
+        self.skills_dir = Path(skills_dir) if skills_dir else Path(".arity/skills")
         self._skills: dict[str, Skill] = {}
         self._register_defaults()
         self._discover_from_disk()
@@ -108,8 +108,8 @@ class SkillRegistry:
             self.register(sk)
 
     def _discover_from_disk(self) -> None:
-        """Scan the retained project and user compatibility paths for manifests."""
-        search_dirs = [self.skills_dir, Path.home() / ".gorkbot" / "skills"]
+        """Scan the project and user Arity paths for manifests."""
+        search_dirs = [self.skills_dir, Path.home() / ".arity" / "skills"]
         for sdir in search_dirs:
             if not sdir.exists():
                 continue
