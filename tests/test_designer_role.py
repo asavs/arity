@@ -14,7 +14,7 @@ import pytest
 from arity.cli import main
 from arity.handlers import CLIModelProvider, JsonlRecordStore, OMPModelProvider
 from arity.ledger import Seat, SeatLedger
-from arity.race import resolve_candidates
+from arity.race import RaceConfig, resolve_candidates, run_race
 from arity.roles import (
     DESIGNER_ROLE,
     DEVELOPER_ROLE,
@@ -22,8 +22,8 @@ from arity.roles import (
     REVIEWER_ROLE,
     SECRETARY_ROLE,
     RoleRegistry,
-    TypePack,
 )
+from arity.skills import DESIGN_EVIDENCE_SKILL, SkillRegistry
 from arity.terrarium import CandidateSpec, TaskRecord, TerrariumDispatcher
 from arity.tiers import BriefCompiler, TierLevel
 from arity.tools import (
@@ -125,19 +125,24 @@ def test_designer_is_discovered_as_an_engineer_peer_with_project_context() -> No
 
 def test_composed_designer_roles_keep_tier_one_project_context() -> None:
     registry = RoleRegistry()
-    registry.register_type(TypePack(name="prototype", description="Neutral design format"))
-    designer = registry.get("designer:prototype")
+    designer = registry.get("designer")
     assert designer is not None
+    typed_designer = registry.get("designer:python")
 
     brief = BriefCompiler(tier1_context="the project roadmap").assemble(
-        designer,
-        "Specify a prototype.",
+        typed_designer,
+        "Specify a Python-backed interface without implementing it.",
     )
 
-    assert designer.base_name == "designer"
-    assert designer.tier == TierLevel.TIER_1
+    assert typed_designer is designer
+    assert registry.with_type(designer, "python") is designer
+    assert typed_designer.type_name == ""
+    assert typed_designer.skills == ("design-evidence",)
+    assert typed_designer.tier == TierLevel.TIER_1
     assert "# Project Context\nthe project roadmap" in brief.system_prompt
     assert "# Operational Scope" not in brief.system_prompt
+    assert "Skill: python-development" not in brief.system_prompt
+    assert "Skill: pytest-tdd" not in brief.system_prompt
 
 
 def test_designer_has_stable_aliases_and_semantic_resolution() -> None:
@@ -164,6 +169,11 @@ def test_common_design_briefs_route_to_designer_without_stealing_implementation(
         "create a UI design",
         "build a TUI prototype",
         "make an accessible agent-screen mockup",
+        "create a wireframe",
+        "make a mockup",
+        "produce a mockup",
+        "wireframe the onboarding flow",
+        "mock up the login flow",
     ):
         assert registry.resolve(brief).name == "designer", brief
 
@@ -218,7 +228,14 @@ def test_designer_prompt_owns_experience_without_inventing_runtime_behavior() ->
 def test_designer_prompt_has_a_stable_evidence_and_handoff_output_contract() -> None:
     prompt = DESIGNER_ROLE.system_prompt.lower()
 
-    assert "scout-recon" in DESIGNER_ROLE.skills
+    assert DESIGNER_ROLE.skills == ("design-evidence",)
+    assert DESIGN_EVIDENCE_SKILL.name == "design-evidence"
+    assert arity.DESIGN_EVIDENCE_SKILL is DESIGN_EVIDENCE_SKILL
+    assert SkillRegistry().get("design-evidence") is DESIGN_EVIDENCE_SKILL
+    assert "bounded scout evidence packet" in DESIGN_EVIDENCE_SKILL.instructions.lower()
+    assert "external" in DESIGN_EVIDENCE_SKILL.instructions.lower()
+    assert "web_search" not in DESIGN_EVIDENCE_SKILL.instructions
+    assert "fetch_url" not in DESIGN_EVIDENCE_SKILL.instructions
     for section in (
         "verified inputs",
         "one recommendation",
@@ -232,20 +249,25 @@ def test_designer_prompt_has_a_stable_evidence_and_handoff_output_contract() -> 
         assert section in prompt
 
 
-def test_designer_has_an_exhaustive_read_only_tool_allowlist() -> None:
+def test_designer_has_an_exhaustive_local_read_only_tool_allowlist(tmp_path) -> None:
     expected = (
         "read_file",
         "list_directory",
         "search_files",
-        "web_search",
-        "fetch_url",
         "message",
     )
 
     assert DESIGNER_ROLE.allowed_tools == expected
+    assert DESIGN_EVIDENCE_SKILL.tools == expected
+    assert tuple(
+        schema["function"]["name"]
+        for schema in SandboxToolRunner(workspace_root=tmp_path, role=DESIGNER_ROLE).get_schemas()
+    ) == expected
     for tool_name in expected:
         assert DESIGNER_ROLE.can_use_tool(tool_name)
     for tool_name in (
+        "web_search",
+        "fetch_url",
         "write_file",
         "run_command",
         "execute_command",
@@ -323,7 +345,7 @@ def test_dispatcher_enforces_designer_authority_across_every_tool_axis(tmp_path)
             for schema in provider.calls[0].tools
         }
         if axis == "mcp":
-            assert "web_search" in exposed_tools
+            assert exposed_tools == set(DESIGNER_ROLE.allowed_tools)
             assert "write_file" not in exposed_tools
             assert "execute_command" not in exposed_tools
         tool_result = provider.calls[1].messages[-1]
@@ -572,7 +594,22 @@ def test_resolved_designer_candidate_does_not_receive_implementation_tdd(tmp_pat
     assert result.skills_used == []
     assert "Skill: pytest-tdd" not in system_prompt
     assert "Fix any failures" not in system_prompt
-    assert tool_names == set(DESIGNER_ROLE.allowed_tools) - {"web_search"}
+    assert tool_names == set(DESIGNER_ROLE.allowed_tools)
+
+
+def test_python_tagged_task_keeps_designer_untyped_and_read_only(tmp_path) -> None:
+    report = run_race(RaceConfig(
+        task_name="lru_cache",
+        role="designer",
+        mock=True,
+        review="never",
+        workspace_root=tmp_path / "workspace",
+    ))
+
+    assert {candidate.role.name for candidate in report.candidates} == {"designer"}
+    assert {candidate.role.type_name for candidate in report.candidates} == {""}
+    assert all(candidate.role.skills == ("design-evidence",) for candidate in report.candidates)
+    assert not any("type 'python' from task tags" in note for note in report.notes)
 
 
 def test_skills_preset_fails_closed_for_designer_without_false_arm_labels() -> None:
