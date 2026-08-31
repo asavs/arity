@@ -26,7 +26,7 @@ external reports; this file remains the maintainer's near-term roadmap.
 - [ ] Tie-break inside a correctness tier by actual cost when measured, API-equivalent otherwise; show both.
 
 ## Front door
-- [x] `arity run "<brief>"` goes through the trial pipeline (explicit `--arity`, `ARITY`, then legacy `GORKBOT_CONCURRENCY`,
+- [x] `arity run "<brief>"` goes through the trial pipeline (explicit `--arity`, then `ARITY`, then the command default,
       review on tie, conference off) and then **delivers**: winning sandbox copied to `--out` or
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
 - [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
@@ -95,5 +95,5 @@ external reports; this file remains the maintainer's near-term roadmap.
       not enforcement - the wiki's answer is a leaf user that cannot see the repo.
 - [ ] Provider replay compatibility is its own fragility axis (Gemini thought signatures, Claude tool ids and
       empty parts). Consider a per-provider replay test that round-trips one tool call.
-- [ ] Existing test suite writes into the real `.gorkbot/records` in places (`test_terrarium.py` etc.);
+- [ ] Existing test suite writes into the real `.arity/records` in places (`test_terrarium.py` etc.);
       point them at temp stores like the race tests do.

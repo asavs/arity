@@ -227,7 +227,7 @@ configured_store_spec
 ```
 
 `inspection_overview`, currently used by `trial show --json` inside
-`gorkbot.inspection_cli`, is not the watch command's content, privacy, or blindness
+`arity.inspection_cli`, is not the watch command's content, privacy, or blindness
 boundary, and Stage 2 does not call or render it. The command consumes the complete
 `TrialCatalog` as Python data through `WatchProjector`; it never scrapes human CLI
 output or launches an `arity --json` subprocess.
@@ -260,7 +260,7 @@ identity, never by row number; polling itself will not animate the spiral.
 ### Exceptional snapshots
 
 - **Missing store:** render `No persisted trials.`, exit `0`, and do not create
-  `.gorkbot/`.
+  `.arity/`.
 - **Empty store:** render the same empty state.
 - **Requested trial missing:** emit only `arity: trial_not_found` on stderr, without
   echoing the raw ID, and exit `3`.
