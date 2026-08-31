@@ -1278,6 +1278,8 @@ def _deliver_once(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = 
             resolution_source=source,
         )
     recorded_delivery = None
+    persisted_delivery_evidence: Optional[EvidenceBundle] = None
+    persisted_delivery_evaluations: tuple[Evaluation, ...] = ()
     if rep.journal:
         persisted_events = rep.journal.events
         recorded_delivery = next(
@@ -1289,6 +1291,20 @@ def _deliver_once(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = 
         if rep.resolution is not None:
             if rep.resolution_event_sequence is None:
                 raise RuntimeError("the delivery resolution was not persisted to the trial journal")
+            try:
+                persisted_replay = rep.journal.replay()
+            except ValueError as exc:
+                raise RuntimeError("the persisted trial lifecycle is not replayable") from exc
+            if persisted_replay.unhandled_events:
+                raise RuntimeError("the persisted trial lifecycle contains unhandled events")
+            if (
+                persisted_replay.latest_resolution != rep.resolution
+                or not persisted_replay.resolution_sequences
+                or persisted_replay.resolution_sequences[-1] != rep.resolution_event_sequence
+            ):
+                raise RuntimeError("the replayed resolution does not match this delivery")
+            persisted_delivery_evidence = persisted_replay.evidence(rep.resolution.evidence_hash)
+            persisted_delivery_evaluations = persisted_replay.evaluations
             persisted_resolutions = tuple(
                 event for event in persisted_events if event.event_type == "resolution.recorded"
             )
@@ -1308,10 +1324,21 @@ def _deliver_once(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = 
     if rep.resolution is not None:
         if rep.evidence is None:
             raise ValueError("a recorded resolution requires frozen evidence for delivery")
-        if rep.evidence.evidence_hash != rep.resolution.evidence_hash:
+        delivery_evidence = persisted_delivery_evidence or rep.evidence
+        if (
+            rep.evidence != delivery_evidence
+            or delivery_evidence.evidence_hash != rep.resolution.evidence_hash
+        ):
             raise ValueError("delivery evidence does not match the recorded resolution")
-        rep.resolution.validate(rep.evidence, rep.evaluations)
-        frozen_candidate = rep.evidence.candidate(final.candidate_id)
+        rep.resolution.validate(
+            delivery_evidence,
+            (
+                persisted_delivery_evaluations
+                if persisted_delivery_evidence is not None
+                else tuple(rep.evaluations)
+            ),
+        )
+        frozen_candidate = delivery_evidence.candidate(final.candidate_id)
         if out.exists():
             raise FileExistsError("resolution-controlled delivery requires a new output directory")
     out.mkdir(parents=True, exist_ok=True)

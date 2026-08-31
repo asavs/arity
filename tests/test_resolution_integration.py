@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from arity.evidence import Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
+from arity.evidence import ArtifactEvidence, Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
+from arity.handlers import JsonlRecordStore
 from arity.ledger import Seat
 from arity.race import RaceConfig, deliver, human_pick, record_evaluation, run_race
 from arity.roles import BUILDER_ROLE
@@ -170,6 +171,20 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
         deliver(report, out_dir=tmp_path / "unrecorded-resolution")
     assert not (tmp_path / "unrecorded-resolution").exists()
     report.resolution_event_sequence = resolution_sequence
+    incomplete_store = JsonlRecordStore(tmp_path / "incomplete-records")
+    incomplete_journal = TrialJournal(incomplete_store, report.task.id)
+    incomplete_journal.append("trial.started", {})
+    incomplete_resolution = incomplete_journal.append(
+        "resolution.recorded", {"resolution": report.resolution.to_dict()},
+    )
+    incomplete_report = replace(
+        report,
+        journal=incomplete_journal,
+        resolution_event_sequence=incomplete_resolution.sequence,
+    )
+    with pytest.raises(RuntimeError, match="not replayable"):
+        deliver(incomplete_report, out_dir=tmp_path / "incomplete-lifecycle")
+    assert not (tmp_path / "incomplete-lifecycle").exists()
     approved_evidence = report.evidence
     report.evidence = EvidenceBundle.create(
         trial_id=approved_evidence.trial_id,
@@ -183,6 +198,21 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
     with pytest.raises(ValueError, match="does not match"):
         deliver(report, out_dir=tmp_path / "wrong-evidence")
     assert not (tmp_path / "wrong-evidence").exists()
+    report.evidence = approved_evidence
+    resolved_index = next(
+        index for index, candidate in enumerate(approved_evidence.candidates)
+        if candidate.candidate_id == report.resolution.candidate_id
+    )
+    forged_candidates = list(approved_evidence.candidates)
+    forged_candidates[resolved_index] = replace(
+        forged_candidates[resolved_index],
+        artifacts=(ArtifactEvidence.from_bytes("artifact.txt", b"forged\n"),),
+    )
+    report.evidence = replace(approved_evidence, candidates=tuple(forged_candidates))
+    assert report.evidence.evidence_hash == approved_evidence.evidence_hash
+    with pytest.raises(ValueError, match="does not match"):
+        deliver(report, out_dir=tmp_path / "forged-evidence")
+    assert not (tmp_path / "forged-evidence").exists()
     report.evidence = approved_evidence
     occupied = tmp_path / "occupied-delivery"
     occupied.mkdir()
