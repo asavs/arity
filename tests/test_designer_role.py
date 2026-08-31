@@ -21,7 +21,7 @@ def test_designer_is_discovered_as_an_engineer_peer_with_project_context() -> No
     designer = registry.get("designer")
 
     assert designer is not None
-    assert designer is DESIGNER_ROLE
+    assert designer == DESIGNER_ROLE
     assert designer.tier == ENGINEER_ROLE.tier == TierLevel.TIER_1
     assert designer in registry.list_roles()
     brief = BriefCompiler(tier1_context="the project roadmap").assemble(
@@ -33,15 +33,17 @@ def test_designer_is_discovered_as_an_engineer_peer_with_project_context() -> No
 
 def test_designer_has_stable_aliases_and_semantic_resolution() -> None:
     registry = RoleRegistry()
+    designer = registry.get("designer")
+    assert designer is not None
 
     for alias in ("ux", "ux_designer", "ui_designer", "interaction_designer", "product_designer"):
-        assert registry.get(alias) is DESIGNER_ROLE
-        assert registry.resolve(f"@{alias}") is DESIGNER_ROLE
+        assert registry.get(alias) is designer
+        assert registry.resolve(f"@{alias}") is designer
 
     assert registry.resolve(
         "define the TUI information hierarchy, interaction design, and accessibility"
-    ) is DESIGNER_ROLE
-    assert registry.resolve("prototype the blind interface user journey") is DESIGNER_ROLE
+    ) is designer
+    assert registry.resolve("prototype the blind interface user journey") is designer
 
 
 def test_designer_prompt_owns_experience_without_inventing_runtime_behavior() -> None:
@@ -59,13 +61,18 @@ def test_designer_prompt_owns_experience_without_inventing_runtime_behavior() ->
         assert responsibility in prompt
     assert "engineer owns system architecture" in prompt
     assert "developer owns production implementation" in prompt
+    assert "tester turns approved contracts into acceptance tests" in prompt
     assert "reviewer validates evidence" in prompt
+    assert "bounded design specifications and mockups" in prompt
     assert "do not silently implement production behavior" in prompt
     assert "do not invent runtime states" in prompt
+    assert "secretary" in prompt and "human" in prompt
 
 
-def test_designer_can_write_bounded_artifacts_but_credentials_stay_denied() -> None:
-    assert DESIGNER_ROLE.can_use_tool("write_file")
+def test_designer_is_read_only_and_credentials_stay_denied() -> None:
+    assert DESIGNER_ROLE.can_use_tool("read_file")
+    assert not DESIGNER_ROLE.can_use_tool("write_file")
+    assert not DESIGNER_ROLE.can_use_tool("run_command")
     assert DESIGNER_ROLE.can_access_path("docs/design/watch-follow.md")
     assert DESIGNER_ROLE.can_access_path("prototypes/watch-wireframe.txt")
     for private_path in (
@@ -96,4 +103,3 @@ def test_designer_constant_is_exported_from_the_installed_package_surface() -> N
     assert packaged_definition.is_file()
     assert arity.DESIGNER_ROLE is DESIGNER_ROLE
     assert "DESIGNER_ROLE" in arity.__all__
-
