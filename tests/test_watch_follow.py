@@ -61,12 +61,14 @@ def watch_args(
     follow: bool = True,
     ascii: bool = False,
     no_motion: bool = False,
+    cache_policy: str = "conservative",
 ) -> argparse.Namespace:
     return argparse.Namespace(
         trial_id=trial_id,
         follow=follow,
         ascii=ascii,
         no_motion=no_motion,
+        cache_policy=cache_policy,
     )
 
 
@@ -350,19 +352,29 @@ def test_cli_requires_explicit_follow_and_preserves_ordinary_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    seen: list[tuple[bool, bool, bool]] = []
+    seen: list[tuple[bool, bool, bool, str]] = []
 
     def handler(args: argparse.Namespace) -> int:
-        seen.append((args.follow, args.ascii, args.no_motion))
+        seen.append((args.follow, args.ascii, args.no_motion, args.cache_policy))
         return 23
 
     monkeypatch.setattr(watch_cli, "run_watch_command", handler)
-    for arguments in (("watch",), ("watch", "--follow")):
+    for arguments in (
+        ("watch",),
+        ("watch", "--follow"),
+        ("watch", "--follow", "--cache-policy", "exact"),
+        ("watch", "--follow", "--cache-policy", "off"),
+    ):
         monkeypatch.setattr(sys, "argv", ["arity", *arguments])
         assert cli_main() == 23
         assert capsys.readouterr() == ("", "")
 
-    assert seen == [(False, False, False), (True, False, False)]
+    assert seen == [
+        (False, False, False, "conservative"),
+        (True, False, False, "conservative"),
+        (True, False, False, "exact"),
+        (True, False, False, "off"),
+    ]
 
 
 def test_ordinary_watch_never_instantiates_or_inspects_terminal() -> None:

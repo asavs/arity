@@ -290,6 +290,7 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
         assert set(detail) == {
             "agents",
             "arms",
+            "cache_heat",
             "completed_agents",
             "evidence",
             "reviews",
@@ -300,6 +301,26 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
             "human_observations",
         }
         assert type(detail["delivery_recorded"]) is bool
+        cache_heat = detail["cache_heat"]
+        assert cache_heat is None or set(cache_heat) == {
+            "state",
+            "deadline_at",
+            "seconds_remaining",
+        }
+        if cache_heat is not None:
+            assert cache_heat["state"] in {
+                "confirmed",
+                "estimated",
+                "elapsed",
+                "unknown",
+                "unsupported",
+            }
+            assert cache_heat["deadline_at"] is None or type(
+                cache_heat["deadline_at"]
+            ) is float
+            assert cache_heat["seconds_remaining"] is None or type(
+                cache_heat["seconds_remaining"]
+            ) is int
         for count_name in (
             "arms",
             "completed_agents",
@@ -445,6 +466,11 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
                         {"position": 0, "completion_recorded": True},
                     ],
                     "arms": {"value": 1, "more_omitted": False},
+                    "cache_heat": {
+                        "state": "unknown",
+                        "deadline_at": None,
+                        "seconds_remaining": None,
+                    },
                     "completed_agents": {"value": 1, "more_omitted": False},
                     "evidence": {"value": 1, "more_omitted": False},
                     "reviews": {"value": 1, "more_omitted": False},

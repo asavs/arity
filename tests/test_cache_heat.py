@@ -73,6 +73,7 @@ def _record(
 def test_cache_heat_view_is_immutable_bounded_and_has_a_stable_fingerprint() -> None:
     first = project_cache_heat([_record(_evidence())], now=110.0, mode="exact")
     later = project_cache_heat([_record(_evidence())], now=120.0, mode="exact")
+    elapsed = project_cache_heat([_record(_evidence())], now=401.0, mode="exact")
 
     assert first == CacheHeatView(
         state="confirmed",
@@ -82,6 +83,8 @@ def test_cache_heat_view_is_immutable_bounded_and_has_a_stable_fingerprint() -> 
     assert later.seconds_remaining == 280
     assert first == later
     assert first.stable_fingerprint == later.stable_fingerprint
+    assert elapsed.state == "elapsed"
+    assert first.stable_fingerprint == elapsed.stable_fingerprint
     assert first.to_dict() == {
         "state": "confirmed",
         "deadline_at": 400.0,
