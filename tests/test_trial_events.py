@@ -7,7 +7,12 @@ import pytest
 from gorkbot.evidence import ArtifactEvidence, CandidateEvidence, Evaluation, EvidenceBundle, resolve_bundle
 from gorkbot.handlers import JsonlRecordStore
 from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.trial_events import TrialEvent, TrialJournal, replay_trial
+from gorkbot.trial_events import (
+    TrialEvent,
+    TrialJournal,
+    UnsupportedTrialEventSchema,
+    replay_trial,
+)
 
 
 def bundle() -> EvidenceBundle:
@@ -296,6 +301,54 @@ def test_event_payload_is_strict_json() -> None:
         TrialEvent.create(
             trial_id="t", sequence=1, event_type="trial.started", payload={}, timestamp=float("inf"),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema_version", True, "schema_version"),
+        ("trial_id", None, "trial_id"),
+        ("sequence", 1.0, "sequence"),
+        ("event_type", 7, "event_type"),
+        ("timestamp", True, "timestamp"),
+        ("payload", [], "payload"),
+        ("idempotency_key", 3, "idempotency_key"),
+    ],
+)
+def test_persisted_event_envelope_rejects_lossy_type_coercion(
+    field: str, value: object, message: str,
+) -> None:
+    encoded = TrialEvent.create(
+        trial_id="t", sequence=1, event_type="trial.started", payload={}, timestamp=1,
+    ).to_dict()
+    encoded[field] = value
+    with pytest.raises(TypeError, match=message):
+        TrialEvent.from_dict(encoded)
+
+
+def test_unsupported_event_schema_is_typed() -> None:
+    encoded = TrialEvent.create(
+        trial_id="t", sequence=1, event_type="trial.started", payload={}, timestamp=1,
+    ).to_dict()
+    encoded["schema_version"] = 2
+    with pytest.raises(UnsupportedTrialEventSchema) as stopped:
+        TrialEvent.from_dict(encoded)
+    assert stopped.value.schema_version == 2
+
+
+def test_replay_rejects_idempotency_key_reuse_across_distinct_events() -> None:
+    events = (
+        TrialEvent.create(
+            trial_id="t", sequence=1, event_type="trial.started", payload={},
+            timestamp=1, idempotency_key="same",
+        ),
+        TrialEvent.create(
+            trial_id="t", sequence=2, event_type="future.event", payload={},
+            timestamp=2, idempotency_key="same",
+        ),
+    )
+    with pytest.raises(ValueError, match="idempotency key"):
+        replay_trial(events, "t")
 
 
 def test_journal_instances_share_sequences_and_idempotent_retries(tmp_path: Path) -> None:

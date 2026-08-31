@@ -35,6 +35,14 @@ _JOURNAL_LOCKS_GUARD = threading.Lock()
 _JOURNAL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 
 
+class UnsupportedTrialEventSchema(ValueError):
+    """A persisted event uses a schema this version cannot interpret."""
+
+    def __init__(self, schema_version: int) -> None:
+        super().__init__(f"unsupported trial event schema version {schema_version}")
+        self.schema_version = schema_version
+
+
 def _journal_lock(store: RecordStore, trial_id: str) -> threading.RLock:
     location = getattr(store, "path", None) or getattr(store, "root", None)
     if location is None:
@@ -120,16 +128,40 @@ class TrialEvent:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TrialEvent":
-        schema_version = int(value.get("schema_version", 0))
+        if not isinstance(value, Mapping):
+            raise TypeError("trial event must be a JSON object")
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int:
+            raise TypeError("trial event schema_version must be an integer")
         if schema_version != TRIAL_EVENT_SCHEMA_VERSION:
-            raise ValueError(f"unsupported trial event schema version {schema_version}")
+            raise UnsupportedTrialEventSchema(schema_version)
+        trial_id = value.get("trial_id")
+        if not isinstance(trial_id, str) or not trial_id:
+            raise TypeError("trial event trial_id must be a non-empty string")
+        sequence = value.get("sequence")
+        if type(sequence) is not int:
+            raise TypeError("trial event sequence must be an integer")
+        event_type = value.get("event_type")
+        if not isinstance(event_type, str) or not event_type:
+            raise TypeError("trial event event_type must be a non-empty string")
+        timestamp = value.get("timestamp")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            raise TypeError("trial event timestamp must be a number")
+        payload = value.get("payload")
+        if not isinstance(payload, Mapping):
+            raise TypeError("trial event payload must be a JSON object")
+        idempotency_key = value.get("idempotency_key")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not idempotency_key
+        ):
+            raise TypeError("trial event idempotency_key must be a non-empty string or null")
         return cls.create(
-            trial_id=str(value["trial_id"]),
-            sequence=int(value["sequence"]),
-            event_type=str(value["event_type"]),
-            timestamp=float(value["timestamp"]),
-            payload=value.get("payload", {}),
-            idempotency_key=value.get("idempotency_key"),
+            trial_id=trial_id,
+            sequence=sequence,
+            event_type=event_type,
+            timestamp=timestamp,
+            payload=payload,
+            idempotency_key=idempotency_key,
         )
 
 
@@ -246,6 +278,7 @@ class TrialJournal:
 
 def _coalesce_events(events: Iterable[TrialEvent], trial_id: str) -> tuple[TrialEvent, ...]:
     by_sequence: dict[int, TrialEvent] = {}
+    by_idempotency_key: dict[str, TrialEvent] = {}
     for event in events:
         if event.trial_id != trial_id:
             continue
@@ -254,6 +287,13 @@ def _coalesce_events(events: Iterable[TrialEvent], trial_id: str) -> tuple[Trial
             by_sequence[event.sequence] = event
         elif existing.to_dict() != event.to_dict():
             raise ValueError(f"conflicting trial events at sequence {event.sequence}")
+        if event.idempotency_key is not None:
+            prior = by_idempotency_key.get(event.idempotency_key)
+            if prior is not None and prior.to_dict() != event.to_dict():
+                raise ValueError(
+                    f"idempotency key {event.idempotency_key!r} identifies distinct trial events"
+                )
+            by_idempotency_key[event.idempotency_key] = event
     ordered = tuple(by_sequence[index] for index in sorted(by_sequence))
     if not ordered:
         raise ValueError(f"no trial events found for {trial_id}")
