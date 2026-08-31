@@ -53,10 +53,10 @@ $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_stat
 2. **`ToolRunner`** (`arity.seams.ToolRunner`): Protocol for tool execution (MCP, local Python functions, Docker/WSL sandboxes).
 3. **`RecordStore`** (`arity.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
 4. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
-5. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
+5. **`Observer`** (`arity.seams.Observer`): In-process protocol for event/effect telemetry and evaluation monitoring; it is distinct from durable `Observation` journal records and the read-only `watch` UI.
 6. **`ContextAdapter`** (`arity.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
 7. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
-8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
+8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates declared arms, normalized request usage, attributed observations, evidence, reviews, resolutions, and delivery.
 
 ## Quickstart
 
@@ -77,9 +77,16 @@ arity trial show <trial-id>
 arity trial replay <trial-id> --json
 arity watch
 arity watch <trial-id> --ascii --no-motion
+arity watch --follow
+arity watch --follow --cache-policy exact
+arity watch --follow --cache-policy off
 ```
 
-These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `watch` prints one ANSI-free ASCII snapshot with neutral trial and agent labels; an optional trial ID selects its structural detail without echoing the ID. `--ascii` and `--no-motion` are accepted now for forward-compatible scripts and do not change this deliberately static output. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. The `trials` and `trial` commands accept `--json` for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
+These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. Ordinary `watch` prints one deterministic ANSI-free ASCII snapshot with neutral trial and agent labels; an optional trial ID selects structural detail without echoing the ID.
+
+`watch --follow` explicitly enters the live terminal observer when both terminal directions are supported, otherwise it falls back to that exact one-shot output. Use `j`/`k` or arrow keys to select, Enter to expand, `r` to refresh, `?` for help, and `q` to quit. A failed refresh retains the last good snapshot and shows only a canned read error. The expanded view shows neutral agent status, independent mechanical/model/human observation counts, and a stable cache-eligibility deadline when normalized usage records support one. The default `conservative` policy uses the shortest usable recorded policy window and earliest current-arm deadline, `exact` evaluates each activity with its recorded policy hint, and `off` omits cache projection entirely so it cannot become an A/B identity hint. A deadline and prior-activity confidence never claim that an entry currently resides in a provider cache.
+
+`--ascii`, `--no-motion`, and `NO_COLOR` control only live presentation; ordinary output remains byte-stable. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. The `trials` and `trial` commands accept `--json` for a versioned envelope. Semantic and syntax exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption. Follow-mode `q` or EOF preserves the current semantic result; an interactive interrupt returns `130`.
 
 Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default) and reads Arity state from `.arity/`.
 

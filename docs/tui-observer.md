@@ -1,7 +1,7 @@
 # Observer TUI
 
-Status: Stage 1 blind-safe view model and Stage 2 one-shot command implemented on
-this branch; Stage 3 interactive TUI deferred.
+Status: Stage 1 blind-safe view model, Stage 2 deterministic one-shot command, and
+Stage 3 interactive terminal observer implemented on this branch.
 
 `arity watch` is a read-only local view of what Arity's persisted trial journal can
 prove. It is an observer, never a participant: opening it must not run an agent,
@@ -20,11 +20,11 @@ telemetry while work executes; evaluators may form decisions from frozen evidenc
 - The live view remains a presentation client, not a control plane. It may select,
   expand, retry a read, or quit, but it cannot start, stop, steer, repair, evaluate,
   or pre-warm work.
-- Arity will define an attributed observation envelope for three independent lenses:
+- Arity defines an attributed observation envelope for three independent lenses:
   mechanical checks, optional LLM interpretations, and human judgments. They may
   examine equivalent blinded evidence and later be compared for analytics, but none
-  silently overwrites another. `watch` may display their persisted, blind-safe
-  projections; it does not run them.
+  silently overwrites another. `watch` displays only their persisted, blind-safe
+  counts; it does not run them.
 - Cache telemetry follows one direction: provider response -> normalized versioned
   usage event -> trial journal -> inspection projection -> watch. It does not flow
   from an in-process metrics hook directly into the UI.
@@ -34,7 +34,7 @@ telemetry while work executes; evaluators may form decisions from frozen evidenc
   A/B identity fingerprint. The display reports a documented reuse window and its
   certainty, never direct knowledge of provider cache residency.
 
-## Current Stage 2 slice
+## Deterministic one-shot slice
 
 The current command has one useful center: a nested list of trials and their neutral
 agent labels. An explicitly selected trial opens a compact
@@ -58,9 +58,32 @@ arity watch [trial-id] [--ascii] [--no-motion]
   `arity trial show ID --json`. Stage 2 does not introduce another
   JSON schema or change their version-1 envelopes and exit codes.
 
-Interactive selection, repeated refresh, retry, motion, Unicode glyphs, color and
-`NO_COLOR`, terminal-width-aware layout, and terminal cleanup all belong to Stage 3.
-They are design goals below, not descriptions of the current command.
+Those rules still describe ordinary `arity watch`. The interactive behavior below is
+entered only through explicit `--follow`.
+
+## Current Stage 3 live observer
+
+```text
+arity watch [trial-id] --follow [--ascii] [--no-motion]
+            [--cache-policy conservative|exact|off]
+```
+
+When stdin and stdout support the terminal contract, follow mode opens one managed
+terminal session and obtains successive query-only snapshots. It reuses only the
+in-memory neutral-label registry; every refresh opens and closes a reader. `j`/`k`
+and the arrow keys select a trial, Enter expands or collapses it, `r` requests a
+refresh, `?` toggles help, and `q` exits. If capability or setup checks fail cleanly,
+the command emits the exact deterministic one-shot result instead.
+
+The expanded view contains neutral agent completion-recorded state, bounded counts of
+mechanical/model/human observation envelopes, and an optional absolute cache deadline.
+The deadline is derived only from normalized versioned usage records. `conservative`
+uses the shortest usable recorded policy window and earliest current-arm deadline,
+`exact` evaluates each activity with its recorded policy hint, and `off` omits the
+cache projection entirely. `confirmed` means a preceding request reported positive cache
+activity; it does not mean the entry is resident now. The terminal line remains
+clock-stable and says `eligibility only`, so a countdown or expiry cannot create a
+journal-update pulse.
 
 ## Current snapshot
 
@@ -81,7 +104,7 @@ wrap naturally. It does not query terminal width. If a finite read timestamp is
 outside the host platform's local-time range, the header uses the fixed unknown value
 `read ??:??:??` instead of inventing a time.
 
-## Deferred Stage 3 wireframe
+## Stage 3 terminal shape
 
 ```text
  arity watch                    jsonl | 4 trials | read 12:04:09
@@ -102,11 +125,10 @@ outside the host platform's local-time range, the header uses the fixed unknown 
  [j/k] select  [enter] expand  [r] retry  [?] help  [q] quit
 ```
 
-Stage 3 may collapse this layout to a single stacked list on narrow terminals. Its
-spiral remains decoration plus an observed-journal-change cue, not a progress
-indicator. Interactive mode may then use `j`/`k` or arrow keys to move, Enter to
-expand, `r` to retry, `?` for help, and `q` to quit, but none of those controls exist
-in Stage 2.
+The implementation collapses this layout to a width-bounded stacked list. Its spiral
+remains decoration plus an observed-journal-change cue, not a progress indicator.
+The controls are available only in explicit follow mode; ordinary Stage 2 output is
+still non-interactive.
 
 ## Truth and privacy rules
 
@@ -121,20 +143,22 @@ model must discard.
 The allowlist contains only finite structural values: neutral trial and agent labels,
 the closed integrity and lifecycle enums, the closed whole-catalog integrity
 aggregate, completion-recorded and bounded selection-state booleans, bounded counts
-of verified-prefix arms/evidence/reviews/resolutions, delivery presence, allowlisted
-issue codes with canned text, local read time, and store backend (`jsonl` or `sqlite`).
+of verified-prefix arms/evidence/reviews/resolutions and mechanical/model/human
+observations, delivery presence, an optional closed cache state, prior-activity
+confidence, finite deadline/countdown, allowlisted issue codes with canned text,
+local read time, and store backend (`jsonl` or `sqlite`).
 It never carries `task_name`, brief, role, raw trial/arm/candidate/evaluator/resolution
 or evidence IDs, names, signatures, model, provider, harness, tool runner, skills,
 context, raw completion/review status, output, artifact or delivery file paths, raw
 issue messages, or credentials. There is no identity-reveal toggle in the first
 release.
 
-Trials receive in-memory neutral labels (`Trial 1`, `Trial 2`, ...). The controller owns
-a session-scoped map from full trial ID to neutral label: it assigns the first snapshot
+Trials receive in-memory neutral labels (`Trial 1`, `Trial 2`, ...). The persistent
+`WatchProjector` owns a session-scoped map from full trial ID to neutral label: it assigns the first snapshot
 in display order, gives each newly observed ID the next monotonically increasing label,
 and never recycles or reassigns a label during that watch session. Re-sorting moves the
-existing label with its trial. Raw trial IDs are kept only as map keys and controller
-selection state so an exact requested ID can be found; they do not enter the view
+existing label with its trial. Raw trial IDs are kept only as projector map keys and
+controller selection state so an exact requested ID can be found; they do not enter the view
 model. Arms from the verified declaration are sorted by ordinal, then labeled by their
 bounded list position (`Agent A`, `Agent B`, ...), not by the numeric ordinal itself. A
 negative or enormous ordinal can affect only its sorted position: it never controls
@@ -177,36 +201,38 @@ The two current dimensions remain separate:
 
 Today `run_race` appends `trial.started` before dispatch, but appends all initial
 `arm.completed` events only after the dispatcher returns. There is no durable
-`arm.started`, model-turn, heartbeat, or process-liveness event. The first TUI must
+`arm.started`, model-turn, heartbeat, or process-liveness event. The TUI must
 therefore never relabel an absent completion as `queued`, `working`, `thinking`, or `running`, and
 must not derive progress from elapsed time, event count, completed-arm ratio, token
 count, or lifecycle phase.
 
-### Deferred Stage 3 spiral and future cache heat
+### Journal-update cue and cache deadline
 
-Stage 2 has no spiral or update cue. In Stage 3, a small, fixed-density Vogel-style
-mark may pulse briefly after a successful snapshot is observably different from the
+Ordinary Stage 2 output has no spiral or update cue. In follow mode, a small,
+fixed-density spiral mark pulses briefly after a successful snapshot is observably different from the
 preceding snapshot. Its adjacent text says `journal update`; it settles when no new
 journal data is observed. It does not grow from empty to full, spin continuously
 merely because a trial is `started`, or use the existing `SpiralSpinners` labels that
-claim agents are thinking. Reduced-motion mode swaps the pulse for a static mark and
-an updated read timestamp. ASCII mode uses `.o*@` only.
+claim agents are thinking. Reduced-motion mode uses a static update mark. ASCII mode
+uses `.o*@` only.
 
 Continuous inference animation is gated on a future, versioned durable activity
 contract such as arm/model-turn start and finish events. Until that exists, Arity can
 show only the short pulse caused by journal changes, including the start event that
 precedes inference.
 
-There is no fire, warmth, hit-rate, or cache bar in Stage 2. `MetricsObserver` has
-in-process aggregate cache counters, but they are neither a per-arm durable journal
-contract nor part of the inspection projection. Stage 3 first persists normalized
-per-request request-start time, prompt/cache-read/cache-write token counts, retention
-policy, and context-reset events. A time-derived flame may then visualize the recorded
-reuse window with explicit `confirmed`, `estimated`, `elapsed`, `unknown`, and
-`unsupported` states. Elapsed means the documented window passed; it does not prove
-that a provider evicted the entry. A cache read or write on a later request refreshes
-the recorded window. Compaction, a model switch, or another prefix-reset boundary
-starts a new comparison epoch.
+There is no fire, warmth, hit-rate, or ticking cache bar. Arity persists normalized
+per-request start/observation times, outcome, prompt/output/cache-read/cache-write
+measurements with their bases, and a recorded retention-policy hint. The pure cache
+projector exposes closed `confirmed`, `estimated`, `elapsed`, `unknown`, and
+`unsupported` states. The terminal deliberately renders timed values as a stable
+`respond by HH:MM:SS | prior activity confirmed|estimated | eligibility only` line;
+it does not redraw or pulse merely because the clock crossed that deadline. Elapsed
+means only that the recorded window passed, never that a provider evicted an entry.
+
+Versioned context-reset events for compaction, model switches, and other prefix
+changes are still deferred. Until those exist, cache analytics cannot divide those
+changes into explicit comparison epochs.
 
 ## Data and snapshot path
 
@@ -254,8 +280,8 @@ event, timestamp, physical event count, payload, or summary value may influence 
 order or the fingerprint. The fingerprint includes the closed catalog aggregate, so
 a safe severity change beyond the display cap remains observable without exposing
 the hidden row or source count. Stage 2 uses an exact requested full trial ID only to
-select within its one snapshot. Stage 3 will retain selection by that internal
-identity, never by row number; polling itself will not animate the spiral.
+select within its one snapshot. Stage 3 retains selection by that internal identity,
+never by row number; polling itself does not animate the spiral.
 
 ### Exceptional snapshots
 
@@ -286,14 +312,15 @@ identity, never by row number; polling itself will not animate the spiral.
 - **Output write, short-write, or flush failure:** return operational exit `1`
   without a traceback or an attempted unsafe diagnostic containing the exception.
 
-Stage 3 may retain a last successful snapshot, show a store-error banner, and retry
-after a change or read failure. Stage 2 never keeps state or retries.
+Follow mode retains the last successful snapshot, shows only a canned store-error
+code, retries on the next scheduled read, and lets `r` request an immediate retry.
+Stage 2 one-shot mode never keeps state or retries.
 
 For one-shot/non-interactive output, semantic results retain the established meanings:
 success/empty `0`, operational read failure `1`, missing selected trial `3`, partial
-projection `4`, and corruption `5`. Argument parsing remains `2`. A future Stage 3
-interactive user quit after the screen opens will return `0`; machine automation
-belongs on the existing JSON commands.
+projection `4`, and corruption `5`. Argument parsing remains `2`. Follow-mode `q` or
+EOF returns the current semantic result, and an interactive interrupt returns `130`;
+machine automation belongs on the existing JSON commands.
 
 Typed physical read failures take precedence because no trustworthy catalog exists.
 After a successful catalog read, a missing requested trial returns `3`; otherwise a
@@ -304,7 +331,7 @@ catalog issues.
 
 ## Implementation seams
 
-Stage 2 keeps the feature in three small layers:
+The retained one-shot path has three small layers:
 
 1. **Snapshot source/controller:** `load_watch_model` resolves one `StoreSpec`, opens
    one query-only reader, inspects one complete `TrialCatalog`, closes the reader,
@@ -320,9 +347,9 @@ Stage 2 keeps the feature in three small layers:
    `??:??:??` when the platform cannot represent the local read time and has no
    terminal, clock, or filesystem access.
 
-The thin CLI parser accepts the optional exact trial ID plus `--ascii` and
-`--no-motion`, then dispatches once. Stage 2 has no terminal capability or cleanup
-context because it never changes terminal state.
+The CLI parser also accepts explicit `--follow` and its presentation/cache-policy
+options. Without `--follow`, Stage 2 performs no terminal capability or cleanup work
+because it never changes terminal state.
 
 For the default process stdout and stderr, `run_watch_command` encodes the already
 validated frame or canned error as strict ASCII and writes it through the stream's
@@ -332,21 +359,20 @@ the embedding and test seam; they receive the same canonical strings and are flu
 A write, incomplete write, encoding, or flush failure is contained and returns `1`
 without printing a traceback or echoing the exception.
 
-### Deferred Stage 3 controller
+### Implemented Stage 3 controller
 
-A Stage 3 controller may add terminal sizing, key input, refresh scheduling, color,
-motion, and frame drawing. It must own terminal state through one cleanup context and
+The Stage 3 controller owns terminal sizing, key input, refresh scheduling, color,
+motion, and frame drawing. It owns terminal state through one cleanup context and
 enter interactive mode only after stdin and stdout both pass TTY and platform
 capability checks. On every return path, setup failure, renderer exception, EOF,
 `KeyboardInterrupt`, Ctrl-C, supported platform termination signal, and ordinary
-`q`, it must restore the original POSIX termios or Windows console mode, leave the
-alternate screen, and make the cursor visible before propagating the exit. A partial
+`q`, it restores the original POSIX termios or Windows console mode, leaves the
+alternate screen, and makes the cursor visible before propagating the exit. A partial
 setup unwinds only the changes that succeeded. Capability failure selects the
 one-shot fallback instead of leaving a half-configured console.
 
-The implementation preserves Arity's zero mandatory runtime dependencies. A richer
-Stage 3 renderer can live behind an optional extra, provided the fixed one-shot
-fallback remains complete.
+The implementation preserves Arity's zero mandatory runtime dependencies and keeps
+the fixed one-shot fallback complete.
 
 ## Acceptance criteria
 
@@ -407,7 +433,7 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
   one-shot command outside the source checkout with the same byte-exact LF-only
   assertions.
 
-### Deferred Stage 3 criteria
+### Implemented Stage 3 criteria
 
 - A refresh fixture changes trusted timestamps and lifecycle values, reorders
   existing rows, and inserts a new trial. Every previously observed full ID and the
@@ -425,11 +451,13 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
 - A journal-change pulse occurs only after the safe snapshot fingerprint changes; an
   unchanged `started` trial becomes and remains visually still.
 - Cache-heat tests cover confirmed reads and writes, unknown telemetry, elapsed
-  documented windows, context-reset boundaries, and all three display policies. The
+  documented windows, clock-stable frames, and all three display policies. The
   `off` policy exposes no provider-specific duration; `watch` never sends a provider
   request to affect the result it displays.
-- These Stage 3 behaviors will receive their own terminal/controller tests. They are
-  not requirements of `tests/test_watch_cli.py`.
+- These behaviors are covered by `tests/test_watch_follow.py`,
+  `tests/test_watch_follow_unit.py`, `tests/test_watch_cache_heat.py`,
+  `tests/test_cache_heat.py`, `tests/test_telemetry.py`, and the observation tests,
+  alongside the retained one-shot contracts in `tests/test_watch_cli.py`.
 
 ## Staged path
 
@@ -438,18 +466,18 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
    blindness tests.
 2. **Implemented on this branch:** add a fixed printable-ASCII, ANSI-free,
    non-interactive `arity watch` snapshot that performs no terminal capability work.
-3. **Approved next:** add polling, stable selection, keyboard control, retries,
+3. **Implemented on this branch:** polling, stable selection, keyboard control, retries,
    last-good-snapshot errors, optional Unicode/color with `NO_COLOR`,
    terminal-width-aware layout and cleanup, and the bounded journal-change spiral
-   pulse. Add cache heat only through the durable normalized usage path and the
-   explicit display policies above.
+   pulse. Cache deadlines flow only through the durable normalized usage path and
+   the explicit display policies above.
 4. Only after a separately reviewed journal schema records truthful arm activity may
    the TUI show active inference.
 
 ## Non-goals
 
 This slice does not run or control agents, reveal model identities, edit trials, stream
-full replay, inspect workspaces, display prompt/cache estimates, invent active states,
+full replay, inspect workspaces, display raw prompt/cache token counts, invent active states,
 or replace the current JSON CLI. Agent graphs, arbitrary topology, remote/multi-host
 watching, a GUI, Minecraft homes, and a SimCity-like agent world are delightful later
 clients of the same observer contract, not requirements for the first TUI.
