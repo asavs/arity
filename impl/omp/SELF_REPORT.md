@@ -1,6 +1,6 @@
 # Self-report — omp
 
-Command: `omp -p --resume "C:\Users\example\.omp\agent\sessions\home-omp-920ed429e956a0116a71c52440c80ef0345a201b2e98ffd68975bd4c18edecbc\2026-08-28T04-16-23-769Z_01a04695-48d8-7000-8bbd-ca74ad4b380a.jsonl" --model "google-antigravity/gemini-3.7-flash-tiered:high" --cwd "C:\Users\example\Projects\gorkbot\impl\omp" "<REPORT_PROMPT>"`
+Command: `omp -p --resume "REDACTED-SESSION-FILE.jsonl" --model "google-antigravity/gemini-3.7-flash-tiered:high" --cwd "C:\Users\example\Projects\arity\impl\omp" "<REPORT_PROMPT>"`
 
 I was trying to deliver a zero-dependency, standard-library Python 3.13 implementation of the gorkbot continuity core under 1,500 lines, ensuring every model turn made a real HTTP request against live seats, with no mocks, no key leaks, and honest two-account accounting across all five stories (S1, S3, S36, S7, S39).
 

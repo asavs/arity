@@ -400,7 +400,7 @@ A role is a **denial set** — what it may not touch, read, or reach — plus wh
 model. Scout: egress, no write. Librarian: writes the catalog, no egress. Archivist: reads
 everything, writes only entries. The Voice: tier-0 memory, no deep work. A public triage bot:
 no tier 0. Every entry is explicit allow/deny; nothing is "ask." Enforced by the OS where it
-can be — a leaf runs as a user that can't see `/Users/example` — not by what the brief remembers
+can be — a leaf runs as a user that can't see `/Users/example — not by what the brief remembers
 to omit. Aptitude picks the model; denial is the role. Roles also say which channels a kernel
 may read and post to.
 
