@@ -538,7 +538,7 @@ class LocalToolRunner:
 # -----------------------------------------------------------------------------
 
 def default_record_store() -> "RecordStore":
-    """Select Arity's store while retaining legacy settings and state paths."""
+    """Select Arity's configured record store."""
     from .record_readers import configured_store_spec
     spec = configured_store_spec()
     if spec.backend == "sqlite":
@@ -551,7 +551,7 @@ class JsonlRecordStore:
     """Simple append-only JSONL record store."""
 
     def __init__(self, root: Optional[Path] = None):
-        self.root = Path(root) if root else Path(".gorkbot/records")
+        self.root = Path(root) if root else Path(".arity/records")
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()  # parallel candidates append concurrently; interleaved lines corrupt JSONL
 

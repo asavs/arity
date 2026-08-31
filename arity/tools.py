@@ -467,14 +467,12 @@ def positive_int(value: Any, *, name: str = "value") -> int:
 
 
 def resolve_arity(explicit: Optional[int] = None, *, default: int = 1) -> int:
-    """Resolve the requested maximum arity: explicit, ``ARITY``, compatibility fallback, default."""
+    """Resolve the requested maximum arity: explicit, ``ARITY``, then default."""
     if explicit is not None:
         return positive_int(explicit, name="arity")
-    for key in ("ARITY", "GORKBOT_CONCURRENCY"):
-        configured = get_config_value(key)
-        if configured is not None:
-            label = key if key == "ARITY" else f"{key} (legacy)"
-            return positive_int(configured, name=label)
+    configured = get_config_value("ARITY")
+    if configured is not None:
+        return positive_int(configured, name="ARITY")
     return positive_int(default, name="default arity")
 
 

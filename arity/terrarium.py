@@ -717,9 +717,9 @@ class TerrariumDispatcher:
         if not candidates:
             return []
 
-        # Legacy GORKBOT_CONCURRENCY remains a parallel-worker safety cap.
+        # Requested arity and executor parallelism are separate controls.
         from .tools import get_config_value
-        cap = get_config_value("GORKBOT_CONCURRENCY")
+        cap = get_config_value("ARITY_WORKERS")
         if cap and str(cap).isdigit() and int(cap) > 0:
             max_workers = min(max_workers, int(cap))
 
