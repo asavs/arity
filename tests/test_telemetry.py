@@ -323,6 +323,130 @@ def test_request_usage_is_a_known_strict_replay_event(tmp_path, backend: str) ->
         store.close()
 
 
+def test_request_usage_replay_rejects_observation_timestamp_mismatch() -> None:
+    events = (
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=1,
+            event_type="trial.started",
+            payload=_started_payload(),
+            timestamp=1,
+        ),
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=2,
+            event_type="request.usage_recorded",
+            payload=_usage_payload(),
+            timestamp=13,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="observed time.*event timestamp"):
+        replay_trial(events, "trial-usage")
+
+
+def test_request_usage_replay_rejects_start_after_observation() -> None:
+    payload = _usage_payload()
+    payload["request_started_at"] = 13.0
+    events = (
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=1,
+            event_type="trial.started",
+            payload=_started_payload(),
+            timestamp=1,
+        ),
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=2,
+            event_type="request.usage_recorded",
+            payload=payload,
+            timestamp=12,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="request start time.*observation"):
+        replay_trial(events, "trial-usage")
+
+
+def test_request_usage_replay_rejects_timeline_before_trial_start() -> None:
+    events = (
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=1,
+            event_type="trial.started",
+            payload=_started_payload(),
+            timestamp=15,
+        ),
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=2,
+            event_type="request.usage_recorded",
+            payload=_usage_payload(),
+            timestamp=12,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="request start time.*trial start"):
+        replay_trial(events, "trial-usage")
+
+
+def test_replay_allows_decreasing_event_times_across_concurrent_arms() -> None:
+    started_payload = _started_payload()
+    arms = started_payload["arms"]
+    assert isinstance(arms, list)
+    assert isinstance(arms[0], dict)
+    second_arm = dict(arms[0])
+    second_arm.update({"arm_id": "arm-2", "arm_ordinal": 1})
+    started_payload["arms"] = [*arms, second_arm]
+    first_payload = _usage_payload()
+    assert isinstance(first_payload["evidence"], dict)
+    first_payload["evidence"] = {
+        **first_payload["evidence"],
+        "evidence_observed_at": 20.0,
+    }
+    second_payload = _usage_payload()
+    second_payload.update(
+        {
+            "arm_id": "arm-2",
+            "actor_ref": "arm-2",
+            "request_started_at": 11.0,
+        }
+    )
+    assert isinstance(second_payload["evidence"], dict)
+    second_payload["evidence"] = {
+        **second_payload["evidence"],
+        "evidence_observed_at": 19.0,
+    }
+    events = (
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=1,
+            event_type="trial.started",
+            payload=started_payload,
+            timestamp=1,
+        ),
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=2,
+            event_type="request.usage_recorded",
+            payload=first_payload,
+            timestamp=20,
+        ),
+        TrialEvent.create(
+            trial_id="trial-usage",
+            sequence=3,
+            event_type="request.usage_recorded",
+            payload=second_payload,
+            timestamp=19,
+        ),
+    )
+
+    replay = replay_trial(events, "trial-usage")
+
+    assert [event.timestamp for event in replay.events] == [1.0, 20.0, 19.0]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -374,14 +498,14 @@ def test_request_ordinals_are_unique_per_arm_and_usage_cannot_follow_completion(
         sequence=2,
         event_type="request.usage_recorded",
         payload=_usage_payload(),
-        timestamp=2,
+        timestamp=12,
     )
     duplicate = TrialEvent.create(
         trial_id="trial-usage",
         sequence=3,
         event_type="request.usage_recorded",
         payload=_usage_payload(),
-        timestamp=3,
+        timestamp=12,
     )
     with pytest.raises(ValueError, match="ordinal"):
         replay_trial((start, usage, duplicate), "trial-usage")
@@ -397,14 +521,14 @@ def test_request_ordinals_are_unique_per_arm_and_usage_cannot_follow_completion(
         sequence=3,
         event_type="arm.completed",
         payload=completed_payload,
-        timestamp=3,
+        timestamp=13,
     )
     late = TrialEvent.create(
         trial_id="trial-usage",
         sequence=4,
         event_type="request.usage_recorded",
         payload={**_usage_payload(), "request_ordinal": 2},
-        timestamp=4,
+        timestamp=14,
     )
     with pytest.raises(ValueError, match="after.*completed"):
         replay_trial((start, usage, completed, late), "trial-usage")
