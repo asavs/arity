@@ -24,6 +24,8 @@ _MISSING = object()
 class UnsupportedUsageEvidenceSchema(ValueError):
     """A persisted usage value uses a newer nested contract."""
 
+    document_type = "usage evidence"
+
     def __init__(self, schema_version: int) -> None:
         super().__init__(f"unsupported usage evidence schema version {schema_version}")
         self.schema_version = schema_version
