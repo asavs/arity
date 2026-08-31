@@ -337,9 +337,10 @@ def show_roles():
     print("\033[1;35m====================================================\033[0m\n")
 
 
-def handle_auth_command(args: argparse.Namespace) -> None:
+def handle_auth_command(args: argparse.Namespace) -> int:
     """Handle Arity authentication subcommands."""
     from .auth import (
+        AuthConfigurationError,
         TokenStore,
         fetch_antigravity_quota,
         login_google_antigravity,
@@ -395,16 +396,24 @@ def handle_auth_command(args: argparse.Namespace) -> None:
     elif action == "login":
         from .auth import login_anthropic
         provider = (getattr(args, "provider", "") or "").lower()
-        if provider in ("google", "agy", "antigravity"):
-            login_google_antigravity()
-        elif provider in ("openai", "codex", "chatgpt"):
-            login_openai_codex()
-        elif provider in ("xai", "grok"):
-            login_xai_grok()
-        elif provider in ("anthropic", "claude"):
-            login_anthropic()
-        else:
-            print(f"\033[1;31m[Error]\033[0m Unknown provider '{provider}'. Choose from: google, openai, xai, anthropic.")
+        try:
+            if provider in ("google", "agy", "antigravity"):
+                login_google_antigravity()
+            elif provider in ("openai", "codex", "chatgpt"):
+                login_openai_codex()
+            elif provider in ("xai", "grok"):
+                login_xai_grok()
+            elif provider in ("anthropic", "claude"):
+                login_anthropic()
+            else:
+                print(
+                    f"[Arity auth] Unknown provider '{provider}'.",
+                    file=sys.stderr,
+                )
+                return 2
+        except AuthConfigurationError as exc:
+            print(f"[Arity auth] {exc}", file=sys.stderr)
+            return 1
 
     elif action == "logout":
         provider = (getattr(args, "provider", "") or "").lower()
@@ -423,6 +432,7 @@ def handle_auth_command(args: argparse.Namespace) -> None:
             print(f"\033[1;32m[Arity Auth]\033[0m Removed credential for '{key}'.")
         else:
             print(f"\033[1;33m[Arity Auth]\033[0m No saved credential found for '{key}'.")
+    return 0
 
 
 def handle_race_command(args: argparse.Namespace) -> None:
@@ -651,7 +661,7 @@ def main() -> int:
     elif args.command == "roles":
         show_roles()
     elif args.command == "auth":
-        handle_auth_command(args)
+        return handle_auth_command(args)
     elif args.command == "lock":
         orchestrator = ArityOrchestrator()
         orchestrator.ledger.set_presence(args.seat_id, True)

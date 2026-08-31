@@ -78,7 +78,7 @@ def _require_client_id(provider: str, env_name: str, explicit: Optional[str] = N
         return client_id
     raise AuthConfigurationError(
         f"{provider} OAuth requires {env_name}. "
-        "Set it explicitly or import credentials with `arity auth import`."
+        f"Set {env_name} in the environment before running login."
     )
 
 
@@ -101,7 +101,7 @@ def _require_google_oauth_client(
         raise AuthConfigurationError(
             "Google Antigravity OAuth requires "
             + " and ".join(missing)
-            + ". Set them explicitly or import credentials with `arity auth import`."
+            + ". Set these environment variables before running login."
         )
     return resolved_id, resolved_secret
 
@@ -113,8 +113,11 @@ def _require_google_oauth_client(
 class TokenStore:
     """Manage Arity's plaintext credential file.
 
-    Writes replace the file atomically and use mode ``0600`` on POSIX. Windows
-    confidentiality relies on the user's profile ACLs; this store is not encrypted.
+    Writes use same-directory atomic replacement and mode ``0600`` on POSIX,
+    but each update is a read-modify-replace operation and is not transactional
+    across processes. On Windows, confidentiality depends on the destination
+    directory's ACLs. Callers providing a custom ``auth_path`` must secure its
+    parent directory. This store is not encrypted.
     """
 
     def __init__(self, auth_path: Optional[Path] = None):
@@ -124,7 +127,7 @@ class TokenStore:
         self.auth_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _write_all(self, credentials: dict[str, dict[str, Any]]) -> None:
-        """Durably replace the credential file without exposing a partial JSON write."""
+        """Flush a complete JSON file before atomically replacing the prior file."""
         self._ensure_dir()
         serialized = json.dumps(credentials, indent=2)
         descriptor: Optional[int] = None
@@ -147,9 +150,17 @@ class TokenStore:
             temp_path = None
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    # Cleanup must not hide the write or replace failure.
+                    pass
             if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    # Cleanup must not hide the write or replace failure.
+                    pass
 
     def load_all(self) -> dict[str, dict[str, Any]]:
         """Load all saved credentials."""
@@ -357,7 +368,7 @@ def refresh_google_antigravity_token(
     expires_in = res.get("expires_in", 3600)
     return {
         "access": res["access_token"],
-        "refresh": res.get("refresh_token", refresh_token),
+        "refresh": res.get("refresh_token") or refresh_token,
         "expires": int((time.time() + expires_in - 300) * 1000),
         "projectId": project_id,
     }
@@ -388,7 +399,7 @@ def refresh_openai_token(
     expires_in = res.get("expires_in", 3600)
     return {
         "access": res["access_token"],
-        "refresh": res.get("refresh_token", refresh_token),
+        "refresh": res.get("refresh_token") or refresh_token,
         "expires": int((time.time() + expires_in - 300) * 1000),
     }
 
@@ -418,7 +429,7 @@ def refresh_xai_token(
     expires_in = res.get("expires_in", 3600)
     return {
         "access": res["access_token"],
-        "refresh": res.get("refresh_token", refresh_token),
+        "refresh": res.get("refresh_token") or refresh_token,
         "expires": int((time.time() + expires_in - 300) * 1000),
     }
 
@@ -576,6 +587,8 @@ def login_google_antigravity(
         "refresh": refresh_token,
         "expires": expires_ms,
         "projectId": project_id,
+        "clientId": oauth_client_id,
+        "clientSecret": oauth_client_secret,
         "email": email,
         "authorizedAt": int(time.time() * 1000),
     }
@@ -735,6 +748,7 @@ def login_xai_grok(
                     "access": access_token,
                     "refresh": refresh_token,
                     "expires": expires_ms,
+                    "clientId": oauth_client_id,
                     "authorizedAt": int(time.time() * 1000),
                 }
                 store = TokenStore()
@@ -889,6 +903,7 @@ def login_openai_codex(
         "access": access_token,
         "refresh": refresh_token,
         "expires": expires_ms,
+        "clientId": oauth_client_id,
         "accountId": account_id,
         "authorizedAt": int(time.time() * 1000),
     }
@@ -1030,6 +1045,7 @@ def login_anthropic(
         "access": access_token,
         "refresh": refresh_token,
         "expires": expires_ms,
+        "clientId": oauth_client_id,
         "accountId": account_id,
         "email": email,
         "authorizedAt": int(time.time() * 1000),
