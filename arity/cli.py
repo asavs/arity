@@ -669,7 +669,10 @@ def main() -> int:
     if args.command == "demo":
         run_demo()
     elif args.command == "race":
-        handle_race_command(args)
+        try:
+            handle_race_command(args)
+        except ValueError as exc:
+            parser.error(str(exc))
     elif args.command == "tasks":
         show_tasks()
     elif args.command == "standings":

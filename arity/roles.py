@@ -348,11 +348,12 @@ class RoleRegistry:
             "tui", "terminal", " ui", "user interface", "interface", "screen",
             "lobby", "dashboard",
         )
-        design_artifacts = (
-            "prototype", "mockup", "wireframe", "ui design", "tui design",
+        experience_artifacts = (
+            "mockup", "wireframe", "ui design", "tui design",
             "user journey", "human journey", "information hierarchy", "interaction design",
             "accessibility", "accessible",
         )
+        design_artifacts = ("prototype", *experience_artifacts)
         has_interface = any(term in f" {query}" for term in interface_terms)
         has_design_artifact = any(term in query for term in design_artifacts)
         starts_implementation = query.startswith(("implement ", "code "))
@@ -369,6 +370,15 @@ class RoleRegistry:
             if (starts_design or has_design_artifact) and designer_role is not None:
                 return designer_role
 
+        # "Prototype" by itself describes delivery maturity, not product-design intent.
+        # Route technical prototypes to implementation while preserving explicit experience
+        # artifacts (including user journeys and mockups) as Designer work.
+        if query.startswith("prototype "):
+            if any(term in query for term in experience_artifacts) and designer_role is not None:
+                return designer_role
+            if developer_role is not None:
+                return developer_role
+
         # 5. Actionable task intent matching
         best_role = secretary_role
         best_score = 0
@@ -380,7 +390,7 @@ class RoleRegistry:
             "engineer": ("architecture", "system design", "spec", "decompose"),
             "designer": (
                 "user journey", "human journey", "information hierarchy", "interaction design",
-                "accessibility", "visual direction", "prototype", "ui design", "tui design",
+                "accessibility", "visual direction", "ui design", "tui design",
                 "blind interface", "a/b-blind",
             ),
             "tester": ("verify tests", "run pytest", "check regression"),
