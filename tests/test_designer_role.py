@@ -19,7 +19,11 @@ from arity.roles import (
 )
 from arity.terrarium import CandidateSpec, TaskRecord, TerrariumDispatcher
 from arity.tiers import BriefCompiler, TierLevel
-from arity.tools import SandboxToolRunner
+from arity.tools import (
+    RoleEnforcingToolRunner,
+    SandboxToolRunner,
+    create_mcp_tool_runner,
+)
 from arity.types import CallModel, ExecuteTool, ModelCompleted, ToolCompleted
 
 
@@ -67,6 +71,29 @@ class _PermissiveCustomRunner:
             call_id=effect.call_id,
             tool_name=effect.name,
             output="custom runner executed",
+        )
+
+
+class _FetchRunner:
+    def __init__(self):
+        self.calls: list[ExecuteTool] = []
+
+    def get_schemas(self) -> list[dict[str, object]]:
+        return [{
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch a URL.",
+                "parameters": {"type": "object", "properties": {"url": {"type": "string"}}},
+            },
+        }]
+
+    def execute(self, effect: ExecuteTool) -> ToolCompleted:
+        self.calls.append(effect)
+        return ToolCompleted(
+            call_id=effect.call_id,
+            tool_name=effect.name,
+            output="custom fetch executed",
         )
 
 
@@ -313,6 +340,111 @@ def test_shell_axis_cannot_read_designer_credentials(tmp_path) -> None:
     tool_result = provider.calls[1].messages[-1]["content"]
     assert "Security Denial" in tool_result
     assert "this-value" not in tool_result
+
+
+def test_fetch_url_cannot_read_a_synthetic_local_file(tmp_path) -> None:
+    secret = tmp_path / "synthetic-secret.txt"
+    secret.write_text("SYNTHETIC_SECRET_MUST_NOT_ESCAPE", encoding="utf-8")
+    runner = RoleEnforcingToolRunner(
+        SandboxToolRunner(workspace_root=tmp_path, role=DESIGNER_ROLE),
+        DESIGNER_ROLE,
+        tmp_path,
+    )
+
+    result = runner.execute(
+        ExecuteTool(
+            call_id="designer-local-fetch",
+            name="fetch_url",
+            arguments={"url": secret.resolve().as_uri()},
+        )
+    )
+
+    assert result.is_error
+    assert "Security Denial" in result.output
+    assert "SYNTHETIC_SECRET_MUST_NOT_ESCAPE" not in result.output
+
+
+def test_fetch_url_rejects_non_web_credentials_and_obvious_local_targets(tmp_path) -> None:
+    delegate = _FetchRunner()
+    runner = RoleEnforcingToolRunner(delegate, DESIGNER_ROLE, tmp_path)
+    denied_urls = (
+        (tmp_path / "synthetic.txt").resolve().as_uri(),
+        "file:%2F%2F%2FC%3A%2Fsynthetic.txt",
+        "f%69le:///C:/synthetic.txt",
+        "ftp://example.com/file.txt",
+        "data:text/plain,synthetic",
+        "gopher://example.com/resource",
+        "https://user:password@example.com/private",
+        "http://localhost/private",
+        "http://localhost./private",
+        "http://sub.localhost/private",
+        "http://127.0.0.1/private",
+        "http://127.1/private",
+        "http://2130706433/private",
+        "http://%31%32%37.0.0.1/private",
+        "http://10.0.0.1/private",
+        "http://172.16.0.1/private",
+        "http://192.168.0.1/private",
+        "http://169.254.169.254/private",
+        "http://[::1]/private",
+        "http://[fe80::1]/private",
+        "http://[fc00::1]/private",
+        "https:///missing-host",
+    )
+
+    for ordinal, url in enumerate(denied_urls):
+        result = runner.execute(
+            ExecuteTool(
+                call_id=f"designer-denied-url-{ordinal}",
+                name="fetch_url",
+                arguments={"url": url},
+            )
+        )
+        assert result.is_error, url
+        assert "Security Denial" in result.output, url
+    assert delegate.calls == []
+
+
+def test_fetch_url_preserves_ordinary_public_http_and_https(tmp_path) -> None:
+    delegate = _FetchRunner()
+    runner = RoleEnforcingToolRunner(delegate, DESIGNER_ROLE, tmp_path)
+
+    for ordinal, url in enumerate((
+        "https://example.com/docs?q=arity#designer",
+        "http://example.org/reference",
+    )):
+        result = runner.execute(
+            ExecuteTool(
+                call_id=f"designer-public-url-{ordinal}",
+                name="fetch_url",
+                arguments={"url": url},
+            )
+        )
+        assert not result.is_error
+    assert [call.arguments["url"] for call in delegate.calls] == [
+        "https://example.com/docs?q=arity#designer",
+        "http://example.org/reference",
+    ]
+
+
+def test_mcp_wrapper_rejects_local_fetch_before_delegation(tmp_path) -> None:
+    runner = RoleEnforcingToolRunner(
+        create_mcp_tool_runner(workspace_root=tmp_path, role=DESIGNER_ROLE),
+        DESIGNER_ROLE,
+        tmp_path,
+    )
+
+    result = runner.execute(
+        ExecuteTool(
+            call_id="designer-mcp-local-fetch",
+            name="fetch_url",
+            arguments={"url": (tmp_path / "synthetic.txt").resolve().as_uri()},
+        )
+    )
+
+    assert result.is_error
+    assert "Security Denial" in result.output
+    assert "Unknown MCP tool" not in result.output
 
 
 def test_designer_credentials_stay_denied() -> None:
