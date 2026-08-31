@@ -11,8 +11,10 @@ from arity.record_readers import (
     JsonlRecordReader,
     RecordChanged,
     RecordCorruption,
+    RecordLimitExceeded,
     RecordNotFound,
     RecordReadError,
+    RecordReadLimits,
     SqliteRecordReader,
     StoreSpec,
     configured_store_spec,
@@ -32,6 +34,111 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_read_limits_require_positive_exact_integers() -> None:
+    assert RecordReadLimits(max_snapshot_bytes=1, max_query_records=2) == (
+        RecordReadLimits(max_snapshot_bytes=1, max_query_records=2)
+    )
+    for field, value in (
+        ("max_snapshot_bytes", 0),
+        ("max_snapshot_bytes", True),
+        ("max_query_records", -1),
+        ("max_query_records", 1.5),
+    ):
+        options = {"max_snapshot_bytes": None, "max_query_records": None}
+        options[field] = value
+        with pytest.raises((TypeError, ValueError)):
+            RecordReadLimits(**options)
+
+
+def test_jsonl_reader_fails_before_materializing_an_oversized_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "records"
+    root.mkdir()
+    record_path = root / "trial_event.jsonl"
+    record_path.write_bytes(b'{"trial_id":"too-large"}\n')
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == record_path:
+            raise AssertionError("oversized JSONL content must not be materialized")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    reader = JsonlRecordReader(
+        root,
+        limits=RecordReadLimits(max_snapshot_bytes=4, max_query_records=10),
+    )
+
+    with pytest.raises(RecordLimitExceeded) as failure:
+        reader.query("trial_event")
+
+    assert failure.value.code == "record_store_limit_exceeded"
+    assert failure.value.path == record_path
+
+
+def test_jsonl_reader_stops_at_the_query_record_limit(tmp_path: Path) -> None:
+    root = tmp_path / "records"
+    writer = JsonlRecordStore(root)
+    for index in range(3):
+        writer.append(StoreRecord(kind="trial_event", record={"index": index}))
+    reader = JsonlRecordReader(
+        root,
+        limits=RecordReadLimits(max_snapshot_bytes=1024, max_query_records=2),
+    )
+
+    with pytest.raises(RecordLimitExceeded, match="record limit"):
+        reader.query("trial_event")
+
+
+def test_sqlite_reader_fails_before_copying_an_oversized_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "records.db"
+    writer = SqliteRecordStore(path)
+    writer.close()
+
+    with pytest.raises(RecordLimitExceeded) as failure:
+        SqliteRecordReader(
+            path,
+            limits=RecordReadLimits(max_snapshot_bytes=1, max_query_records=10),
+        )
+
+    assert failure.value.path == path
+
+
+def test_sqlite_reader_bounds_rows_before_decoding(tmp_path: Path) -> None:
+    path = tmp_path / "records.db"
+    writer = SqliteRecordStore(path)
+    for index in range(3):
+        writer.append(StoreRecord(kind="trial_event", record={"index": index}))
+    writer.close()
+    reader = SqliteRecordReader(
+        path,
+        limits=RecordReadLimits(
+            max_snapshot_bytes=1024 * 1024,
+            max_query_records=2,
+        ),
+    )
+
+    with pytest.raises(RecordLimitExceeded, match="record limit"):
+        reader.query("trial_event")
+    reader.close()
+
+
+def test_open_record_reader_forwards_optional_limits(tmp_path: Path) -> None:
+    root = tmp_path / "records"
+    writer = JsonlRecordStore(root)
+    for index in range(2):
+        writer.append(StoreRecord(kind="trial_event", record={"index": index}))
+
+    with open_record_reader(
+        StoreSpec("jsonl", root),
+        limits=RecordReadLimits(max_snapshot_bytes=1024, max_query_records=1),
+    ) as reader:
+        with pytest.raises(RecordLimitExceeded):
+            reader.query("trial_event")
 
 
 def test_configured_store_spec_is_shared_with_the_writable_default(
