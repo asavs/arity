@@ -49,14 +49,14 @@ $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_stat
 
 ## The Seams (Graft Points)
 
-1. **`ModelProvider`** (`gorkbot.seams.ModelProvider`): Protocol for model routing (OpenRouter, LiteLLM, vLLM, direct stdlib `urllib`).
-2. **`ToolRunner`** (`gorkbot.seams.ToolRunner`): Protocol for tool execution (MCP, local Python functions, Docker/WSL sandboxes).
-3. **`RecordStore`** (`gorkbot.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
-4. **`Transport`** (`gorkbot.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
-5. **`Observer`** (`gorkbot.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
-6. **`ContextAdapter`** (`gorkbot.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
-7. **`TrialEvaluator`** (`gorkbot.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
-8. **`TrialJournal`** (`gorkbot.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
+1. **`ModelProvider`** (`arity.seams.ModelProvider`): Protocol for model routing (OpenRouter, LiteLLM, vLLM, direct stdlib `urllib`).
+2. **`ToolRunner`** (`arity.seams.ToolRunner`): Protocol for tool execution (MCP, local Python functions, Docker/WSL sandboxes).
+3. **`RecordStore`** (`arity.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
+4. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
+5. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
+6. **`ContextAdapter`** (`arity.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
+7. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
+8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
 
 ## Quickstart
 
@@ -67,7 +67,7 @@ arity --help
 arity run --mock --arity 3 --task lru_cache
 ```
 
-`--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the compatibility fallback `GORKBOT_CONCURRENCY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
+`--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
 
 ### Inspect persisted trials
 
@@ -81,7 +81,7 @@ arity watch <trial-id> --ascii --no-motion
 
 These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `watch` prints one ANSI-free ASCII snapshot with neutral trial and agent labels; an optional trial ID selects its structural detail without echoing the ID. `--ascii` and `--no-motion` are accepted now for forward-compatible scripts and do not change this deliberately static output. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. The `trials` and `trial` commands accept `--json` for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
 
-Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `GORKBOT_STORE` compatibility fallback and `.gorkbot/` paths.
+Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default) and reads Arity state from `.arity/`.
 
 ### Authenticate provider harnesses
 
@@ -101,13 +101,13 @@ configuration at invocation time:
 
 A successful native login stores the resolved client configuration with the resulting tokens.
 Google, OpenAI, and xAI reuse that configuration during automatic refresh; Anthropic automatic
-refresh is not currently implemented. That makes `~/.gorkbot/auth.json` especially sensitive: it
+refresh is not currently implemented. That makes `~/.arity/auth.json` especially sensitive: it
 is plaintext, owner-only (`0600`) on POSIX when Arity writes it, and protected only by the
 destination directory's ACLs on Windows. See [SECURITY.md](SECURITY.md) before using these adapters.
 
-### Python API (`gorkbot` namespace)
+### Python API (`arity` namespace)
 ```python
-from gorkbot import Runtime, LocalToolRunner, OpenAIModelProvider
+from arity import Runtime, LocalToolRunner, OpenAIModelProvider
 
 # Initialize runtime with custom or default seams
 runtime = Runtime(
@@ -123,7 +123,7 @@ print(output)
 The same read-only projection is the API intended for TUIs, GUIs, and other observers:
 
 ```python
-from gorkbot import inspect_trial, inspect_trials, open_record_reader
+from arity import inspect_trial, inspect_trials, open_record_reader
 
 with open_record_reader() as reader:
     catalog = inspect_trials(reader)
@@ -145,9 +145,13 @@ The clean installed-wheel acceptance gate is separate from the source suite:
 python acceptance/verify_installed.py
 ```
 
-## Compatibility Boundary
+## Clean Break
 
-The distribution and primary command are named **Arity**. The Python API remains available only from the `gorkbot` package (`import arity` is not provided); `python -m gorkbot` and the `gorkbot` console command remain supported entry points. `.gorkbot/` remains Arity's active state/config location: credentials, records, configuration, and local definition overrides are read or written there. `GORKBOT_*` settings remain compatibility fallbacks where `ARITY_*` counterparts exist; no state migration is performed. Historical release notes keep the names used when they were published.
+The distribution, console command, Python namespace, module entry point, state/config directory,
+and environment variables use Arity exclusively: `arity`, `import arity`, `python -m arity`,
+`.arity/`, and `ARITY`/`ARITY_*`. There are no compatibility aliases or fallbacks to earlier
+names, locations, or settings, and no automatic state migration. Move non-secret records
+deliberately; reauthenticate instead of copying credential files.
 
 ## Security
 
@@ -159,5 +163,5 @@ untrusted tasks, or external content.
 
 ## License
 
-Arity is available under the [MIT License](LICENSE). See [RELEASE.md](RELEASE.md) for
-historically named release notes.
+Arity is available under the [MIT License](LICENSE). See [RELEASE.md](RELEASE.md) for the
+release history.
