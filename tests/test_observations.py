@@ -95,6 +95,23 @@ def test_observation_requires_finite_time_and_nonblank_attribution(bad_time: obj
         )
 
 
+def test_schema_and_reference_discriminators_are_strictly_typed() -> None:
+    with pytest.raises(TypeError, match="schema_version"):
+        Observation(
+            observer_kind="mechanical",
+            observer_id="kernel",
+            observer_version="v1",
+            observed_at=1,
+            phase="trial",
+            status="recorded",
+            subject=ObservationSubject("evidence", "evidence-1"),
+            reference=MechanicalEvidenceReference(HASH),
+            schema_version=True,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="select or decline"):
+        HumanDecisionReference(HASH, True)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("attempt_status", "status", "evaluation_id"),
     [

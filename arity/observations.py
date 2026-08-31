@@ -175,7 +175,7 @@ class HumanDecisionReference:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_hash", _evidence_hash(self.evidence_hash))
-        if self.decision not in {"selected", "declined"}:
+        if type(self.decision) is not str or self.decision not in {"selected", "declined"}:
             raise ValueError("human decision reference must select or decline")
         if self.candidate_id is not None:
             object.__setattr__(
@@ -250,9 +250,9 @@ class Observation:
     schema_version: int = OBSERVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int:
+            raise TypeError("observation schema_version must be an integer")
         if self.schema_version != OBSERVATION_SCHEMA_VERSION:
-            if type(self.schema_version) is not int:
-                raise TypeError("observation schema_version must be an integer")
             raise UnsupportedObservationSchema(self.schema_version)
         if type(self.observer_kind) is not str or self.observer_kind not in OBSERVER_KINDS:
             raise ValueError("observation has an unsupported observer kind")
