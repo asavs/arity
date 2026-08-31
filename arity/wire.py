@@ -426,6 +426,9 @@ class FallbackModelProvider:
     # the CLI harness is the last resort because it changes the harness axis.
     alternates: list = field(default_factory=list)
     rotations: int = 0
+    # Closed-authority roles may use the direct wire while forbidding this provider's
+    # intrinsic-tool harness fallback. Terrarium overrides this on a per-dispatch copy.
+    fallback_enabled: bool = True
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         import time
@@ -457,6 +460,12 @@ class FallbackModelProvider:
                     self.primary = alt
                     return alt_result
                 error = f"{error} | alternate {getattr(alt, 'account_key', '?')}: {alt_result.error}"
+
+        if not self.fallback_enabled:
+            return ModelFailed(
+                error="Intrinsic-tool fallback is disabled by the active role's closed tool authority.",
+                retryable=False,
+            )
 
         self.fallback_count += 1
         print(f"\033[1;33m[Seam Fallback #{self.fallback_count}]\033[0m Primary '{getattr(self.primary, 'model', 'wire')}' failed: {error}. Shifting to fallback harness...", file=sys.stderr)

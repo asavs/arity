@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import arity
 import pytest
 from arity.cli import main
-from arity.handlers import CLIModelProvider, JsonlRecordStore
+from arity.handlers import CLIModelProvider, JsonlRecordStore, OMPModelProvider
 from arity.ledger import Seat, SeatLedger
 from arity.race import resolve_candidates
 from arity.roles import (
@@ -671,6 +671,104 @@ def test_closed_authority_role_disables_known_cli_wire_fallback(tmp_path) -> Non
     assert denied.status == "halted"
     assert denied.fallbacks == 0
     assert primary.call.call_count == 1
+    fallback.call.assert_not_called()
+
+
+@pytest.mark.parametrize("provider_type", (CLIModelProvider, OMPModelProvider))
+@pytest.mark.parametrize("provider_source", ("factory", "custom"))
+def test_closed_authority_role_rejects_selected_known_intrinsic_provider(
+    tmp_path,
+    provider_type,
+    provider_source: str,
+) -> None:
+    seat = Seat(id="designer-seat", provider="test", model="design-model")
+    provider = provider_type(model="design-model")
+    provider.call = MagicMock(return_value=ModelCompleted(content="unsafe", usage={}))
+    factory = MagicMock(return_value=provider)
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=factory,
+        quiet=True,
+    )
+    custom = provider if provider_source == "custom" else None
+
+    with pytest.raises(PermissionError, match="closed tool authority.*intrinsic-tool harness"):
+        dispatcher.dispatch_single(
+            TaskRecord(brief="Specify the terminal lobby."),
+            CandidateSpec(
+                seat=seat,
+                role=DESIGNER_ROLE,
+                harness="wire",
+                skills=[],
+                custom_model_provider=custom,
+            ),
+            run_verification=False,
+        )
+
+    provider.call.assert_not_called()
+    if provider_source == "custom":
+        factory.assert_not_called()
+    else:
+        factory.assert_called_once_with(seat)
+
+
+def test_designer_fallback_policy_does_not_leak_into_a_developer_dispatch(tmp_path) -> None:
+    seat = Seat(id="shared-seat", provider="test", model="shared-model")
+    primary = MagicMock()
+    primary.call.return_value = ModelFailed(error="wire unavailable", retryable=True)
+    fallback = CLIModelProvider(harness="codex", model="shared-model")
+    fallback.call = MagicMock(return_value=ModelCompleted(content="developer fallback", usage={}))
+    shared_provider = FallbackModelProvider(primary=primary, fallback=fallback)
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: shared_provider,
+        quiet=True,
+    )
+
+    designer_result = dispatcher.dispatch_single(
+        TaskRecord(brief="Specify the terminal lobby."),
+        CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+    developer_result = dispatcher.dispatch_single(
+        TaskRecord(brief="Implement the terminal lobby."),
+        CandidateSpec(seat=seat, role=DEVELOPER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+
+    assert designer_result.status == "halted"
+    assert designer_result.fallbacks == 0
+    assert developer_result.output == "developer fallback"
+    assert developer_result.fallbacks == 1
+    assert shared_provider.fallback_enabled
+    fallback.call.assert_called_once()
+
+
+def test_disabled_wire_fallback_returns_a_canned_nonretryable_failure() -> None:
+    primary = MagicMock()
+    primary.call.return_value = ModelFailed(error="sensitive upstream detail", retryable=True)
+    fallback = MagicMock()
+    provider = FallbackModelProvider(
+        primary=primary,
+        fallback=fallback,
+        fallback_enabled=False,
+    )
+    stderr = io.StringIO()
+
+    with contextlib.redirect_stderr(stderr):
+        result = provider.call(CallModel(messages=[{"role": "user", "content": "design"}]))
+
+    assert isinstance(result, ModelFailed)
+    assert not result.retryable
+    assert "closed tool authority" in result.error
+    assert "sensitive upstream detail" not in result.error
+    assert provider.fallback_count == 0
+    assert stderr.getvalue() == ""
+    primary.call.assert_called_once()
     fallback.call.assert_not_called()
 
 

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Protocol, Union
 
@@ -541,7 +541,7 @@ class TerrariumDispatcher:
         )
 
         # 4. Setup Model Provider / Harness Axis (Direct Wire vs. CLI vs. OMP vs. Custom)
-        if spec.custom_model_provider:
+        if spec.custom_model_provider is not None:
             model_provider = spec.custom_model_provider
         elif isinstance(spec.harness, ModelProvider):
             model_provider = spec.harness
@@ -558,9 +558,32 @@ class TerrariumDispatcher:
             if hasattr(model_provider, "cwd") and not hasattr(model_provider, "primary"):  # a bare CLI, no wire
                 harness_name = f"cli:{getattr(model_provider, 'harness', 'omp')}"
 
-        # Any CLI harness in the chain (bare, or a wire's fallback) must act inside this sandbox.
-        # TODO(kernel): a CLI's own tools still bypass the role's denial set; sandboxing by cwd is
-        # containment, not enforcement. A leaf should run as a user that cannot see the repo.
+        # Known CLI harnesses expose intrinsic tools outside Arity's ToolRunner boundary. A role
+        # with an explicit allowlist therefore cannot safely invoke a bare CLI. Direct wire use is
+        # still valid: copy a known wire/fallback provider for this dispatch and disable only its
+        # intrinsic fallback. Unknown custom providers remain a trusted extension seam.
+        from .wire import FallbackModelProvider
+        intrinsic_provider_types = (CLIModelProvider, OMPModelProvider)
+        closed_tool_authority = bool(actual_role.allowed_tools)
+        if closed_tool_authority and isinstance(model_provider, intrinsic_provider_types):
+            intrinsic_name = getattr(model_provider, "harness", "omp")
+            raise PermissionError(
+                f"Role '{actual_role.name}' has closed tool authority and cannot use "
+                f"intrinsic-tool harness '{intrinsic_name}'"
+            )
+        if (
+            closed_tool_authority
+            and isinstance(model_provider, FallbackModelProvider)
+            and isinstance(model_provider.fallback, intrinsic_provider_types)
+        ):
+            model_provider = replace(
+                model_provider,
+                fallback_enabled=False,
+                alternates=list(model_provider.alternates),
+            )
+
+        # Open-authority roles may use CLI harnesses; confine Arity-known CLI providers to the
+        # candidate workspace. This cwd boundary does not constrain trusted custom providers.
         for cli in (model_provider, getattr(model_provider, "fallback", None)):
             if cli is not None and hasattr(cli, "cwd"):
                 cli.cwd = str(workspace)
