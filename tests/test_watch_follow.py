@@ -18,11 +18,8 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Mapping, cast
-from unittest.mock import patch
 
 import pytest
 
@@ -723,4 +720,110 @@ def test_follow_uses_only_injected_query_reader_and_presentation_capabilities(
     assert loader.calls == 1
     assert len(terminal.frames) == 1
     assert_no_raw_identity(terminal.frames[0])
+    assert_terminal_restored(terminal)
+
+
+@pytest.mark.parametrize("failure_stage", ["alt", "cursor", "raw"])
+def test_partial_terminal_setup_is_unwound_before_safe_one_shot_fallback(
+    failure_stage: str,
+) -> None:
+    snapshot = safe_model("started", read_at=100.0)
+    loader = SequenceLoader(snapshot)
+    terminal = FakeTerminal("q", fail_setup_after=failure_stage)
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, render_watch_snapshot(snapshot), "")
+    assert loader.calls == 1
+    assert terminal.frames == []
+    assert "read_key" not in terminal.actions
+    assert_no_raw_identity(stdout + stderr)
+    assert_terminal_restored(terminal)
+    assert terminal.actions[-1] == "leave_alt_screen"
+    cleanup = [
+        action
+        for action in terminal.actions
+        if action in {"disable_raw_mode", "show_cursor", "leave_alt_screen"}
+    ]
+    assert cleanup == {
+        "alt": ["leave_alt_screen"],
+        "cursor": ["show_cursor", "leave_alt_screen"],
+        "raw": ["disable_raw_mode", "show_cursor", "leave_alt_screen"],
+    }[failure_stage]
+
+
+@pytest.mark.parametrize("failure_kind", ["renderer", "draw"])
+def test_render_or_frame_write_failure_restores_terminal_without_traceback(
+    failure_kind: str,
+) -> None:
+    loader = SequenceLoader(safe_model("started"))
+    terminal = FakeTerminal(
+        "q",
+        fail_draw_at=(0 if failure_kind == "draw" else None),
+    )
+
+    def renderer(model: WatchViewModel) -> str:
+        del model
+        if failure_kind == "renderer":
+            raise ValueError(f"unsafe renderer detail {LEAK}")
+        return render_watch_snapshot(safe_model("started"))
+
+    code, stdout, stderr = run_injected(
+        watch_args(),
+        loader=loader,
+        terminal=terminal,
+        renderer=renderer,
+    )
+
+    assert code == 1
+    assert "Traceback" not in stdout + stderr
+    assert_no_raw_identity(stdout + stderr)
+    assert_terminal_restored(terminal)
+
+
+@pytest.mark.parametrize(
+    ("key", "expected_code"),
+    [
+        (EOF_INPUT, 0),
+        (INTERRUPT, 130),
+        ("q", 0),
+    ],
+)
+def test_eof_interrupt_and_normal_quit_restore_terminal(
+    key: object,
+    expected_code: int,
+) -> None:
+    loader = SequenceLoader(safe_model("started"))
+    terminal = FakeTerminal(key)
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (expected_code, "", "")
+    assert len(terminal.frames) == 1
+    assert_terminal_restored(terminal)
+
+
+def test_failure_before_first_good_snapshot_is_canned_and_manually_retryable() -> None:
+    loader = SequenceLoader(
+        RecordChanged(f"changed before first frame {LEAK}", path=Path(HOSTILE_ID)),
+        safe_model("started"),
+    )
+    terminal = FakeTerminal("r", "q")
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert len(terminal.frames) == 2
+    first = _SGR.sub("", terminal.frames[0])
+    assert "record_store_changed" in first
+    assert "last good snapshot" not in first.lower()
+    assert "Trial 1" not in first
+    assert "Trial 1" in _SGR.sub("", terminal.frames[1])
+    assert_no_raw_identity("".join(terminal.frames))
     assert_terminal_restored(terminal)
