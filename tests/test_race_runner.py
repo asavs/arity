@@ -5,6 +5,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from arity.archivist import ImpartialArchivist
 from arity.handlers import JsonlRecordStore
@@ -14,6 +15,7 @@ from arity.race import (
     OWN_TEST,
     RaceConfig,
     ScriptedProvider,
+    _record_store_for_run,
     attach_mocks,
     placeholder_seats,
     resolve_candidates,
@@ -44,6 +46,31 @@ class RecordingProvider:
     def call(self, effect: CallModel) -> ModelCompleted:
         self.seen.append(list(effect.messages))
         return ModelCompleted(content="Done. No files written.", tool_calls=[], usage={"prompt_tokens": 1, "completion_tokens": 1})
+
+
+class TestRecordStoreSelection(unittest.TestCase):
+    def test_live_runs_use_the_configured_default_store(self):
+        configured_store = object()
+        with patch("arity.race.default_record_store", return_value=configured_store) as resolve:
+            selected = _record_store_for_run(RaceConfig(), tmp_root=None)
+
+        self.assertIs(selected, configured_store)
+        resolve.assert_called_once_with()
+
+    def test_explicit_and_ephemeral_stores_do_not_consult_the_default(self):
+        explicit_store = object()
+        with TemporaryDirectory() as tmpdir, patch("arity.race.default_record_store") as resolve:
+            root = Path(tmpdir)
+            self.assertIs(
+                _record_store_for_run(RaceConfig(record_store=explicit_store), tmp_root=None),
+                explicit_store,
+            )
+            rooted = _record_store_for_run(RaceConfig(store_root=root / "explicit"), tmp_root=None)
+            ephemeral = _record_store_for_run(RaceConfig(), tmp_root=root / "ephemeral")
+
+        self.assertEqual(rooted.root, root / "explicit")
+        self.assertEqual(ephemeral.root, root / "ephemeral" / "records")
+        resolve.assert_not_called()
 
 
 class TestNormalizationAndSignature(unittest.TestCase):
