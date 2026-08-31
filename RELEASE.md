@@ -51,8 +51,8 @@ happened.
      installed `arity` command outside the source checkout.
 
 6. **A deliberate public-release security boundary**
-   - Arity is MIT licensed and checked on Python 3.10 and 3.14 across Linux and Windows. Release
-     builds validate both source distributions and installed wheels.
+   - Arity is MIT licensed. CI tests source on Python 3.10/Linux, validates distributions on Python
+     3.14/Linux, and exercises the installed wheel on Python 3.14/Windows.
    - No provider OAuth client identity or secret is bundled. Experimental native OAuth adapters
      require caller-supplied configuration, fail before opening a browser, callback server, or
      network request when it is absent, and retain the supplied configuration. Google, OpenAI, and
