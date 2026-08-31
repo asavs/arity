@@ -18,7 +18,7 @@ class Seat:
     """A model capacity slice: provider, model, harness, and quota state."""
     provider: str                      # "google", "openai", "xai", "anthropic", "nvidia"
     model: str                         # "gemini-3.6-flash", "gpt-5.6-sol", "grok-4.5", "claude-3-7-sonnet"
-    harness: str = "arity"             # "gorkbot" remains accepted as the legacy Arity harness ID
+    harness: str = "arity"
     account: Optional[str] = None      # Optional account email (e.g. for multi-account Google)
     endpoint: str = ""                 # Optional base URL / endpoint
     kind: str = "quota"                # "quota" (subscription window) | "metered_api" (pay-per-token)

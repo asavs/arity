@@ -1,19 +1,19 @@
-"""Tests for gorkbot 0.0.1 architecture."""
+"""Tests for the original Arity architecture."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.handlers import (
+from arity.handlers import (
     JsonlRecordStore,
     LocalToolRunner,
     MetricsObserver,
 )
-from gorkbot.runtime import Runtime
-from gorkbot.seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
-from gorkbot.transition import transition
-from gorkbot.types import (
+from arity.runtime import Runtime
+from arity.seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
+from arity.transition import transition
+from arity.types import (
     CallModel,
     EmitMessage,
     ExecuteTool,
@@ -40,10 +40,10 @@ class TestTransition(unittest.TestCase):
         self.state = State(session_id="test_001")
 
     def test_user_message_initiates_call_model(self):
-        new_state, effects = transition(self.state, UserMessage(text="Hello gorkbot"))
+        new_state, effects = transition(self.state, UserMessage(text="Hello Arity"))
         self.assertEqual(new_state.status, Status.WAITING_MODEL)
         self.assertEqual(len(new_state.messages), 1)
-        self.assertEqual(new_state.messages[0]["content"], "Hello gorkbot")
+        self.assertEqual(new_state.messages[0]["content"], "Hello Arity")
 
         # Must generate StoreRecord and CallModel effects
         has_store = any(isinstance(e, StoreRecord) for e in effects)

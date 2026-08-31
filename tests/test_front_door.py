@@ -1,12 +1,12 @@
-"""Tests for gorkbot run: seat picking, delivery, the secretary's question on a judge split."""
+"""Tests for arity run: seat picking, delivery, and the secretary's tie question."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.ledger import Seat
-from gorkbot.race import deliver, judges_split, pick_seats, run_front_door
+from arity.ledger import Seat
+from arity.race import deliver, judges_split, pick_seats, run_front_door
 
 
 class TestPickSeats(unittest.TestCase):
@@ -48,12 +48,12 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertTrue(delivery.receipt.startswith("arity 3/5 resolved"))
 
     def test_answer_only_delivery_writes_answer_md(self):
-        from gorkbot.race import RaceReport
-        from gorkbot.terrarium import TaskRecord, TerrariumCandidateResult, State
-        from gorkbot.archivist import ImpartialArchivist
-        from gorkbot.handlers import JsonlRecordStore
-        from gorkbot.roles import BUILDER_ROLE
-        from gorkbot.race import placeholder_seats, CandidateSpec
+        from arity.race import RaceReport
+        from arity.terrarium import TaskRecord, TerrariumCandidateResult, State
+        from arity.archivist import ImpartialArchivist
+        from arity.handlers import JsonlRecordStore
+        from arity.roles import BUILDER_ROLE
+        from arity.race import placeholder_seats, CandidateSpec
         with TemporaryDirectory() as d:
             ws = Path(d) / "empty"; ws.mkdir()
             spec = CandidateSpec(seat=placeholder_seats()[0], name="scout-a", role=BUILDER_ROLE)
@@ -68,8 +68,8 @@ class TestRunFrontDoor(unittest.TestCase):
             self.assertIn("no hidden tests", delivery.receipt)
 
     def test_review_always_cannot_override_unique_facts(self):
-        from gorkbot.evidence import ResolutionKind
-        from gorkbot.race import RaceConfig, run_race, ScriptedProvider
+        from arity.evidence import ResolutionKind
+        from arity.race import RaceConfig, run_race, ScriptedProvider
         # Two judges that disagree: one says A, the other says B.
         answers = iter(['{"order": ["A", "B", "C"], "ties": []}', '{"order": ["B", "A", "C"], "ties": []}'])
         cfg = RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol", "claude-3-7-sonnet"], review="always",

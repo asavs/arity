@@ -2,8 +2,8 @@
 
 The Stage-2 public API is intentionally narrow::
 
-    from gorkbot.watch_terminal import render_watch_snapshot
-    from gorkbot.watch_cli import load_watch_model, run_watch_command
+    from arity.watch_terminal import render_watch_snapshot
+    from arity.watch_cli import load_watch_model, run_watch_command
 
 ``render_watch_snapshot(model: WatchViewModel) -> str`` is a pure, canonical ASCII
 renderer.  The public source seam is::
@@ -61,30 +61,30 @@ from typing import Any, Callable, Mapping, cast
 
 import pytest
 
-import gorkbot.auth as auth
-import gorkbot.handlers as handlers
-import gorkbot.inspection as inspection_module
-import gorkbot.inspection_cli as inspection_cli
-import gorkbot.runtime as runtime
-import gorkbot.stores.sqlite as sqlite_store_module
-import gorkbot.tools as tools
-import gorkbot.watch_cli as watch_cli
-from gorkbot.cli import main as cli_main
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.inspection import InspectionIssue, TrialCatalog, TrialInspection
-from gorkbot.record_readers import (
+import arity.auth as auth
+import arity.handlers as handlers
+import arity.inspection as inspection_module
+import arity.inspection_cli as inspection_cli
+import arity.runtime as runtime
+import arity.stores.sqlite as sqlite_store_module
+import arity.tools as tools
+import arity.watch_cli as watch_cli
+from arity.cli import main as cli_main
+from arity.handlers import JsonlRecordStore
+from arity.inspection import InspectionIssue, TrialCatalog, TrialInspection
+from arity.record_readers import (
     RecordChanged,
     RecordCorruption,
     RecordNotFound,
     RecordReadError,
     StoreSpec,
 )
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.trial_events import TrialEvent, TrialReplay
-from gorkbot.types import StoreRecord
-from gorkbot.watch_cli import load_watch_model, run_watch_command
-from gorkbot.watch_terminal import render_watch_snapshot
-from gorkbot.watch_view_model import (
+from arity.stores.sqlite import SqliteRecordStore
+from arity.trial_events import TrialEvent, TrialReplay
+from arity.types import StoreRecord
+from arity.watch_cli import load_watch_model, run_watch_command
+from arity.watch_terminal import render_watch_snapshot
+from arity.watch_view_model import (
     BoundedCount,
     WatchAgent,
     WatchIssue,
@@ -1897,7 +1897,7 @@ def test_real_closed_stdout_pipe_exits_one_without_shutdown_traceback(
     environment["PYTHONPATH"] = str(repository)
     child = (
         "import sys; "
-        "from gorkbot.cli import main; "
+        "from arity.cli import main; "
         "sys.stdin.buffer.read(1); "
         "sys.argv=['arity','watch','--ascii','--no-motion']; "
         "raise SystemExit(main())"

@@ -3,8 +3,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.types import StoreRecord
+from arity.handlers import JsonlRecordStore
+from arity.types import StoreRecord
 
 
 def test_parallel_appends_remain_complete_json_lines(tmp_path: Path) -> None:

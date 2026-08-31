@@ -1,7 +1,4 @@
-"""Arity — a small, composable trial kernel for autonomous agent harnesses.
-
-The ``gorkbot`` import namespace is retained for compatibility.
-"""
+"""Arity — a small, composable trial kernel for autonomous agent harnesses."""
 from ._version import __version__
 from .handlers import (
     ConsoleTransport,
@@ -85,7 +82,7 @@ from .evidence import (
 )
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
-from .orchestrator import ArityOrchestrator, GorkbotOrchestrator, OrchestrationResponse
+from .orchestrator import ArityOrchestrator, OrchestrationResponse
 from .runtime import Runtime
 from .record_readers import (
     JsonlRecordReader,
@@ -273,6 +270,5 @@ __all__ = [
     "WebhookTransport",
     # Orchestrator
     "ArityOrchestrator",
-    "GorkbotOrchestrator",
     "OrchestrationResponse",
 ]

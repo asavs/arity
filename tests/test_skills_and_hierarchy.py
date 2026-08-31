@@ -1,7 +1,7 @@
-"""Unit tests for gorkbot Skills engine, Secretary, Engineer, and Python Developer hierarchy."""
+"""Unit tests for Arity skills and the staff-role hierarchy."""
 import unittest
 
-from gorkbot.roles import (
+from arity.roles import (
     ENGINEER_ROLE,
     PYTHON_DEVELOPER_ROLE,
     SCOUT_ROLE,
@@ -9,9 +9,9 @@ from gorkbot.roles import (
     TESTER_ROLE,
     RoleRegistry,
 )
-from gorkbot.scorecard import Scorecard
-from gorkbot.skills import FIRECRAWL_SKILL, PYTHON_DEVELOPER_SKILL, Skill, SkillRegistry
-from gorkbot.tiers import BriefCompiler
+from arity.scorecard import Scorecard
+from arity.skills import FIRECRAWL_SKILL, PYTHON_DEVELOPER_SKILL, Skill, SkillRegistry
+from arity.tiers import BriefCompiler
 
 
 class TestSkillsAndHierarchy(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestSkillsAndHierarchy(unittest.TestCase):
     def test_scorecard_skill_scoped_ratings(self):
         from tempfile import TemporaryDirectory
         from pathlib import Path
-        from gorkbot.handlers import JsonlRecordStore
+        from arity.handlers import JsonlRecordStore
 
         with TemporaryDirectory() as tmpdir:
             store = JsonlRecordStore(root=Path(tmpdir) / "records")

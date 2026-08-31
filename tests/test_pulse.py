@@ -1,10 +1,10 @@
-"""Tests for gorkbot pulse engine, economic keepalives, and quota harvesting."""
+"""Tests for the Arity pulse engine, economic keepalives, and quota harvesting."""
 from __future__ import annotations
 
 import unittest
 
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.pulse import CacheEconomics, CadenceModel, PulseEngine
+from arity.ledger import Seat, SeatLedger
+from arity.pulse import CacheEconomics, CadenceModel, PulseEngine
 
 
 class TestPulseEngine(unittest.TestCase):

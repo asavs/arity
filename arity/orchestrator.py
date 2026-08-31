@@ -223,7 +223,3 @@ class ArityOrchestrator:
         actions.extend(quota_actions)
 
         return actions
-
-
-# Compatibility: the pre-Arity public class name remains importable.
-GorkbotOrchestrator = ArityOrchestrator

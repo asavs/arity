@@ -109,7 +109,7 @@ def normalize_tool_runner(obj: Any) -> str:
 def normalize_harness(obj: Any) -> str:
     """Canonical scorecard name for a harness axis value."""
     raw = _label(obj).lower()
-    return {"codex": "cli", "claude": "cli", "gorkbot": "arity"}.get(raw, raw)
+    return {"codex": "cli", "claude": "cli"}.get(raw, raw)
 
 
 def skill_names(skills: list[Any]) -> list[str]:

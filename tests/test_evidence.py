@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from gorkbot.evidence import (
+from arity.evidence import (
     ArtifactEvidence,
     CandidateEvidence,
     Evaluation,

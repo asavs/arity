@@ -1,11 +1,11 @@
-"""Tests for gorkbot seat ledger and casting composer."""
+"""Tests for the Arity seat ledger and casting composer."""
 from __future__ import annotations
 
 import unittest
 
-from gorkbot.composer import CastingComposer
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.roles import BUILDER_ROLE, VOICE_ROLE
+from arity.composer import CastingComposer
+from arity.ledger import Seat, SeatLedger
+from arity.roles import BUILDER_ROLE, VOICE_ROLE
 
 
 class TestSeatLedgerAndComposer(unittest.TestCase):

@@ -9,16 +9,16 @@ from typing import Any, Iterator, Mapping
 
 import pytest
 
-from gorkbot.cli import main as cli_main
-from gorkbot.evidence import (
+from arity.cli import main as cli_main
+from arity.evidence import (
     ArtifactEvidence,
     CandidateEvidence,
     Evaluation,
     EvidenceBundle,
     resolve_bundle,
 )
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.inspection import (
+from arity.handlers import JsonlRecordStore
+from arity.inspection import (
     InspectionIssue,
     TrialCatalog,
     TrialInspection,
@@ -27,10 +27,10 @@ from gorkbot.inspection import (
     inspect_trial,
     inspect_trials,
 )
-from gorkbot.record_readers import JsonlRecordReader, SqliteRecordReader
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.trial_events import TrialEvent, TrialReplay
-from gorkbot.types import StoreRecord
+from arity.record_readers import JsonlRecordReader, SqliteRecordReader
+from arity.stores.sqlite import SqliteRecordStore
+from arity.trial_events import TrialEvent, TrialReplay
+from arity.types import StoreRecord
 
 
 INTEGRITY_VALUES = {"valid", "unsupported", "corrupt"}
@@ -244,7 +244,7 @@ def started_event(trial_id: str, timestamp: float) -> TrialEvent:
 
 
 def test_inspection_module_exports_the_public_api() -> None:
-    import gorkbot.inspection as inspection
+    import arity.inspection as inspection
 
     assert inspection.TrialNotFound is TrialNotFound
     assert inspection.InspectionIssue is InspectionIssue
@@ -511,7 +511,7 @@ def test_module_entry_point_propagates_semantic_exit_code(
     )
 
     with pytest.raises(SystemExit) as stopped:
-        runpy.run_module("gorkbot", run_name="__main__")
+        runpy.run_module("arity", run_name="__main__")
     output = capsys.readouterr()
     assert stopped.value.code == 3
     assert json.loads(output.out)["error"]["code"] == "trial_not_found"

@@ -9,8 +9,8 @@ Every seam from axiom 12 is a class you can swap:
     Transport — how a channel reaches a human            (ConsoleTransport prints)
 
 No fakes. Every kernel turn is a real call to whatever seat the caster picked.
-The filename and ``.gorkbot`` state directory are compatibility surfaces. Run
-``python gorkbot.py demo`` to play S1, S3, S7, S36, S39 against available seats.
+The ``.gorkbot`` state directory remains a compatibility surface for now. Run
+``python arity.py demo`` to play S1, S3, S7, S36, S39 against available seats.
 """
 from __future__ import annotations
 

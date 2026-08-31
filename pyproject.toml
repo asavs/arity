@@ -21,11 +21,10 @@ classifiers = [
 dependencies = []
 
 [tool.setuptools.dynamic]
-version = { attr = "gorkbot._version.__version__" }
+version = { attr = "arity._version.__version__" }
 
 [project.scripts]
-arity = "gorkbot.cli:main"
-gorkbot = "gorkbot.cli:main"
+arity = "arity.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/asavs/arity"
@@ -36,10 +35,10 @@ Security = "https://github.com/asavs/arity/security/policy"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["gorkbot*"]
+include = ["arity*"]
 
 [tool.setuptools.package-data]
-gorkbot = [
+arity = [
     "definitions/**/*.md",
     "definitions/**/*.py",
 ]

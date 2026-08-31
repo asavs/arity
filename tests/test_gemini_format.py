@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from gorkbot.gemini_format import parse_parts, to_contents, tool_declarations, usage_from
+from arity.gemini_format import parse_parts, to_contents, tool_declarations, usage_from
 
 
 class TestGeminiFormat(unittest.TestCase):

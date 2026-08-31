@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from gorkbot.spirals import ProceduralSpiralRenderer, SpiralSpinners
+from arity.spirals import ProceduralSpiralRenderer, SpiralSpinners
 
 
 class TestSpirals(unittest.TestCase):

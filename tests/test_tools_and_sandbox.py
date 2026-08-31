@@ -1,18 +1,18 @@
-"""Tests for gorkbot sandbox tool runner, AST validation, and MCP adapter."""
+"""Tests for Arity sandbox tool runner, AST validation, and MCP adapter."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.roles import BUILDER_ROLE, REVIEWER_ROLE
-from gorkbot.tools import (
+from arity.roles import BUILDER_ROLE, REVIEWER_ROLE
+from arity.tools import (
     McpToolAdapter,
     PathTraversalError,
     SandboxToolRunner,
     resolve_sandbox_path,
 )
-from gorkbot.types import ExecuteTool
+from arity.types import ExecuteTool
 
 
 class TestSandboxToolRunner(unittest.TestCase):

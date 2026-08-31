@@ -9,15 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from gorkbot.evidence import ArtifactEvidence, Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import Seat
-from gorkbot.race import RaceConfig, deliver, human_pick, record_evaluation, run_race
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.terrarium import CandidateSpec, ContextEnvelope
-from gorkbot.trial_events import TrialJournal, replay_trial
-from gorkbot.types import CallModel, ModelCompleted
+from arity.evidence import ArtifactEvidence, Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
+from arity.handlers import JsonlRecordStore
+from arity.ledger import Seat
+from arity.race import RaceConfig, deliver, human_pick, record_evaluation, run_race
+from arity.roles import BUILDER_ROLE
+from arity.stores.sqlite import SqliteRecordStore
+from arity.terrarium import CandidateSpec, ContextEnvelope
+from arity.trial_events import TrialJournal, replay_trial
+from arity.types import CallModel, ModelCompleted
 
 
 @dataclass(frozen=True)

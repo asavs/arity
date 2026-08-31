@@ -9,13 +9,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gorkbot import __version__
-from gorkbot.cli import main
-from gorkbot.orchestrator import ArityOrchestrator, GorkbotOrchestrator
-from gorkbot.race import run_front_door
-from gorkbot.roles import RoleRegistry
-from gorkbot.spirals import render_brand_mark
-from gorkbot.tools import positive_int, resolve_arity
+from arity import __version__
+from arity.cli import main
+from arity.orchestrator import ArityOrchestrator
+from arity.race import run_front_door
+from arity.roles import RoleRegistry
+from arity.spirals import render_brand_mark
+from arity.tools import positive_int, resolve_arity
 
 
 class TestArityResolution(unittest.TestCase):
@@ -27,24 +27,24 @@ class TestArityResolution(unittest.TestCase):
                 positive_int(invalid, name="arity")
 
     def test_precedence_is_explicit_then_arity_then_legacy_then_default(self):
-        with patch("gorkbot.tools.get_config_value") as configured:
+        with patch("arity.tools.get_config_value") as configured:
             self.assertEqual(resolve_arity(7, default=1), 7)
             configured.assert_not_called()
 
         values = {"ARITY": "5", "GORKBOT_CONCURRENCY": "2"}
-        with patch("gorkbot.tools.get_config_value", side_effect=values.get):
+        with patch("arity.tools.get_config_value", side_effect=values.get):
             self.assertEqual(resolve_arity(default=1), 5)
 
         values = {"ARITY": None, "GORKBOT_CONCURRENCY": "2"}
-        with patch("gorkbot.tools.get_config_value", side_effect=values.get):
+        with patch("arity.tools.get_config_value", side_effect=values.get):
             self.assertEqual(resolve_arity(default=1), 2)
 
-        with patch("gorkbot.tools.get_config_value", return_value=None):
+        with patch("arity.tools.get_config_value", return_value=None):
             self.assertEqual(resolve_arity(default=3), 3)
 
     def test_invalid_current_setting_does_not_fall_through_to_legacy(self):
         values = {"ARITY": "many", "GORKBOT_CONCURRENCY": "2"}
-        with patch("gorkbot.tools.get_config_value", side_effect=values.get):
+        with patch("arity.tools.get_config_value", side_effect=values.get):
             with self.assertRaisesRegex(ValueError, "ARITY must be a positive integer"):
                 resolve_arity(default=1)
 
@@ -56,8 +56,8 @@ class TestArityResolution(unittest.TestCase):
         delivery = SimpleNamespace(asked_human=False, receipt="done")
         with (
             patch.dict(os.environ, {"ARITY": "2", "GORKBOT_CONCURRENCY": "1"}, clear=False),
-            patch("gorkbot.race.run_race", return_value=report) as run_race,
-            patch("gorkbot.race.deliver", return_value=delivery),
+            patch("arity.race.run_race", return_value=report) as run_race,
+            patch("arity.race.deliver", return_value=delivery),
         ):
             run_front_door("brief", mock=True, interactive=False)
         config = run_race.call_args.args[0]
@@ -74,8 +74,8 @@ class TestArityResolution(unittest.TestCase):
         )
         delivery = SimpleNamespace(asked_human=False, receipt="done")
         with (
-            patch("gorkbot.race.run_race", return_value=report) as run_race,
-            patch("gorkbot.race.deliver", return_value=delivery),
+            patch("arity.race.run_race", return_value=report) as run_race,
+            patch("arity.race.deliver", return_value=delivery),
         ):
             run_front_door("brief", candidates=5, mock=True, interactive=False)
         config = run_race.call_args.args[0]
@@ -88,9 +88,6 @@ class TestArityResolution(unittest.TestCase):
 
 
 class TestArityBranding(unittest.TestCase):
-    def test_current_and_compatibility_orchestrator_names_share_one_class(self):
-        self.assertIs(ArityOrchestrator, GorkbotOrchestrator)
-
     def test_role_listing_deduplicates_aliases_without_hashing_roles(self):
         roles = RoleRegistry().list_roles()
         self.assertTrue(roles)
@@ -108,7 +105,7 @@ class TestArityBranding(unittest.TestCase):
                 main()
         self.assertEqual(stopped.exception.code, 0)
         self.assertIn(f"Arity {__version__}", output.getvalue())
-        self.assertIn("Python API: import gorkbot", output.getvalue())
+        self.assertIn("Python API: import arity", output.getvalue())
 
         run_help = io.StringIO()
         with patch.object(sys, "argv", ["arity", "run", "--help"]), contextlib.redirect_stdout(run_help):

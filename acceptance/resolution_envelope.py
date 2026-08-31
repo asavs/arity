@@ -1,7 +1,7 @@
 """Dependency-free installed-wheel acceptance for Arity's A/B resolution envelope.
 
 Run this file with the Python interpreter from a fresh environment containing the
-built wheel. It intentionally refuses to pass when ``gorkbot`` resolves to a source
+built wheel. It intentionally refuses to pass when ``arity`` resolves to a source
 checkout instead of that environment's site-packages.
 """
 from __future__ import annotations
@@ -16,16 +16,16 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
 
-import gorkbot
-from gorkbot import StoreSpec, inspect_trial, inspect_trials, open_record_reader
-from gorkbot.evidence import Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
-from gorkbot.ledger import Seat
-from gorkbot.race import RaceConfig, deliver, record_evaluation, run_race
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.terrarium import CandidateSpec, ContextEnvelope
-from gorkbot.trial_events import replay_trial
-from gorkbot.types import CallModel, ModelCompleted
+import arity
+from arity import StoreSpec, inspect_trial, inspect_trials, open_record_reader
+from arity.evidence import Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
+from arity.ledger import Seat
+from arity.race import RaceConfig, deliver, record_evaluation, run_race
+from arity.roles import BUILDER_ROLE
+from arity.stores.sqlite import SqliteRecordStore
+from arity.terrarium import CandidateSpec, ContextEnvelope
+from arity.trial_events import replay_trial
+from arity.types import CallModel, ModelCompleted
 
 
 @dataclass(frozen=True)
@@ -135,12 +135,12 @@ def _inside(path: Path, root: Path) -> bool:
 
 
 def main() -> None:
-    package_path = Path(gorkbot.__file__).resolve()
+    package_path = Path(arity.__file__).resolve()
     environment = Path(sys.prefix).resolve()
     assert package_path.is_relative_to(environment), (
         f"acceptance imported source checkout instead of installed wheel: {package_path}"
     )
-    assert version("arity") == gorkbot.__version__
+    assert version("arity") == arity.__version__
 
     with tempfile.TemporaryDirectory(prefix="arity_resolution_acceptance_") as raw_root:
         root = Path(raw_root).resolve()
@@ -318,7 +318,7 @@ def main() -> None:
                 store.close()
             os.chdir(previous_cwd)
 
-    print(f"PASS arity {gorkbot.__version__} installed at {package_path}")
+    print(f"PASS arity {arity.__version__} installed at {package_path}")
 
 
 if __name__ == "__main__":

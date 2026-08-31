@@ -1,4 +1,4 @@
-"""Tests for the Multi-Dimensional A/B/C Matrix, CandidateSpec, and the gorkbot race runner."""
+"""Tests for the Multi-Dimensional A/B/C Matrix, CandidateSpec, and Arity races."""
 from __future__ import annotations
 
 import json
@@ -8,21 +8,21 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.archivist import ArchivistEntry, ImpartialArchivist
-from gorkbot.handlers import JsonlRecordStore, LocalToolRunner
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE, REVIEWER_ROLE
-from gorkbot.scorecard import Scorecard, ScorecardRecord
-from gorkbot.skills import FIRECRAWL_SKILL, PYTEST_TDD_SKILL, Skill
-from gorkbot.terrarium import (
+from arity.archivist import ArchivistEntry, ImpartialArchivist
+from arity.handlers import JsonlRecordStore, LocalToolRunner
+from arity.ledger import Seat, SeatLedger
+from arity.roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE, REVIEWER_ROLE
+from arity.scorecard import Scorecard, ScorecardRecord
+from arity.skills import FIRECRAWL_SKILL, PYTEST_TDD_SKILL, Skill
+from arity.terrarium import (
     CandidateSpec,
     TaskRecord,
     TerrariumCandidateResult,
     TerrariumDispatcher,
     run_sandbox_verification,
 )
-from gorkbot.tools import SandboxToolRunner, create_mcp_tool_runner
-from gorkbot.types import CallModel, ModelCompleted
+from arity.tools import SandboxToolRunner, create_mcp_tool_runner
+from arity.types import CallModel, ModelCompleted
 
 
 class TestCandidateSpecAndSignatures(unittest.TestCase):

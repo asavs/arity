@@ -254,7 +254,7 @@ def show_status():
         status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
         acc_str = f" ({s.account.split('@')[0]})" if s.account else ""
         prov_str = f"{s.provider}{acc_str}"
-        harness_label = "arity" if s.harness == "gorkbot" else s.harness
+        harness_label = s.harness
         print(f"  • {prov_str:25} | {s.model:24} | harness: {harness_label:8} | {status_str} | ${s.base_price_per_m:.4f}/M")
     print("\n\033[1;33m[2. Empirical Scorecard Standings (Axiom 9)]\033[0m")
     standings = getattr(orchestrator.scorecard, "_standings", {})
@@ -524,10 +524,7 @@ def main() -> int:
             render_brand_mark(width=23, height=9, seeds=55)
             + f"\n\nArity {__version__}: a small, provider-agnostic trial kernel for agent harnesses."
         ),
-        epilog=(
-            "Python API: import gorkbot (there is no arity import package). "
-            "The gorkbot command remains available as a compatibility alias."
-        ),
+        epilog="Python API: import arity.",
     )
     parser.add_argument("--version", action="version", version=f"Arity {__version__}")
     subparsers = parser.add_subparsers(dest="command")
