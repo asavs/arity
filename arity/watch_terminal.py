@@ -119,6 +119,18 @@ def _selected_agent_lines(trial: WatchTrial) -> list[str]:
     return lines
 
 
+def _selected_observation_lines(trial: WatchTrial) -> list[str]:
+    detail = trial.detail
+    if detail is None:
+        return []
+    return [
+        "  observations "
+        f"mechanical {_count(detail.mechanical_observations)} | "
+        f"model {_count(detail.model_observations)} | "
+        f"human {_count(detail.human_observations)}"
+    ]
+
+
 def _validate_frame(frame: str) -> None:
     if not frame.endswith("\n") or frame.endswith("\n\n"):
         raise RuntimeError("watch frame must end with one newline")
@@ -287,6 +299,7 @@ def render_watch_follow_frame(
             lines.extend(_selected_lines(selected))
             if expanded:
                 lines.extend(_selected_agent_lines(selected))
+                lines.extend(_selected_observation_lines(selected))
 
     if help_visible:
         lines.extend(
