@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from ._version import USER_AGENT
 from .handlers import CLIModelProvider, GeminiModelProvider, OpenAIModelProvider
 from .seams import ModelProvider
 from .types import CallModel, ModelCompleted, ModelFailed
@@ -199,7 +200,7 @@ class CodexWireProvider:
             "OpenAI-Beta": "responses=true",
             "originator": "codex",
             "version": "0.144.1",
-            "User-Agent": "arity/0.3.0",
+            "User-Agent": USER_AGENT,
             "accept": "text/event-stream",
         }
 
@@ -357,7 +358,7 @@ class GrokWireProvider:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
-            "User-Agent": "arity/0.3.0",
+            "User-Agent": USER_AGENT,
         }
 
         payload: dict[str, Any] = {

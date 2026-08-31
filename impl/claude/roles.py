@@ -5,7 +5,7 @@ in a model. Aptitude picks the model; denial is the role. Channel permission is 
 kind, which is what lets a record land somewhere its sender may not chat.
 """
 
-HOME_PATHS = ("C:/Users/example", "/Users/example", "/home/asas")
+HOME_PATHS = ("C:/Users/example", "/Users/example", "/home/example")
 ASA_NAMES = ("Asa", "Schaeffer", "asa.schaeffer", "biograph")
 
 class Denied(Exception):
