@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import arity
+from arity import StoreSpec, inspect_trial, inspect_trials, open_record_reader
 from arity.evidence import Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
 from arity.ledger import Seat
 from arity.race import RaceConfig, deliver, record_evaluation, run_race
@@ -144,7 +146,7 @@ def main() -> None:
         root = Path(raw_root).resolve()
         cwd = root / "cwd"
         workspaces = root / "workspaces"
-        database = root / "records.sqlite"
+        database = cwd / ".arity" / "records.db"
         delivery_root = root / "delivery"
         evidence_path = root / "evidence.json"
         cwd.mkdir()
@@ -263,6 +265,54 @@ def main() -> None:
                 assert reopened_projection.delivery["candidate_id"] == treatment.candidate_id
             finally:
                 reopened.close()
+
+            before_inspection = {
+                path.relative_to(cwd).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (cwd / ".arity").rglob("*")
+                if path.is_file()
+            }
+            with open_record_reader(StoreSpec("sqlite", database)) as reader:
+                catalog = inspect_trials(reader)
+                inspected = inspect_trial(reader, report.task.id)
+            assert [summary.trial_id for summary in catalog.summaries] == [report.task.id]
+            assert inspected.status == "delivered"
+            assert inspected.replay is not None
+            assert inspected.replay.latest_resolution.resolution_id == canonical_resolution_id
+
+            executable = Path(sys.executable).with_name(
+                "arity.exe" if sys.platform == "win32" else "arity"
+            )
+            environment_variables = os.environ.copy()
+            environment_variables["ARITY_STORE"] = "sqlite"
+            for arguments in (
+                ("trials", "--json"),
+                ("trial", "show", report.task.id, "--json"),
+                ("trial", "replay", report.task.id, "--json"),
+            ):
+                completed = subprocess.run(
+                    [str(executable), *arguments],
+                    cwd=cwd,
+                    env=environment_variables,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                assert completed.returncode == 0, completed.stderr
+                document = json.loads(completed.stdout)
+                assert document["api_version"] == 1
+                assert document["result"] == "ok"
+                if arguments[:2] == ("trial", "show"):
+                    assert '"content_base64"' not in completed.stdout
+                    assert '"output"' not in completed.stdout
+                if arguments[:2] == ("trial", "replay"):
+                    assert '"content_base64"' in completed.stdout
+
+            after_inspection = {
+                path.relative_to(cwd).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (cwd / ".arity").rglob("*")
+                if path.is_file()
+            }
+            assert after_inspection == before_inspection
         finally:
             if store is not None:
                 store.close()

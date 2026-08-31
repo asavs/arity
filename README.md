@@ -69,6 +69,18 @@ arity run --mock --arity 3 --task lru_cache
 
 `--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the compatibility fallback `ARITY_CONCURRENCY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
 
+### Inspect persisted trials
+
+```bash
+arity trials
+arity trial show <trial-id>
+arity trial replay <trial-id> --json
+```
+
+These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view. Add `--json` to any inspection command for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
+
+Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `ARITY_STORE` compatibility fallback and `.arity/` paths.
+
 ### Python API (`arity` namespace)
 ```python
 from arity import Runtime, LocalToolRunner, OpenAIModelProvider
@@ -83,6 +95,20 @@ runtime = Runtime(
 output, state = runtime.chat("Create a hello.txt file with 'Hello from Arity!'")
 print(output)
 ```
+
+The same read-only projection is the API intended for TUIs, GUIs, and other observers:
+
+```python
+from arity import inspect_trial, inspect_trials, open_record_reader
+
+with open_record_reader() as reader:
+    catalog = inspect_trials(reader)
+    selected = inspect_trial(reader, catalog.summaries[0].trial_id)
+
+print(selected.status, selected.to_dict()["projection"])
+```
+
+`TrialInspection.events` retains the complete physical journal, while `TrialInspection.replay` stops at the last prefix this installed version can interpret safely.
 
 ### Run Tests
 ```bash

@@ -17,6 +17,12 @@ Open items, roughly in the order they matter. No remote yet, so this file is the
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
 - [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
 
+## Observability
+- [x] Read-only `arity trials`, `arity trial show`, and `arity trial replay` commands share a versioned
+      Python projection, strict JSONL/SQLite readers, semantic exit codes, and forward-schema boundaries.
+- [ ] Build the first agent-graph TUI as a pure consumer of the inspection API. Keep execution controls out
+      of the first pass so the observer contract can settle before it becomes a control plane.
+
 ## Resolve (what happens after facts tie)
 - [ ] Refine the choices when models cannot settle on one implementation: present Asa the judges' cherry-picks as
       concrete diffs to apply to the winner, offer conference as the merge path, and make "keep both" a valid
