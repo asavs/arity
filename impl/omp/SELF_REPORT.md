@@ -2,7 +2,7 @@
 
 Command: `omp -p --resume "REDACTED-SESSION-FILE.jsonl" --model "google-antigravity/gemini-3.7-flash-tiered:high" --cwd "C:\Users\example\Projects\arity\impl\omp" "<REPORT_PROMPT>"`
 
-I was trying to deliver a zero-dependency, standard-library Python 3.13 implementation of the gorkbot continuity core under 1,500 lines, ensuring every model turn made a real HTTP request against live seats, with no mocks, no key leaks, and honest two-account accounting across all five stories (S1, S3, S36, S7, S39).
+I was trying to deliver a zero-dependency, standard-library Python 3.13 implementation of the Arity continuity core under 1,500 lines, ensuring every model turn made a real HTTP request against live seats, with no mocks, no key leaks, and honest two-account accounting across all five stories (S1, S3, S36, S7, S39).
 
 I built 14 modules (1,057 lines total) strictly partitioned along the nine components from the wiki: `store` (path-locked JSON lines), `cadence` (median gap prediction and empirical return curves), `scorecard` (counters and standing multipliers), `ledger` (axiom-7 cache economics and secret containment), `roles` (denial-first access and path scoping), `tiers` (leak-scanning brief compiler), `harness` (8-round tool execution loop with quota error handling), `kernel` (immutable identity tuples and lifecycle), `archivist` (artifact/tool-log claim verification), `redphone` (channel logs and bounded handoffs), `cast` (per-prompt routing and warm-cache retention), and `pulse` (keepalive ping math).
 

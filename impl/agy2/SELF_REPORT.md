@@ -2,7 +2,7 @@
 
 Command: `agy --conversation REDACTED-CONVERSATION-ID --model gemini-3.7-flash --effort high --output-format json --print-timeout 5m --print "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\agy2)
 
-I was trying to build the v0 multi-kernel gorkbot core in pure Python 3.13 standard library under 1,500 lines, implementing the five spine methods (`post`, `cast`, `spawn`, `die`, `assemble`) across real OpenAI-compatible seats with denial-enforcing roles and impartial archivist auditing.
+I was trying to build the v0 multi-kernel Arity core in pure Python 3.13 standard library under 1,500 lines, implementing the five spine methods (`post`, `cast`, `spawn`, `die`, `assemble`) across real OpenAI-compatible seats with denial-enforcing roles and impartial archivist auditing.
 
 I built a 13-module architecture separated strictly along the wiki seams: `roles` defines denial sets, `tiers` compiles memory while refusing on leaks, `ledger` tracks quota clocks and presence, `cadence` calculates Axiom-7 prompt cache penalties, `cast` routes based on warm cache gain vs. dies-soonest seats, `kernel` maintains an identity tuple and writes a tool-free self-report before death, `archivist` cross-references claims against tool logs and penalizes scorecard standing, and `pulse` executes the "hi luv u" keepalive economics.
 

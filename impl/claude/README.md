@@ -1,4 +1,4 @@
-# gorkbot v0
+# Arity v0
 
 One voice, a staff, and a door to each — small and real. Python 3.13, stdlib only, 1,497 lines
 across 11 modules. Nothing is mocked: every turn is a POST to a provider you have a key for, and

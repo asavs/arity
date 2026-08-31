@@ -2,7 +2,7 @@
 
 Command: `codex exec resume --last --skip-git-repo-check "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\codex; session id REDACTED-SESSION-ID, model gpt-5.6-sol)
 
-I was implementing a standard-library-only gorkbot v0 with real OpenAI-compatible model calls and the required S1/S3/S36/S7/S39 lifecycle stories. I built 10 small modules—storage/memory, roles/red phone, ledger/casting, harness/runtime, and demo—so the seams can be cherry-picked independently; the final demo used Gemini and NVIDIA NIM, made 11 model calls, consumed 6,683 reported tokens, and wrote `workspace/brokie/schema.sql`.
+I was implementing a standard-library-only Arity v0 with real OpenAI-compatible model calls and the required S1/S3/S36/S7/S39 lifecycle stories. I built 10 small modules—storage/memory, roles/red phone, ledger/casting, harness/runtime, and demo—so the seams can be cherry-picked independently; the final demo used Gemini and NVIDIA NIM, made 11 model calls, consumed 6,683 reported tokens, and wrote `workspace/brokie/schema.sql`.
 
 Sandboxed networking initially failed, so I reran with approved network access. I could not provide OS-user isolation, a separate credential-proxy process, real quota/presence probes, or a separately cast model archivist; those remain explicitly documented limitations. The archivist is deterministic, checks file claims only against successful tool logs, and does not inspect diffs or tests. NIM cache behavior is treated as unverified/zero-window, and provider clocks are seeded estimates.
 

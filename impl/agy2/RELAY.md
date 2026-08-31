@@ -1,6 +1,6 @@
 # RELAY.md — agy2 rematch log
 
-Relay for a rematch of the gorkbot A/B/C implementation brief against agy (Antigravity CLI,
+Relay for a rematch of the Arity A/B/C implementation brief against agy (Antigravity CLI,
 gemini-3.7-flash, effort high). This relay only transcribed and executed; it never wrote or
 fixed implementation code.
 
