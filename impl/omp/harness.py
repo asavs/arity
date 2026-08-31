@@ -105,7 +105,7 @@ class ChatHarness:
             seat.endpoint.rstrip("/") + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                     "User-Agent": "gorkbot-v0/python-urllib"},
+                     "User-Agent": "arity-v0/python-urllib"},
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

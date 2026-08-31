@@ -1,4 +1,4 @@
-"""Focused contracts for Arity branding, arity resolution, and compatibility."""
+"""Focused contracts for Arity branding and arity resolution."""
 from __future__ import annotations
 
 import contextlib
@@ -26,25 +26,19 @@ class TestArityResolution(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "positive integer"):
                 positive_int(invalid, name="arity")
 
-    def test_precedence_is_explicit_then_arity_then_legacy_then_default(self):
+    def test_precedence_is_explicit_then_arity_then_default(self):
         with patch("arity.tools.get_config_value") as configured:
             self.assertEqual(resolve_arity(7, default=1), 7)
             configured.assert_not_called()
 
-        values = {"ARITY": "5", "GORKBOT_CONCURRENCY": "2"}
-        with patch("arity.tools.get_config_value", side_effect=values.get):
+        with patch("arity.tools.get_config_value", return_value="5"):
             self.assertEqual(resolve_arity(default=1), 5)
-
-        values = {"ARITY": None, "GORKBOT_CONCURRENCY": "2"}
-        with patch("arity.tools.get_config_value", side_effect=values.get):
-            self.assertEqual(resolve_arity(default=1), 2)
 
         with patch("arity.tools.get_config_value", return_value=None):
             self.assertEqual(resolve_arity(default=3), 3)
 
-    def test_invalid_current_setting_does_not_fall_through_to_legacy(self):
-        values = {"ARITY": "many", "GORKBOT_CONCURRENCY": "2"}
-        with patch("arity.tools.get_config_value", side_effect=values.get):
+    def test_invalid_current_setting_is_rejected(self):
+        with patch("arity.tools.get_config_value", return_value="many"):
             with self.assertRaisesRegex(ValueError, "ARITY must be a positive integer"):
                 resolve_arity(default=1)
 
@@ -55,7 +49,7 @@ class TestArityResolution(unittest.TestCase):
         )
         delivery = SimpleNamespace(asked_human=False, receipt="done")
         with (
-            patch.dict(os.environ, {"ARITY": "2", "GORKBOT_CONCURRENCY": "1"}, clear=False),
+            patch.dict(os.environ, {"ARITY": "2"}, clear=False),
             patch("arity.race.run_race", return_value=report) as run_race,
             patch("arity.race.deliver", return_value=delivery),
         ):

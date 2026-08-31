@@ -17,7 +17,7 @@ import tiers
 
 def run_demo() -> None:
     print("=" * 60)
-    print("GORKBOT v0 DEMO - PLAYING 5 STORIES")
+    print("ARITY v0 DEMO - PLAYING 5 STORIES")
     print("=" * 60)
 
     # Infrastructure Setup

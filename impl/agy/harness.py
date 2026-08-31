@@ -51,7 +51,7 @@ class Harness:
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "gorkbot/0.1",
+            "User-Agent": "arity/0.1",
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

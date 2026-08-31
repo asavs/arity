@@ -1,4 +1,4 @@
-"""gorkbot v0 — one voice, a staff, and a door to each.
+"""Arity v0 — one voice, a staff, and a door to each.
 
 A roster (roles), a ledger (ledger), a journal (tiers, archivist) and a clock (clock: cadence
 and pulse together), with cast composing them — casting and the scorecard are one file because

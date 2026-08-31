@@ -13,7 +13,7 @@ class BriefLeakError(Exception):
 
 
 BIOGRAPH_TIER_0 = (
-    "Asa - building gorkbot. Values concise output, single point of contact, "
+    "Asa - building Arity. Values concise output, single point of contact, "
     "clean seams over cleverness. Secret key path: /Users/example/secret."
 )
 

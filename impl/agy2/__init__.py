@@ -1,4 +1,4 @@
-"""gorkbot - v0 implementation of multi-kernel aptitude-based AI assistant."""
+"""Arity - v0 implementation of multi-kernel aptitude-based AI assistant."""
 
 from store import Store, Record
 from ledger import Seat, SeatLedger

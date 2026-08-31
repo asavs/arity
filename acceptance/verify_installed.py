@@ -111,10 +111,9 @@ def verify_watch_command(environment: Path, *, cwd: Path) -> None:
     env = os.environ.copy()
     env["ARITY_STORE"] = "jsonl"
     env["PYTHONNOUSERSITE"] = "1"
-    env.pop("GORKBOT_STORE", None)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
-    store_root = cwd / ".gorkbot"
+    store_root = cwd / ".arity"
     if store_root.exists():
         raise RuntimeError("watch acceptance run root must start without a store")
 
