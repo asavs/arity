@@ -1,3 +1,4 @@
 include README.md
 include RELEASE.md
+include LICENSE
 recursive-include gorkbot/definitions *.md *.py
