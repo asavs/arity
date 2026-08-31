@@ -87,6 +87,7 @@ from .runtime import Runtime
 from .seams import (
     ModelProvider,
     Observer,
+    RecordReader,
     RecordStore,
     ToolRunner,
     Transport,
@@ -146,6 +147,7 @@ __all__ = [
     "ModelProvider",
     "ToolRunner",
     "RecordStore",
+    "RecordReader",
     "Transport",
     "Observer",
     # Handlers
