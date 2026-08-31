@@ -44,7 +44,7 @@ from .evidence import (
     factual_eligibility,
     resolve_bundle,
 )
-from .handlers import JsonlRecordStore
+from .handlers import JsonlRecordStore, default_record_store
 from .ledger import Seat, SeatLedger
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
 from .seams import RecordStore
@@ -86,6 +86,17 @@ class RaceConfig:
     # First-class evaluators consume one frozen EvidenceBundle.  Legacy blind reviewer
     # candidates remain available through ``judges`` and are normalized into Evaluations.
     evaluators: list[TrialEvaluator] = field(default_factory=list)
+
+
+def _record_store_for_run(cfg: RaceConfig, tmp_root: Optional[Path]) -> RecordStore:
+    """Resolve one writer through the same configured store seam used by readers."""
+    if cfg.record_store is not None:
+        return cfg.record_store
+    if cfg.store_root is not None:
+        return JsonlRecordStore(root=cfg.store_root)
+    if tmp_root is not None:
+        return JsonlRecordStore(root=tmp_root / "records")
+    return default_record_store()
 
 
 @dataclass
@@ -748,9 +759,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         (cfg.record_store is None and cfg.store_root is None) or cfg.workspace_root is None
     )
     tmp_root = Path(tempfile.mkdtemp(prefix="arity_trial_")) if needs_temp_root else None
-    store = cfg.record_store or JsonlRecordStore(
-        root=cfg.store_root or (tmp_root / "records" if tmp_root else None)
-    )
+    store = _record_store_for_run(cfg, tmp_root)
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
     dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json or cfg.quiet)
