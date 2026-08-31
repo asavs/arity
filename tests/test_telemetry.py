@@ -198,6 +198,49 @@ def test_journaled_provider_persists_normalized_usage_before_publishing_completi
     assert marker not in json.dumps(payload)
 
 
+def test_journaled_provider_reanchors_supplied_evidence_to_journal_time() -> None:
+    timeline: list[str] = []
+    supplied = UsageEvidence(
+        input_tokens=TokenMeasurement(10, "provider_reported"),
+        output_tokens=TokenMeasurement(3, "provider_reported"),
+        evidence_observed_at=50.0,
+        provider_timestamp=49.0,
+        provider_timestamp_basis="response",
+    )
+    journal = _Journal(timeline)
+    wrapped = JournaledModelProvider(
+        _Provider(
+            ModelCompleted(content="done", usage_evidence=supplied),
+            timeline,
+        ),
+        _context(journal),
+        clock=iter((100.0, 102.0)).__next__,
+    )
+
+    result = wrapped.call(CallModel(messages=[]))
+
+    assert isinstance(result, ModelCompleted)
+    assert result.usage_evidence is not None
+    assert result.usage_evidence.evidence_observed_at == 102.0
+    assert result.usage_evidence.provider_timestamp == 49.0
+    assert journal.calls[0][1]["evidence"]["evidence_observed_at"] == 102.0
+
+
+def test_journaled_provider_rejects_a_clock_that_moves_before_request_start() -> None:
+    timeline: list[str] = []
+    journal = _Journal(timeline)
+    wrapped = JournaledModelProvider(
+        _Provider(ModelCompleted(content="done"), timeline),
+        _context(journal),
+        clock=iter((2.0, 1.0)).__next__,
+    )
+
+    with pytest.raises(ValueError, match="request start time.*observation"):
+        wrapped.call(CallModel(messages=[]))
+
+    assert journal.calls == []
+
+
 def test_journaled_provider_records_safe_failure_without_error_or_identity_text() -> None:
     timeline: list[str] = []
     marker = "PRIVATE_FAILURE_DETAIL"
