@@ -307,6 +307,7 @@ def replay_trial(
     completed_arm_keys: set[tuple[str, str]] = set()
     completed_candidate_keys: set[tuple[str, str]] = set()
     completions_by_arm: dict[tuple[str, str], Mapping[str, Any]] = {}
+    frozen_phases: set[str] = set()
     completed_arms: list[Mapping[str, Any]] = []
     bundles: list[EvidenceBundle] = []
     bundle_by_hash: dict[str, EvidenceBundle] = {}
@@ -322,6 +323,8 @@ def replay_trial(
         payload = event.payload
         if event.event_type == "arm.completed":
             phase = str(payload.get("phase", "trial"))
+            if phase in frozen_phases:
+                raise ValueError("an arm cannot complete after its phase evidence was frozen")
             arm_id = str(payload.get("arm_id", ""))
             candidate_id = str(payload.get("candidate_id", ""))
             if not arm_id or not candidate_id:
@@ -358,12 +361,18 @@ def replay_trial(
             if dict(started.get("hidden_test_hashes") or {}) != dict(bundle.hidden_test_hashes):
                 raise ValueError("frozen evidence tests do not match the trial declaration")
             phase = str(bundle.metadata.get("phase", "trial"))
+            if phase in frozen_phases:
+                raise ValueError("a trial phase can freeze evidence only once")
             evidence_arms = {(phase, candidate.arm_id) for candidate in bundle.candidates}
             evidence_candidates = {(phase, candidate.candidate_id) for candidate in bundle.candidates}
             if evidence_arms != {key for key in completed_arm_keys if key[0] == phase}:
                 raise ValueError("frozen evidence arms do not match completed arms for its phase")
             if evidence_candidates != {key for key in completed_candidate_keys if key[0] == phase}:
                 raise ValueError("frozen evidence candidates do not match completed arms for its phase")
+            if {candidate.arm_id for candidate in bundle.candidates} != declared_arm_ids:
+                raise ValueError("frozen evidence must contain every declared trial arm")
+            if "resolved_arity" in started and len(bundle.candidates) != int(started["resolved_arity"]):
+                raise ValueError("frozen evidence count does not match the resolved trial arity")
             for candidate in bundle.candidates:
                 declaration = declarations_by_arm[candidate.arm_id]
                 if (
@@ -420,6 +429,7 @@ def replay_trial(
                     raise ValueError("conference evidence must link to the prior frozen evidence")
             elif parent_hash is not None:
                 raise ValueError("initial evidence cannot declare a parent bundle")
+            frozen_phases.add(phase)
             bundles.append(bundle)
             bundle_by_hash[bundle.evidence_hash] = bundle
         elif event.event_type == "review.recorded":
