@@ -12,7 +12,9 @@ import os
 import re
 import socket
 import subprocess
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -113,6 +115,28 @@ def _public_http_url_error(raw_url: str) -> Optional[str]:
     if literal_address is None and "." not in normalized_host:
         return "single-label hostnames are not permitted"
     return None
+
+
+class UnsafeFetchUrlError(PermissionError):
+    """Raised before a fetch or redirect can target a non-public URL."""
+
+
+class _PublicHTTPRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reapply the public HTTP(S) boundary to every redirect target."""
+
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        url_error = _public_http_url_error(newurl)
+        if url_error is not None:
+            raise UnsafeFetchUrlError(f"Security Denial: unsafe fetch redirect: {url_error}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class RoleEnforcingToolRunner(ToolRunner):
@@ -481,8 +505,12 @@ class SandboxToolRunner(ToolRunner):
         )
 
         def fetch_url(url: str, timeout: int = 15) -> str:
-            import urllib.request
             from html.parser import HTMLParser
+
+            url_error = _public_http_url_error(url)
+            if url_error is not None:
+                raise UnsafeFetchUrlError(f"Security Denial: unsafe fetch URL: {url_error}")
+            opener = urllib.request.build_opener(_PublicHTTPRedirectHandler())
 
             class SimpleHTMLTextExtractor(HTMLParser):
                 def __init__(self):
@@ -515,7 +543,7 @@ class SandboxToolRunner(ToolRunner):
 
             def direct() -> tuple[str, str]:
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with opener.open(req, timeout=timeout) as resp:
                     content_type = resp.headers.get("Content-Type", "")
                     raw = resp.read().decode("utf-8", errors="replace")
                 if "text/html" not in content_type:
@@ -532,13 +560,15 @@ class SandboxToolRunner(ToolRunner):
             # headless browser in a VM when pricing pages need clicks; a reader is enough for text.
             def via_reader() -> tuple[str, str]:
                 req = urllib.request.Request(f"https://r.jina.ai/{url}", headers={**headers, "Accept": "text/markdown, text/plain"})
-                with urllib.request.urlopen(req, timeout=timeout + 15) as resp:
+                with opener.open(req, timeout=timeout + 15) as resp:
                     return resp.read().decode("utf-8", errors="replace"), "reader"
 
             errors: list[str] = []
             for attempt in (direct, via_reader):
                 try:
                     text, how = attempt()
+                except UnsafeFetchUrlError:
+                    raise
                 except Exception as e:
                     errors.append(f"{attempt.__name__}: {e}")
                     continue
