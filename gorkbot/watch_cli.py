@@ -106,10 +106,17 @@ def _write_snapshot_text(
             buffer = getattr(stream, "buffer", None)
             if buffer is not None:
                 encoded = value.encode("ascii", errors="strict")
-                written = buffer.write(encoded)
-                if type(written) is not int or written != len(encoded):
-                    raise OSError("incomplete watch output")
-                buffer.flush()
+                # Standard streams wrap a BufferedWriter.  Bypass that buffer so a
+                # broken pipe cannot leave pending bytes that CPython retries while
+                # finalizing the TextIOWrapper after this function returns.
+                binary_stream = getattr(buffer, "raw", buffer)
+                offset = 0
+                while offset < len(encoded):
+                    written = binary_stream.write(memoryview(encoded)[offset:])
+                    if type(written) is not int or written <= 0:
+                        raise OSError("incomplete watch output")
+                    offset += written
+                binary_stream.flush()
                 return True
         written = stream.write(value)
         if type(written) is not int or written != len(value):
