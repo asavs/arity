@@ -6,10 +6,13 @@ Axiom 12: Tool runners are pluggable seams (MCP, native Rust, local sandbox).
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -40,6 +43,76 @@ def resolve_sandbox_path(workspace_root: Path, relative_path: str) -> Path:
     except ValueError:
         raise PathTraversalError(f"Path '{relative_path}' escapes workspace boundary '{workspace_root}'")
     return target
+
+
+def _public_http_url_error(raw_url: str) -> Optional[str]:
+    """Return a non-secret reason when a fetch URL is not plainly public HTTP(S).
+
+    This deliberately performs no DNS lookup. It rejects literal/local targets and
+    ambiguous authorities before a URL reaches urllib or a pluggable runner.
+    """
+    if any(ord(character) < 32 or ord(character) == 127 for character in raw_url):
+        return "control characters are not permitted"
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+        port = parsed.port  # Validate malformed/non-numeric ports while parsing.
+        del port
+        hostname = parsed.hostname
+    except ValueError:
+        return "the URL authority is malformed"
+
+    if parsed.scheme.casefold() not in ("http", "https"):
+        return "only http and https schemes are permitted"
+    if not parsed.netloc or hostname is None:
+        return "a network hostname is required"
+    if parsed.username is not None or parsed.password is not None:
+        return "credentials in URLs are not permitted"
+    if "\\" in parsed.netloc:
+        return "backslashes are not permitted in URL authorities"
+
+    # Decode defensively before classifying numeric and localhost spellings. A valid
+    # public hostname does not need percent escapes in its authority (IDNA is used
+    # for internationalized names instead).
+    decoded_host = hostname
+    for _ in range(3):
+        next_host = urllib.parse.unquote(decoded_host)
+        if next_host == decoded_host:
+            break
+        decoded_host = next_host
+    if "%" in decoded_host:
+        return "percent escapes are not permitted in URL hostnames"
+    try:
+        normalized_host = decoded_host.encode("idna").decode("ascii").casefold().rstrip(".")
+    except UnicodeError:
+        return "the URL hostname is invalid"
+    if not normalized_host:
+        return "a network hostname is required"
+    if (
+        normalized_host == "localhost"
+        or normalized_host.endswith(".localhost")
+        or normalized_host.endswith((".local", ".internal", ".home", ".lan"))
+    ):
+        return "local hostnames are not permitted"
+
+    literal_address: Optional[ipaddress.IPv4Address | ipaddress.IPv6Address] = None
+    address_without_scope = normalized_host.split("%", 1)[0]
+    try:
+        literal_address = ipaddress.ip_address(address_without_scope)
+    except ValueError:
+        # inet_aton recognizes legacy numeric loopback forms such as 127.1,
+        # 2130706433, and 0x7f.0.0.1. Limit its input to numeric syntax so it
+        # cannot trigger name resolution.
+        legacy_characters = frozenset("0123456789abcdefABCDEFxX.")
+        if address_without_scope and set(address_without_scope) <= legacy_characters:
+            try:
+                literal_address = ipaddress.ip_address(socket.inet_aton(address_without_scope))
+            except OSError:
+                pass
+    if literal_address is not None and not literal_address.is_global:
+        return "non-public IP addresses are not permitted"
+    if literal_address is None and "." not in normalized_host:
+        return "single-label hostnames are not permitted"
+    return None
 
 
 class RoleEnforcingToolRunner(ToolRunner):
@@ -76,6 +149,11 @@ class RoleEnforcingToolRunner(ToolRunner):
     def execute(self, effect: ExecuteTool) -> ToolCompleted:
         if not self.role.can_use_tool(effect.name):
             return self._denial(effect, f"is not permitted to execute tool '{effect.name}'")
+
+        if effect.name == "fetch_url" and "url" in effect.arguments:
+            url_error = _public_http_url_error(str(effect.arguments["url"]))
+            if url_error is not None:
+                return self._denial(effect, f"is denied a fetch URL: {url_error}")
 
         for argument in self._PATH_ARGUMENTS:
             if argument not in effect.arguments:
