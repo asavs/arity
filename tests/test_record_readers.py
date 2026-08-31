@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import arity
 from arity.handlers import JsonlRecordStore, default_record_store
 from arity.record_readers import (
     JsonlRecordReader,
@@ -37,6 +38,8 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
 
 
 def test_read_limits_require_positive_exact_integers() -> None:
+    assert arity.RecordReadLimits is RecordReadLimits
+    assert arity.RecordLimitExceeded is RecordLimitExceeded
     assert RecordReadLimits(max_snapshot_bytes=1, max_query_records=2) == (
         RecordReadLimits(max_snapshot_bytes=1, max_query_records=2)
     )
