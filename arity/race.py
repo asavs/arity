@@ -276,6 +276,11 @@ def resolve_candidates(variants: str, role: Role, seats: list[Seat]) -> tuple[li
     """Turn a preset name or a custom variant list into CandidateSpecs. Returns (specs, notes)."""
     notes: list[str] = []
     v = variants.strip().lower()
+    if v == "skills" and role.base_name != "developer":
+        raise ValueError(
+            f"skills preset is not supported for role '{role.name}'; "
+            "the role has no implementation skill axis"
+        )
     if not seats:
         seats = placeholder_seats()
         notes.append("no authenticated seats in the ledger; using placeholder seats (run `arity auth login`)")
