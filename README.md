@@ -77,7 +77,7 @@ arity trial show <trial-id>
 arity trial replay <trial-id> --json
 ```
 
-These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view. Add `--json` to any inspection command for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
+These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. Add `--json` to any inspection command for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
 
 Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `ARITY_STORE` compatibility fallback and `.arity/` paths.
 
@@ -125,4 +125,15 @@ python acceptance/verify_installed.py
 
 The distribution and primary command are named **Arity**. The Python API remains available only from the `arity` package (`import arity` is not provided); `python -m arity` and the `arity` console command remain supported entry points. `.arity/` remains Arity's active state/config location: credentials, records, configuration, and local definition overrides are read or written there. `ARITY_*` settings remain compatibility fallbacks where `ARITY_*` counterparts exist; no state migration is performed. Historical release notes keep the names used when they were published.
 
-This repository does not yet include a license file. See [RELEASE.md](RELEASE.md) for historically named release notes.
+## Security
+
+Arity is designed for a trusted single-user workstation. It is not an OS sandbox or a
+multi-tenant security boundary: model-directed tools, `LocalToolRunner`, and CLI harnesses may
+execute with the current user's permissions. Credentials and full trial replay data also
+require careful handling. Read [SECURITY.md](SECURITY.md) before using Arity with credentials,
+untrusted tasks, or external content.
+
+## License
+
+Arity is available under the [MIT License](LICENSE). See [RELEASE.md](RELEASE.md) for
+historically named release notes.
