@@ -1,9 +1,9 @@
-"""Tests for gorkbot roles, denial sets, and memory tier brief compilation."""
+"""Tests for Arity roles, denial sets, and memory tier brief compilation."""
 from __future__ import annotations
 
 import unittest
 
-from gorkbot.roles import (
+from arity.roles import (
     ARCHITECT_ROLE,
     BUILDER_ROLE,
     REVIEWER_ROLE,
@@ -12,7 +12,7 @@ from gorkbot.roles import (
     Role,
     RoleRegistry,
 )
-from gorkbot.tiers import (
+from arity.tiers import (
     BriefCompiler,
     BriefRefusalError,
     PredecessorAccounts,
@@ -63,7 +63,7 @@ class TestTiersAndBriefCompiler(unittest.TestCase):
     def setUp(self):
         self.compiler = BriefCompiler(
             tier0_context="Asa: High-context personal notes and biograph.",
-            tier1_context="gorkbot: Five seams architecture.",
+            tier1_context="Arity: Five seams architecture.",
         )
 
     def test_memory_tier_isolation(self):
@@ -92,7 +92,7 @@ class TestTiersAndBriefCompiler(unittest.TestCase):
         self.assertIn("I built the deal schema", brief.system_prompt)
 
     def test_brief_refusal_on_denial_set_violation(self):
-        from gorkbot.roles import DenialSet, Role
+        from arity.roles import DenialSet, Role
         restricted_role = Role(
             name="leaf_worker",
             description="Sandboxed worker",

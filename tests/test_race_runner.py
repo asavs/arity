@@ -7,10 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from gorkbot.archivist import ImpartialArchivist
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.race import (
+from arity.archivist import ImpartialArchivist
+from arity.handlers import JsonlRecordStore
+from arity.ledger import Seat, SeatLedger
+from arity.race import (
     GOOD_LRU,
     OWN_TEST,
     RaceConfig,
@@ -21,10 +21,10 @@ from gorkbot.race import (
     resolve_candidates,
     run_race,
 )
-from gorkbot.roles import BUILDER_ROLE, TESTER_ROLE, RoleRegistry
-from gorkbot.scorecard import Scorecard
-from gorkbot.tasks import TaskBank, load_task_dir
-from gorkbot.terrarium import (
+from arity.roles import BUILDER_ROLE, TESTER_ROLE, RoleRegistry
+from arity.scorecard import Scorecard
+from arity.tasks import TaskBank, load_task_dir
+from arity.terrarium import (
     HIDDEN_TESTS_DIR,
     CandidateSpec,
     TaskRecord,
@@ -33,8 +33,8 @@ from gorkbot.terrarium import (
     normalize_tool_runner,
     run_sandbox_verification,
 )
-from gorkbot.tools import SandboxToolRunner
-from gorkbot.types import CallModel, ModelCompleted
+from arity.tools import SandboxToolRunner
+from arity.types import CallModel, ModelCompleted
 
 
 class RecordingProvider:
@@ -51,7 +51,7 @@ class RecordingProvider:
 class TestRecordStoreSelection(unittest.TestCase):
     def test_live_runs_use_the_configured_default_store(self):
         configured_store = object()
-        with patch("gorkbot.race.default_record_store", return_value=configured_store) as resolve:
+        with patch("arity.race.default_record_store", return_value=configured_store) as resolve:
             selected = _record_store_for_run(RaceConfig(), tmp_root=None)
 
         self.assertIs(selected, configured_store)
@@ -59,7 +59,7 @@ class TestRecordStoreSelection(unittest.TestCase):
 
     def test_explicit_and_ephemeral_stores_do_not_consult_the_default(self):
         explicit_store = object()
-        with TemporaryDirectory() as tmpdir, patch("gorkbot.race.default_record_store") as resolve:
+        with TemporaryDirectory() as tmpdir, patch("arity.race.default_record_store") as resolve:
             root = Path(tmpdir)
             self.assertIs(
                 _record_store_for_run(RaceConfig(record_store=explicit_store), tmp_root=None),
@@ -156,7 +156,7 @@ class TestArchivistJudgement(unittest.TestCase):
         self.assertEqual(len({(e.axes["tier"], e.axes["hidden_rate"], e.axes["own_rate"]) for e in entries}), 1)
 
     def test_hidden_tests_outweigh_own_tests_and_catch_the_slow_build(self):
-        from gorkbot.race import SLOW_LRU
+        from arity.race import SLOW_LRU
         hidden = TaskBank().get("lru_cache").hidden_tests
         task = TaskRecord(brief="lru", hidden_tests=hidden)
         specs = [
@@ -172,8 +172,8 @@ class TestArchivistJudgement(unittest.TestCase):
 
     def test_a_slow_pass_still_outranks_a_fast_failure(self):
         """Facts are tiers; cost only orders inside a tier. A full pass can never score below zero."""
-        from gorkbot.terrarium import TerrariumCandidateResult, State, Status
-        from gorkbot.archivist import ArchivistEntry
+        from arity.terrarium import TerrariumCandidateResult, State, Status
+        from arity.archivist import ArchivistEntry
         def fake(name, verdict, hidden_pass, seconds, tokens):
             r = TerrariumCandidateResult(candidate_id=name, task_id="t", seat=placeholder_seats()[0], role=BUILDER_ROLE,
                                          final_state=State(session_id=name), output="", self_report="x", tokens_used=tokens,
@@ -281,7 +281,7 @@ class TestTaskBankAndPresets(unittest.TestCase):
         self.assertEqual(specs[1].seat.model, "gemini-3.6-flash")
 
     def test_review_phase_runs_only_on_a_facts_tie_and_maps_letters_back(self):
-        from gorkbot.race import blind_bundle, parse_judgement
+        from arity.race import blind_bundle, parse_judgement
         # good/slow/liar are separated by facts -> review skipped even with judges named
         with TemporaryDirectory() as d:
             rep = run_race(RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol"], workspace_root=Path(d) / "ws"))
@@ -331,7 +331,7 @@ class TestTaskBankAndPresets(unittest.TestCase):
             self.assertTrue(set(judgement["cherry_picks"]) <= ids)
 
     def test_judgement_rejects_non_exact_or_unknown_labels(self):
-        from gorkbot.race import parse_judgement
+        from arity.race import parse_judgement
 
         key = {"A": "candidate-a", "B": "candidate-b"}
         invalid = (
@@ -411,7 +411,7 @@ class TestTypePacks(unittest.TestCase):
 
 class TestDiscrepancyDetector(unittest.TestCase):
     def _audit(self, report: str, files: dict[str, str] | None = None) -> str:
-        from gorkbot.terrarium import TerrariumCandidateResult, State
+        from arity.terrarium import TerrariumCandidateResult, State
         with TemporaryDirectory() as d:
             ws = Path(d)
             for name, src in (files or {}).items():
@@ -433,8 +433,8 @@ class TestDiscrepancyDetector(unittest.TestCase):
             self.assertEqual(self._audit(report), "discrepancy", report)
 
     def test_honesty_axes_separate_the_liar_from_the_confessor(self):
-        from gorkbot.terrarium import TerrariumCandidateResult, State
-        from gorkbot.archivist import ImpartialArchivist
+        from arity.terrarium import TerrariumCandidateResult, State
+        from arity.archivist import ImpartialArchivist
         def entry(report):
             with TemporaryDirectory() as d:
                 r = TerrariumCandidateResult(candidate_id="c", task_id="t", seat=placeholder_seats()[0], role=BUILDER_ROLE,
@@ -482,7 +482,7 @@ class TestMessageToUserIsOutput(unittest.TestCase):
 class TestCliHarnessRunsInTheSandbox(unittest.TestCase):
     def test_dispatcher_points_every_cli_in_the_chain_at_the_workspace(self):
         from dataclasses import dataclass
-        from gorkbot.wire import FallbackModelProvider
+        from arity.wire import FallbackModelProvider
 
         @dataclass
         class FakeCli:
@@ -493,7 +493,7 @@ class TestCliHarnessRunsInTheSandbox(unittest.TestCase):
                 return ModelCompleted(content=f"ran in {self.cwd}", tool_calls=[], usage={})
 
         bare, fallback = FakeCli(), FakeCli()
-        wire_fails = type("W", (), {"call": lambda self, e: __import__("gorkbot.types", fromlist=["ModelFailed"]).ModelFailed(error="429 quota")})()
+        wire_fails = type("W", (), {"call": lambda self, e: __import__("arity.types", fromlist=["ModelFailed"]).ModelFailed(error="429 quota")})()
         seen = {}
         def factory(seat):
             return bare if seat.model == "bare" else FallbackModelProvider(primary=wire_fails, fallback=fallback)

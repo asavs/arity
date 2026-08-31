@@ -1,17 +1,17 @@
-"""Tests for gorkbot master orchestrator and end-to-end multi-part integration."""
+"""Tests for the Arity orchestrator and end-to-end multi-part integration."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.orchestrator import GorkbotOrchestrator
-from gorkbot.types import CallModel, ModelCompleted
+from arity.handlers import JsonlRecordStore
+from arity.ledger import Seat, SeatLedger
+from arity.orchestrator import ArityOrchestrator
+from arity.types import CallModel, ModelCompleted
 
 
-class TestGorkbotOrchestrator(unittest.TestCase):
+class TestArityOrchestrator(unittest.TestCase):
     def setUp(self):
         self.tmpdir = TemporaryDirectory()
         self.ws = Path(self.tmpdir.name)
@@ -79,7 +79,7 @@ class TestGorkbotOrchestrator(unittest.TestCase):
 
             return MockBuilderProvider()
 
-        orchestrator = GorkbotOrchestrator(
+        orchestrator = ArityOrchestrator(
             ledger=self.ledger,
             store=self.store,
             base_workspace=self.ws / "terrarium",

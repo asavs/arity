@@ -1,11 +1,11 @@
-"""Unit tests for gorkbot direct wire providers and fallback seams."""
+"""Unit tests for Arity direct wire providers and fallback seams."""
 import unittest
 from unittest.mock import MagicMock, patch
 
-from gorkbot.handlers import CLIModelProvider
-from gorkbot.ledger import Seat
-from gorkbot.types import CallModel, ModelCompleted, ModelFailed
-from gorkbot.wire import (
+from arity.handlers import CLIModelProvider
+from arity.ledger import Seat
+from arity.types import CallModel, ModelCompleted, ModelFailed
+from arity.wire import (
     AntigravityWireProvider,
     CodexWireProvider,
     FallbackModelProvider,
