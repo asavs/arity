@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from arity.inspection import inspect_trial
+from arity.inspection import inspect_trial, inspect_trials
 from arity.observations import (
     HumanDecisionReference,
     MechanicalEvidenceReference,
@@ -11,6 +11,8 @@ from arity.observations import (
     Observation,
 )
 from arity.race import RaceConfig, human_pick, run_race
+from arity.watch_terminal import TerminalCapabilities, render_watch_follow_frame
+from arity.watch_view_model import WatchProjector
 
 
 def _mock_report(tmp_path, **changes):
@@ -150,3 +152,38 @@ def test_future_observation_schema_stops_at_a_blind_safe_partial_boundary(
         "PRIVATE_OBSERVATION_MARKER" not in repr(observation)
         for observation in inspection.replay.observations
     )
+
+
+def test_follow_view_counts_each_lens_without_rendering_attribution(tmp_path) -> None:
+    report = _mock_report(
+        tmp_path,
+        judges=["gpt-5.6-sol", "claude-3-7-sonnet"],
+        review="always",
+    )
+    human_pick(
+        report,
+        ask=lambda _: "",
+        printer=lambda *args, **kwargs: None,
+        observer_id="PRIVATE_HUMAN_ATTRIBUTION",
+    )
+    catalog = inspect_trials(report.archivist.store)
+    model = WatchProjector().project(
+        catalog,
+        backend="jsonl",
+        read_at=100.0,
+        selected_trial_id=report.task.id,
+    )
+    detail = model.trials[0].detail
+
+    assert detail is not None
+    assert detail.mechanical_observations.value == 1
+    assert detail.model_observations.value == 2
+    assert detail.human_observations.value == 1
+    frame = render_watch_follow_frame(
+        model,
+        TerminalCapabilities(width=120, ascii=True, motion=False, color=False),
+        expanded=True,
+    )
+    assert "observations mechanical 1 | model 2 | human 1" in frame
+    assert "PRIVATE_HUMAN_ATTRIBUTION" not in frame
+    assert report.task.id not in frame
