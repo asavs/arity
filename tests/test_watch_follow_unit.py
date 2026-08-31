@@ -380,6 +380,113 @@ def test_reorder_and_insertion_retain_selection_and_labels() -> None:
     assert not any(raw_id in "".join(terminal.frames) for raw_id in (RAW_ONE, RAW_TWO, RAW_THREE))
 
 
+def test_plain_arity_lobby_selects_and_expands_first_nonempty_trial_once() -> None:
+    terminal = FakeTerminal([None, None, "q"])
+    calls: list[tuple[str | None, WatchProjector]] = []
+    rendered: list[tuple[int | None, bool]] = []
+    reads = 0
+
+    def loader(
+        store_spec: object = None,
+        *,
+        selected_trial_id: str | None,
+        clock: Callable[[], float] | None,
+        projector: WatchProjector | None,
+        **kwargs: object,
+    ) -> WatchViewModel:
+        nonlocal reads
+        del store_spec, clock, kwargs
+        assert type(projector) is WatchProjector
+        calls.append((selected_trial_id, projector))
+        reads += 1
+        if reads == 1:
+            return _empty_model(read_at=1.0)
+        order = (
+            (RAW_ONE, RAW_TWO)
+            if reads == 2
+            else (RAW_THREE, RAW_TWO, RAW_ONE)
+        )
+        return _model(
+            projector,
+            order,
+            selected_trial_id,
+            read_at=float(reads),
+        )
+
+    def renderer(
+        model: WatchViewModel | None,
+        capabilities: TerminalCapabilities,
+        *,
+        expanded: bool,
+        **presentation: object,
+    ) -> str:
+        del capabilities, presentation
+        rendered.append(
+            (
+                None if model is None else model.selected_trial_number,
+                expanded,
+            )
+        )
+        return "frame\n"
+
+    args = _args(no_motion=True)
+    args.lobby = True
+    code = run_watch_command(
+        args,
+        terminal=terminal,
+        model_loader=loader,
+        follow_renderer=renderer,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        monotonic=lambda: 0.0,
+        environ={"NO_COLOR": "1"},
+    )
+
+    assert code == 5
+    assert rendered == [(None, False), (1, True), (1, True)]
+    assert [selected for selected, _projector in calls] == [None, None, RAW_ONE]
+    assert calls[0][1] is calls[1][1] is calls[2][1]
+
+
+def test_explicit_watch_follow_does_not_auto_select_or_expand() -> None:
+    terminal = FakeTerminal(["q"])
+    rendered: list[tuple[int | None, bool]] = []
+
+    def renderer(
+        model: WatchViewModel | None,
+        capabilities: TerminalCapabilities,
+        *,
+        expanded: bool,
+        **presentation: object,
+    ) -> str:
+        del capabilities, presentation
+        rendered.append(
+            (
+                None if model is None else model.selected_trial_number,
+                expanded,
+            )
+        )
+        return "frame\n"
+
+    code = run_watch_command(
+        _args(no_motion=True),
+        terminal=terminal,
+        model_loader=lambda *args, projector, **kwargs: _model(
+            projector,
+            (RAW_ONE, RAW_TWO),
+            None,
+            read_at=1.0,
+        ),
+        follow_renderer=renderer,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        environ={"NO_COLOR": "1"},
+    )
+
+    assert code == 5
+    assert rendered == [(None, False)]
+
+
 def test_read_error_keeps_last_good_frame_and_only_canned_error() -> None:
     terminal = FakeTerminal([None, "q"])
     calls: list[tuple[str | None, WatchProjector]] = []
