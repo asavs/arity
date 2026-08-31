@@ -324,7 +324,7 @@ class WatchLabelRegistry:
         except KeyError as exc:
             raise KeyError("trial identity has not been assigned a neutral label") from exc
 
-    def trial_id_for_number(self, trial_number: int) -> str:
+    def _trial_id_for_number(self, trial_number: int) -> str:
         """Resolve a neutral label only inside the controller boundary."""
 
         if type(trial_number) is not int or trial_number < 1:
@@ -362,10 +362,10 @@ class WatchProjector:
             label_registry=self._label_registry,
         )
 
-    def trial_id_for_number(self, trial_number: int) -> str:
+    def _trial_id_for_number(self, trial_number: int) -> str:
         """Resolve a visible neutral label without putting raw IDs in the model."""
 
-        return self._label_registry.trial_id_for_number(trial_number)
+        return self._label_registry._trial_id_for_number(trial_number)
 
     def __repr__(self) -> str:
         return "WatchProjector(<controller-private labels>)"

@@ -25,11 +25,10 @@ EXIT_OPERATIONAL = 1
 EXIT_NOT_FOUND = 3
 EXIT_PARTIAL = 4
 EXIT_CORRUPT = 5
+EXIT_INTERRUPT = 130
 
-MAX_TERMINAL_WIDTH = 512
+MAX_TERMINAL_WIDTH = 256
 DEFAULT_REFRESH_INTERVAL = 1.0
-DEFAULT_PULSE_INTERVAL = 0.08
-PULSE_PHASES = 3
 
 _ENTER_ALT_SCREEN = "\x1b[?1049h"
 _LEAVE_ALT_SCREEN = "\x1b[?1049l"
@@ -75,6 +74,25 @@ def supports_follow_terminal(stdin: TextIO, stdout: TextIO) -> bool:
     """Return whether both terminal directions pass the non-mutating TTY gate."""
 
     return _is_tty(stdin) and _is_tty(stdout)
+
+
+def _boolean_terminal_probe(terminal: object, name: str) -> bool:
+    try:
+        probe = getattr(terminal, name)
+        value = probe() if callable(probe) else probe
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return value is True
+
+
+def supports_injected_terminal(terminal: object) -> bool:
+    """Apply the contract terminal's three minimal, non-mutating gates."""
+
+    return (
+        _boolean_terminal_probe(terminal, "stdin_isatty")
+        and _boolean_terminal_probe(terminal, "stdout_isatty")
+        and _boolean_terminal_probe(terminal, "supports_interactive")
+    )
 
 
 def _write_all(stream: TextIO, value: str, *, flush: bool = True) -> None:
@@ -326,8 +344,10 @@ class TerminalSession:
             raise RuntimeError("terminal session is already active")
         try:
             enter = getattr(self._backend, "enter")
-            enter()
+            # The backend owns its own fine-grained mutation flags.  Register its
+            # rollback before entry so a half-completed mode change is recoverable.
             self._backend_entered = True
+            enter()
             self._control(_ENTER_ALT_SCREEN, "_alt_screen")
             self._control(_HIDE_CURSOR, "_cursor_hidden")
             self._active = True
@@ -357,11 +377,11 @@ class TerminalSession:
                 pass
         if self._backend_entered:
             self._backend_entered = False
-        try:
-            restore = getattr(self._backend, "restore")
-            restore()
-        except BaseException:
-            pass
+            try:
+                restore = getattr(self._backend, "restore")
+                restore()
+            except BaseException:
+                pass
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
         self.close()
@@ -391,6 +411,94 @@ class TerminalSession:
 
     def __repr__(self) -> str:
         return "TerminalSession(<terminal streams>)"
+
+
+class InjectedTerminalSession:
+    """Adapt the small acceptance terminal seam to the controller protocol."""
+
+    def __init__(
+        self,
+        terminal: object,
+        *,
+        ascii: bool,
+        no_motion: bool,
+        environ: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        if type(ascii) is not bool or type(no_motion) is not bool:
+            raise TypeError("terminal presentation flags must be booleans")
+        environment = dict(os.environ if environ is None else environ)
+        self._terminal = terminal
+        self._ascii = ascii
+        self._motion = not no_motion
+        self._color = "NO_COLOR" not in environment
+        self._restore_needed = False
+        self._active = False
+
+    @property
+    def capabilities(self) -> TerminalCapabilities:
+        try:
+            width_probe = getattr(self._terminal, "width")
+            width = width_probe() if callable(width_probe) else width_probe
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            width = 80
+        if type(width) is not int or width < 1:
+            width = 80
+        return TerminalCapabilities(
+            width=min(width, MAX_TERMINAL_WIDTH),
+            ascii=self._ascii,
+            motion=self._motion,
+            color=self._color,
+        )
+
+    def __enter__(self) -> "InjectedTerminalSession":
+        if self._active or self._restore_needed:
+            raise RuntimeError("terminal session is already active")
+        self._restore_needed = True
+        try:
+            setup = getattr(self._terminal, "setup")
+            result = setup()
+            if result is False:
+                raise TerminalUnavailable("terminal setup was declined")
+        except KeyboardInterrupt:
+            self.close()
+            raise
+        except BaseException as error:
+            self.close()
+            if isinstance(error, TerminalUnavailable):
+                raise
+            raise TerminalUnavailable("terminal setup failed") from error
+        self._active = True
+        return self
+
+    def close(self) -> None:
+        self._active = False
+        if not self._restore_needed:
+            return
+        self._restore_needed = False
+        try:
+            restore = getattr(self._terminal, "restore")
+            restore()
+        except BaseException:
+            pass
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+        self.close()
+        return False
+
+    def draw(self, frame: str) -> None:
+        if not self._active:
+            raise OSError("terminal session is not active")
+        draw = getattr(self._terminal, "draw")
+        draw(frame)
+
+    def read_key(self, timeout: float) -> Optional[str]:
+        if not self._active:
+            raise OSError("terminal session is not active")
+        read_key = getattr(self._terminal, "read_key")
+        return read_key(timeout)
+
+    def __repr__(self) -> str:
+        return "InjectedTerminalSession(<injected terminal>)"
 
 
 class _SignalGuard:
@@ -483,35 +591,29 @@ class FollowController:
         renderer: FollowRenderer = render_watch_follow_frame,
         monotonic: MonotonicClock = time.monotonic,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
-        pulse_interval: float = DEFAULT_PULSE_INTERVAL,
     ) -> None:
         if type(projector) is not WatchProjector:
             raise TypeError("projector must be an exact WatchProjector")
-        for value, name in (
-            (refresh_interval, "refresh_interval"),
-            (pulse_interval, "pulse_interval"),
+        if isinstance(refresh_interval, bool) or not isinstance(
+            refresh_interval, (int, float)
         ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"{name} must be a finite positive number")
-            if not math.isfinite(float(value)) or float(value) <= 0:
-                raise ValueError(f"{name} must be a finite positive number")
+            raise TypeError("refresh_interval must be a finite positive number")
+        if not math.isfinite(float(refresh_interval)) or float(refresh_interval) <= 0:
+            raise ValueError("refresh_interval must be a finite positive number")
         self._terminal = terminal
         self._loader = loader
         self._projector = projector
         self._renderer = renderer
         self._monotonic = monotonic
         self._refresh_interval = float(refresh_interval)
-        self._pulse_interval = float(pulse_interval)
         self._model: WatchViewModel | None = None
         self._fingerprint: tuple[object, ...] | None = None
         self._selected_trial_id: str | None = None
-        self._selection_established = False
         self._expanded = False
         self._help_visible = False
         self._error_code: str | None = None
         self._failure_exit: int | None = None
         self._pulse_phase: int | None = None
-        self._pulse_deadline: float | None = None
 
     def __repr__(self) -> str:
         return "FollowController(<controller-private selection>)"
@@ -551,12 +653,11 @@ class FollowController:
             raise FollowRenderError("follow frame failed") from error
 
     def _establish_selection(self, model: WatchViewModel, trial: WatchTrial) -> WatchViewModel:
-        trial_id = self._projector.trial_id_for_number(trial.trial_number)
+        trial_id = self._projector._trial_id_for_number(trial.trial_number)
         self._selected_trial_id = trial_id
-        self._selection_established = True
         return _select_model(model, trial.trial_number)
 
-    def _refresh(self, *, force: bool, now: float) -> None:
+    def _refresh(self, *, force: bool) -> None:
         previous_error = self._error_code
         try:
             model = self._loader(self._selected_trial_id)
@@ -566,7 +667,6 @@ class FollowController:
             self._failure_exit, self._error_code = _read_failure(error)
             if force or self._model is None or self._error_code != previous_error:
                 self._pulse_phase = None
-                self._pulse_deadline = None
                 self._draw()
             return
         except KeyboardInterrupt:
@@ -576,39 +676,25 @@ class FollowController:
             self._error_code = RecordReadError.code
             if force or self._model is None or self._error_code != previous_error:
                 self._pulse_phase = None
-                self._pulse_deadline = None
                 self._draw()
             return
 
         requested_missing = model.requested_trial_missing
-        if requested_missing and self._selection_established and model.trials:
-            model = self._establish_selection(model, model.trials[0])
-            requested_missing = False
-        elif self._selected_trial_id is None and model.trials:
-            model = self._establish_selection(model, model.trials[0])
-        elif model.selected_trial_number is not None or model.selected_trial_omitted:
-            self._selection_established = True
-
         fingerprint = model.fingerprint
         changed = self._fingerprint is not None and fingerprint != self._fingerprint
-        first_frame = self._model is None
         self._model = model
         self._fingerprint = fingerprint
         self._failure_exit = None
         self._error_code = "trial_not_found" if requested_missing else None
 
-        capabilities = self._capabilities()
         if changed:
             self._pulse_phase = 0
-            self._pulse_deadline = (
-                now + self._pulse_interval if capabilities.motion else None
-            )
-        elif not capabilities.motion and self._pulse_phase is not None:
-            # A reduced-motion update mark is semantic state, not a timer animation.
-            self._pulse_phase = 0
+        else:
+            self._pulse_phase = None
 
-        if first_frame or changed or force or self._error_code != previous_error:
-            self._draw()
+        # Each query-only snapshot is a frame boundary.  The fingerprint controls
+        # only the update cue, never a claim that an unchanged journal is live.
+        self._draw()
 
     def _move(self, direction: int) -> None:
         if self._model is None or not self._model.trials:
@@ -653,7 +739,7 @@ class FollowController:
         }
         return mapping.get(key, key)
 
-    def _handle_key(self, key: str, *, now: float) -> bool:
+    def _handle_key(self, key: str) -> bool:
         key = self._normalized_key(key)
         if key == "q":
             return False
@@ -669,22 +755,8 @@ class FollowController:
                 self._expanded = not self._expanded
                 self._draw()
         elif key == "r":
-            self._refresh(force=True, now=now)
+            self._refresh(force=True)
         return True
-
-    def _advance_pulse(self, now: float) -> None:
-        if self._pulse_phase is None or self._pulse_deadline is None:
-            return
-        if now < self._pulse_deadline:
-            return
-        next_phase = self._pulse_phase + 1
-        if next_phase >= PULSE_PHASES:
-            self._pulse_phase = None
-            self._pulse_deadline = None
-        else:
-            self._pulse_phase = next_phase
-            self._pulse_deadline = now + self._pulse_interval
-        self._draw()
 
     def run(self, initial_trial_id: Optional[str] = None) -> int:
         if initial_trial_id is not None and (
@@ -693,20 +765,22 @@ class FollowController:
             raise ValueError("initial_trial_id must be a non-empty string or None")
         self._selected_trial_id = initial_trial_id
         now = float(self._monotonic())
-        self._refresh(force=True, now=now)
+        self._refresh(force=True)
         next_refresh = now + self._refresh_interval
 
         while True:
             now = float(self._monotonic())
-            deadlines = [next_refresh]
-            if self._pulse_deadline is not None:
-                deadlines.append(self._pulse_deadline)
-            timeout = max(0.0, min(deadlines) - now)
+            wake_deadline = next_refresh
+            # The injected terminal contract reserves ``None`` for a real timeout
+            # and requires a strictly positive wait value.
+            timeout = max(0.000001, wake_deadline - now)
             try:
                 read_key = getattr(self._terminal, "read_key")
                 key = read_key(timeout)
-            except KeyboardInterrupt:
+            except EOFError:
                 return self.current_exit_code()
+            except KeyboardInterrupt:
+                return EXIT_INTERRUPT
             except BaseException as error:
                 raise FollowTerminalError("terminal input failed") from error
             if key is not None and type(key) is not str:
@@ -715,11 +789,14 @@ class FollowController:
                 return self.current_exit_code()
 
             now = float(self._monotonic())
-            self._advance_pulse(now)
+            if key is None:
+                # A timeout event is authoritative even when a deterministic test
+                # clock does not advance itself while the fake terminal waits.
+                now = max(now, wake_deadline)
             if now >= next_refresh:
-                self._refresh(force=False, now=now)
+                self._refresh(force=False)
                 next_refresh = now + self._refresh_interval
-            if key is not None and not self._handle_key(key, now=now):
+            if key is not None and not self._handle_key(key):
                 return self.current_exit_code()
 
 
@@ -737,17 +814,18 @@ def run_watch_follow(
             with signal_guard_factory():  # type: ignore[attr-defined]
                 return controller.run(initial_trial_id)
     except KeyboardInterrupt:
-        return controller.current_exit_code()
+        return EXIT_INTERRUPT
 
 
 __all__ = [
-    "DEFAULT_PULSE_INTERVAL",
     "DEFAULT_REFRESH_INTERVAL",
     "FollowController",
     "FollowRenderError",
     "FollowTerminalError",
+    "InjectedTerminalSession",
     "TerminalSession",
     "TerminalUnavailable",
     "run_watch_follow",
     "supports_follow_terminal",
+    "supports_injected_terminal",
 ]

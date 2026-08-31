@@ -248,19 +248,22 @@ def render_watch_follow_frame(
         raise ValueError("pulse_phase must be a non-negative integer or None")
 
     if model is None:
-        lines = ["arity watch | snapshot unavailable"]
+        title = "arity watch" if capabilities.ascii else "arity watch ·"
+        lines = [f"{title} | snapshot unavailable"]
     else:
         read_time = _read_time(model.read_at)
         trial_word = "trial" if len(model.trials) == 1 else "trials"
+        title = "arity watch" if capabilities.ascii else "arity watch ·"
         lines = [
-            f"arity watch | {model.backend} | {len(model.trials)} {trial_word} | "
+            f"{title} | {model.backend} | {len(model.trials)} {trial_word} | "
             f"read {read_time}"
         ]
 
     if pulse_phase is not None:
         lines.append(_pulse_line(capabilities, pulse_phase))
     if error_code is not None:
-        lines.append(f"watch error: {error_code}")
+        prefix = "last good snapshot | " if model is not None else ""
+        lines.append(f"{prefix}watch error: {error_code}")
 
     if model is not None:
         if not model.trials and not model.catalog_issues:
@@ -288,7 +291,7 @@ def render_watch_follow_frame(
     if help_visible:
         lines.extend(
             (
-                "j/down next | k/up previous | Enter expand/collapse",
+                "j/k or down/up select | Enter expand/collapse",
                 "r retry/refresh | ? close help | q quit",
             )
         )
@@ -301,7 +304,7 @@ def render_watch_follow_frame(
         for index, line in enumerate(fitted):
             if line.startswith("> "):
                 fitted[index] = f"\x1b[36m{line}\x1b[0m"
-            elif line.startswith("watch error:"):
+            elif "watch error:" in line:
                 fitted[index] = f"\x1b[31m{line}\x1b[0m"
     return "\n".join(fitted) + "\n"
 
