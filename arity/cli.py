@@ -560,6 +560,11 @@ def main() -> int:
         action="store_true",
         help="Disable motion (the current one-shot view has none)",
     )
+    watch_parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="Refresh in a supported interactive terminal",
+    )
 
     trial_parser = subparsers.add_parser(
         "trial", help="Inspect or replay one persisted trial journal"
