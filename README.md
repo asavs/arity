@@ -29,7 +29,7 @@ Arity separates transition decisions from effect execution:
 
 $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_state}, \text{effects})$$
 
-`transition` updates the supplied state while deciding which effects are required; `Runtime` performs the I/O. This boundary lets callers supply model providers, tool runners, record stores, transports, and event/effect observers. Trials layer on built-in verification, archival, blind tie review, conferences, delivery receipts, and empirical standings. The current trial evaluator is built in around `ImpartialArchivist`, verification, and reviewer candidates rather than exposed as a replaceable evaluator seam.
+`transition` updates the supplied state while deciding which effects are required; `Runtime` performs the I/O. This boundary lets callers supply model providers, tool runners, record stores, transports, and event/effect observers. Trials layer on built-in verification and factual archival, then freeze content-addressed evidence before an injected `TrialEvaluator` may express a preference. An explicit, attributable `Resolution` controls frozen-byte delivery. Versioned trial events make that lifecycle replayable without live workspaces or providers.
 
 ```
                   ┌────────────────────────┐
@@ -54,6 +54,9 @@ $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_stat
 3. **`RecordStore`** (`arity.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
 4. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
 5. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
+6. **`ContextAdapter`** (`arity.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
+7. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
+8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
 
 ## Quickstart
 
@@ -84,6 +87,12 @@ print(output)
 ### Run Tests
 ```bash
 python -m pytest -q tests
+```
+
+The clean installed-wheel acceptance gate is separate from the source suite:
+
+```bash
+python acceptance/verify_installed.py
 ```
 
 ## Compatibility Boundary
