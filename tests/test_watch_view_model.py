@@ -1,4 +1,4 @@
-"""Acceptance contract for ``gorkbot.watch``.
+"""Acceptance contract for the blind-safe watch view model.
 
 The Stage-1 public API is intentionally small::
 
@@ -18,6 +18,7 @@ inspected ``TrialCatalog`` and perform no I/O.
 
 from __future__ import annotations
 
+import base64
 import builtins
 import dataclasses
 import json
@@ -34,7 +35,7 @@ import pytest
 
 from gorkbot.inspection import InspectionIssue, TrialCatalog, TrialInspection
 from gorkbot.trial_events import TrialEvent, TrialReplay
-from gorkbot.watch import WatchProjector, WatchViewModel, watch_fingerprint
+from gorkbot.watch_view_model import WatchProjector, WatchViewModel, watch_fingerprint
 
 
 BLIND_LEAK_SENTINEL = "BLIND_LEAK_SENTINEL"
@@ -54,8 +55,10 @@ ALLOWED_ISSUE_CODES = {
     "unsupported_evaluation_schema",
     "unsupported_resolution_schema",
     "invalid_record",
+    "orphan_event",
     "invalid_event",
     "invalid_replay",
+    "inspection_incomplete",
 }
 
 
@@ -231,47 +234,75 @@ def document(model: WatchViewModel) -> dict[str, Any]:
 def assert_strict_allowlist(value: dict[str, Any]) -> None:
     assert set(value) == {
         "backend",
+        "catalog_issues",
+        "more_trials_omitted",
         "read_at",
+        "requested_trial_missing",
+        "selected_trial_number",
         "trials",
-        "trials_more_omitted",
-        "selected_label",
     }
     assert value["backend"] in {"jsonl", "sqlite"}
     assert type(value["read_at"]) is float and math.isfinite(value["read_at"])
-    assert type(value["trials_more_omitted"]) is bool
-    assert value["selected_label"] is None or isinstance(value["selected_label"], str)
+    assert type(value["more_trials_omitted"]) is bool
+    assert type(value["requested_trial_missing"]) is bool
+    assert value["selected_trial_number"] is None or (
+        type(value["selected_trial_number"]) is int
+        and value["selected_trial_number"] >= 1
+    )
+    assert isinstance(value["catalog_issues"], list)
+    for issue in value["catalog_issues"]:
+        assert set(issue) == {"code", "message"}
+        assert issue["code"] in ALLOWED_ISSUE_CODES
+        assert isinstance(issue["message"], str) and issue["message"]
     assert isinstance(value["trials"], list)
     for trial in value["trials"]:
         assert set(trial) == {
-            "label",
+            "trial_number",
             "integrity",
             "lifecycle",
-            "agents",
-            "agents_more_omitted",
-            "evidence_count",
-            "review_count",
-            "resolution_count",
-            "delivery_present",
-            "issues",
+            "detail",
+            "issue",
+            "selected",
         }
-        assert isinstance(trial["label"], str)
+        assert type(trial["trial_number"]) is int and trial["trial_number"] >= 1
         assert trial["integrity"] in ALLOWED_INTEGRITY
         assert trial["lifecycle"] in ALLOWED_LIFECYCLE
-        assert type(trial["agents_more_omitted"]) is bool
-        assert type(trial["delivery_present"]) is bool
-        for count_name in ("evidence_count", "review_count", "resolution_count"):
-            assert type(trial[count_name]) is int
-            assert 0 <= trial[count_name] <= 256
-        assert isinstance(trial["agents"], list)
-        for agent in trial["agents"]:
-            assert set(agent) == {"label", "completion_recorded"}
-            assert isinstance(agent["label"], str)
-            assert type(agent["completion_recorded"]) is bool
-        assert isinstance(trial["issues"], list)
-        for issue in trial["issues"]:
-            assert set(issue) == {"code", "text"}
+        assert type(trial["selected"]) is bool
+        issue = trial["issue"]
+        if issue is not None:
+            assert set(issue) == {"code", "message"}
             assert issue["code"] in ALLOWED_ISSUE_CODES
-            assert isinstance(issue["text"], str) and issue["text"]
+            assert isinstance(issue["message"], str) and issue["message"]
+        detail = trial["detail"]
+        if detail is None:
+            continue
+        assert set(detail) == {
+            "agents",
+            "arms",
+            "completed_agents",
+            "evidence",
+            "reviews",
+            "resolutions",
+            "delivery_recorded",
+        }
+        assert type(detail["delivery_recorded"]) is bool
+        for count_name in (
+            "arms",
+            "completed_agents",
+            "evidence",
+            "reviews",
+            "resolutions",
+        ):
+            assert set(detail[count_name]) == {"value", "more_omitted"}
+            assert type(detail[count_name]["value"]) is int
+            assert 0 <= detail[count_name]["value"] <= 256
+            assert type(detail[count_name]["more_omitted"]) is bool
+        assert isinstance(detail["agents"], list)
+        for agent in detail["agents"]:
+            assert set(agent) == {"position", "completion_recorded"}
+            assert type(agent["position"]) is int
+            assert 0 <= agent["position"] < 256
+            assert type(agent["completion_recorded"]) is bool
 
 
 @pytest.mark.parametrize(
@@ -356,7 +387,8 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
         ),
     )
 
-    model = WatchProjector().project(
+    projector = WatchProjector()
+    model = projector.project(
         source_catalog,
         backend="jsonl",
         read_at=123.0,
@@ -368,27 +400,42 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
     assert_strict_allowlist(value)
     assert marker not in encoded
     assert marker.encode().hex() not in encoded.lower()
+    assert base64.b64encode(marker.encode()).decode() not in encoded
+    assert marker not in repr(projector)
+    assert marker not in repr(model)
+    assert marker not in repr(watch_fingerprint(model))
     assert value == {
         "backend": "jsonl",
-        "read_at": 123.0,
-        "trials": [
+        "catalog_issues": [
             {
-                "label": "Trial 1",
-                "integrity": "valid",
-                "lifecycle": "delivered",
-                "agents": [
-                    {"label": "Agent A", "completion_recorded": True},
-                ],
-                "agents_more_omitted": False,
-                "evidence_count": 1,
-                "review_count": 1,
-                "resolution_count": 1,
-                "delivery_present": True,
-                "issues": [],
+                "code": "inspection_incomplete",
+                "message": "The persisted trial could not be fully inspected.",
             },
         ],
-        "trials_more_omitted": False,
-        "selected_label": "Trial 1",
+        "more_trials_omitted": False,
+        "read_at": 123.0,
+        "requested_trial_missing": False,
+        "selected_trial_number": 1,
+        "trials": [
+            {
+                "trial_number": 1,
+                "integrity": "valid",
+                "lifecycle": "delivered",
+                "detail": {
+                    "agents": [
+                        {"position": 0, "completion_recorded": True},
+                    ],
+                    "arms": {"value": 1, "more_omitted": False},
+                    "completed_agents": {"value": 1, "more_omitted": False},
+                    "evidence": {"value": 1, "more_omitted": False},
+                    "reviews": {"value": 1, "more_omitted": False},
+                    "resolutions": {"value": 1, "more_omitted": False},
+                    "delivery_recorded": True,
+                },
+                "issue": None,
+                "selected": True,
+            },
+        ],
     }
 
 
@@ -400,13 +447,13 @@ class BoundaryInspection:
         trial_id: str,
         integrity: str,
         replay_value: TrialReplay | None,
-        issue: InspectionIssue,
+        issue: InspectionIssue | tuple[InspectionIssue, ...],
     ) -> None:
         self.trial_id = trial_id
         self.integrity = integrity
         self.status = BLIND_LEAK_SENTINEL
         self.replay = replay_value
-        self.issues = (issue,)
+        self.issues = issue if isinstance(issue, tuple) else (issue,)
 
     @property
     def events(self) -> object:
@@ -464,18 +511,14 @@ def test_unsupported_uses_only_verified_replay_prefix_and_corrupt_suppresses_det
     assert_strict_allowlist(value)
     assert BLIND_LEAK_SENTINEL not in json.dumps(value, sort_keys=True)
     assert rows["partial"]["lifecycle"] == "evidenced"
-    assert rows["partial"]["agents"] == [
-        {"label": "Agent A", "completion_recorded": True},
+    assert rows["partial"]["detail"]["agents"] == [
+        {"position": 0, "completion_recorded": True},
     ]
-    assert rows["partial"]["evidence_count"] == 1
-    assert rows["partial"]["issues"][0]["code"] == "unsupported_event_schema"
+    assert rows["partial"]["detail"]["evidence"]["value"] == 1
+    assert rows["partial"]["issue"]["code"] == "unsupported_event_schema"
     assert rows["corrupt"]["lifecycle"] == "unknown"
-    assert rows["corrupt"]["agents"] == []
-    assert rows["corrupt"]["evidence_count"] == 0
-    assert rows["corrupt"]["review_count"] == 0
-    assert rows["corrupt"]["resolution_count"] == 0
-    assert rows["corrupt"]["delivery_present"] is False
-    assert rows["corrupt"]["issues"][0]["code"] == "invalid_replay"
+    assert rows["corrupt"]["detail"] is None
+    assert rows["corrupt"]["issue"]["code"] == "invalid_replay"
 
 
 def test_unsupported_without_verified_prefix_has_no_lifecycle_or_agent_detail() -> None:
@@ -500,15 +543,73 @@ def test_unsupported_without_verified_prefix_has_no_lifecycle_or_agent_detail() 
 
     assert row["integrity"] == "partial"
     assert row["lifecycle"] == "unknown"
-    assert row["agents"] == []
-    assert row["evidence_count"] == 0
-    assert row["review_count"] == 0
-    assert row["resolution_count"] == 0
-    assert row["delivery_present"] is False
+    assert row["detail"] is None
+    assert row["issue"]["code"] == "unsupported_event"
     assert BLIND_LEAK_SENTINEL not in json.dumps(row, sort_keys=True)
 
 
-def test_safe_issue_text_is_canned_and_unknown_issue_codes_are_discarded() -> None:
+def test_post_boundary_issue_append_cannot_change_projection_or_fingerprint() -> None:
+    prefix = replay(
+        "raw-boundary",
+        arms=({"arm_id": "raw-arm", "arm_ordinal": 0},),
+        timestamp=4.0,
+    )
+    boundary = InspectionIssue(
+        code="unsupported_event_schema",
+        message=BLIND_LEAK_SENTINEL,
+        sequence=2,
+        event_type=BLIND_LEAK_SENTINEL,
+    )
+    later_known_looking = InspectionIssue(
+        code="unsupported_event",
+        message=f"later {BLIND_LEAK_SENTINEL}",
+        sequence=1,
+        event_type="trial.started",
+    )
+    first = BoundaryInspection("raw-boundary", "unsupported", prefix, boundary)
+    appended = BoundaryInspection(
+        "raw-boundary",
+        "unsupported",
+        prefix,
+        (boundary, later_known_looking),
+    )
+
+    before = WatchProjector().project(
+        catalog(first), backend="jsonl", read_at=1.0,
+    )
+    after = WatchProjector().project(
+        catalog(appended), backend="jsonl", read_at=2.0,
+    )
+
+    assert before.trials[0].issue is not None
+    assert before.trials[0].issue.code == "unsupported_event_schema"
+    assert document(before) | {"read_at": 2.0} == document(after)
+    assert watch_fingerprint(before) == watch_fingerprint(after)
+
+
+def test_sorting_uses_only_verified_prefix_timestamps() -> None:
+    older = BoundaryInspection(
+        "raw-older",
+        "unsupported",
+        lifecycle_replay("raw-older", "evidenced", timestamp=10.0),
+        InspectionIssue(code="unsupported_event", message=BLIND_LEAK_SENTINEL),
+    )
+    newer = BoundaryInspection(
+        "raw-newer",
+        "unsupported",
+        lifecycle_replay("raw-newer", "started", timestamp=20.0),
+        InspectionIssue(code="unsupported_event", message=BLIND_LEAK_SENTINEL),
+    )
+
+    model = WatchProjector().project(
+        catalog(older, newer), backend="jsonl", read_at=1.0,
+    )
+
+    assert [trial.lifecycle for trial in model.trials] == ["started", "evidenced"]
+    assert [trial.trial_number for trial in model.trials] == [1, 2]
+
+
+def test_safe_issue_text_is_canned_and_unknown_issue_codes_become_generic() -> None:
     first = inspection(
         "first",
         integrity="unsupported",
@@ -538,15 +639,28 @@ def test_safe_issue_text_is_canned_and_unknown_issue_codes_are_discarded() -> No
             ),
         ),
     )
+    third = inspection(
+        "third",
+        integrity="unsupported",
+        replay_value=replay("third"),
+        issues=(
+            InspectionIssue(
+                code=BLIND_LEAK_SENTINEL,
+                message=BLIND_LEAK_SENTINEL,
+                trial_id=BLIND_LEAK_SENTINEL,
+            ),
+        ),
+    )
 
     rows = document(
         WatchProjector().project(
-            catalog(first, second), backend="jsonl", read_at=1.0,
+            catalog(first, second, third), backend="jsonl", read_at=1.0,
         )
     )["trials"]
 
-    assert rows[0]["issues"] == rows[1]["issues"]
-    assert rows[0]["issues"][0]["code"] == "unsupported_event"
+    assert rows[0]["issue"] == rows[1]["issue"]
+    assert rows[0]["issue"]["code"] == "unsupported_event"
+    assert rows[2]["issue"]["code"] == "inspection_incomplete"
     assert BLIND_LEAK_SENTINEL not in json.dumps(rows, sort_keys=True)
 
 
@@ -566,9 +680,11 @@ def test_trial_labels_survive_reordering_insertion_selection_and_removal() -> No
             selected_trial_id="raw-b",
         )
     )
-    first_by_lifecycle = {row["lifecycle"]: row["label"] for row in first["trials"]}
-    assert first_by_lifecycle == {"started": "Trial 1", "evidenced": "Trial 2"}
-    assert first["selected_label"] == "Trial 2"
+    first_by_lifecycle = {
+        row["lifecycle"]: row["trial_number"] for row in first["trials"]
+    }
+    assert first_by_lifecycle == {"started": 1, "evidenced": 2}
+    assert first["selected_trial_number"] == 2
 
     reordered_b = inspection(
         "raw-b", replay_value=lifecycle_replay("raw-b", "evidenced", timestamp=30),
@@ -587,13 +703,15 @@ def test_trial_labels_survive_reordering_insertion_selection_and_removal() -> No
             selected_trial_id="raw-a",
         )
     )
-    second_by_lifecycle = {row["lifecycle"]: row["label"] for row in second["trials"]}
-    assert second_by_lifecycle == {
-        "evidenced": "Trial 2",
-        "started": "Trial 1",
-        "resolved": "Trial 3",
+    second_by_lifecycle = {
+        row["lifecycle"]: row["trial_number"] for row in second["trials"]
     }
-    assert second["selected_label"] == "Trial 1"
+    assert second_by_lifecycle == {
+        "evidenced": 2,
+        "started": 1,
+        "resolved": 3,
+    }
+    assert second["selected_trial_number"] == 1
 
     trial_d = inspection(
         "raw-d", replay_value=lifecycle_replay("raw-d", "unresolved", timestamp=1),
@@ -603,9 +721,67 @@ def test_trial_labels_survive_reordering_insertion_selection_and_removal() -> No
             catalog(trial_c, trial_d), backend="jsonl", read_at=3.0,
         )
     )
-    third_by_lifecycle = {row["lifecycle"]: row["label"] for row in third["trials"]}
-    assert third_by_lifecycle == {"resolved": "Trial 3", "unresolved": "Trial 4"}
-    assert third["selected_label"] is None
+    third_by_lifecycle = {
+        row["lifecycle"]: row["trial_number"] for row in third["trials"]
+    }
+    assert third_by_lifecycle == {"resolved": 3, "unresolved": 4}
+    assert third["selected_trial_number"] is None
+
+
+def test_missing_and_offscreen_selection_are_safe_structural_state() -> None:
+    projector = WatchProjector()
+    missing = projector.project(
+        catalog(inspection("raw-present")),
+        backend="jsonl",
+        read_at=1.0,
+        selected_trial_id="raw-missing",
+    )
+
+    assert missing.requested_trial_missing is True
+    assert missing.selected_trial_number is None
+    assert all(not trial.selected for trial in missing.trials)
+    assert watch_fingerprint(missing) == watch_fingerprint(
+        WatchProjector().project(
+            catalog(inspection("raw-present")),
+            backend="jsonl",
+            read_at=99.0,
+        )
+    )
+
+    many = tuple(inspection(f"raw-{index:03d}") for index in range(257))
+    offscreen = projector.project(
+        catalog(*many),
+        backend="jsonl",
+        read_at=2.0,
+        selected_trial_id="raw-256",
+    )
+
+    assert offscreen.more_trials_omitted is True
+    assert offscreen.requested_trial_missing is False
+    assert offscreen.selected_trial_number is not None
+    assert all(not trial.selected for trial in offscreen.trials)
+
+
+def test_catalog_issues_are_deduplicated_and_never_echo_raw_messages() -> None:
+    issues = (
+        InspectionIssue(code="orphan_event", message=BLIND_LEAK_SENTINEL),
+        InspectionIssue(code="orphan_event", message="different hidden message"),
+        InspectionIssue(
+            code=BLIND_LEAK_SENTINEL,
+            message=BLIND_LEAK_SENTINEL,
+            trial_id=BLIND_LEAK_SENTINEL,
+        ),
+    )
+
+    model = WatchProjector().project(
+        catalog(issues=issues), backend="sqlite", read_at=1.0,
+    )
+
+    assert [issue.code for issue in model.catalog_issues] == [
+        "inspection_incomplete",
+        "orphan_event",
+    ]
+    assert BLIND_LEAK_SENTINEL not in repr(model)
 
 
 def test_agent_labels_use_bounded_sorted_positions_not_raw_ordinals() -> None:
@@ -613,7 +789,7 @@ def test_agent_labels_use_bounded_sorted_positions_not_raw_ordinals() -> None:
     arms = (
         {"arm_id": "huge", "arm_ordinal": huge},
         {"arm_id": "negative-first", "arm_ordinal": -huge},
-        {"arm_id": "negative-second", "arm_ordinal": -huge},
+        {"arm_id": "negative-second", "arm_ordinal": -huge + 1},
         {"arm_id": "middle", "arm_ordinal": 5},
     )
     completed = (
@@ -625,22 +801,24 @@ def test_agent_labels_use_bounded_sorted_positions_not_raw_ordinals() -> None:
         replay_value=replay("ordinal-hidden", arms=arms, completed=completed),
     )
 
-    agents = document(
-        WatchProjector().project(
-            catalog(source), backend="jsonl", read_at=1.0,
-        )
-    )["trials"][0]["agents"]
+    model = WatchProjector().project(
+        catalog(source), backend="jsonl", read_at=1.0,
+    )
+    detail = model.trials[0].detail
+    assert detail is not None
+    agents = detail.agents
 
-    assert agents == [
-        {"label": "Agent A", "completion_recorded": False},
-        {"label": "Agent B", "completion_recorded": True},
-        {"label": "Agent C", "completion_recorded": False},
-        {"label": "Agent D", "completion_recorded": True},
+    assert [(agent.label, agent.completion_recorded) for agent in agents] == [
+        ("Agent A", False),
+        ("Agent B", True),
+        ("Agent C", False),
+        ("Agent D", True),
     ]
-    assert all(len(agent["label"]) <= len("Agent IV") for agent in agents)
-    assert str(huge) not in json.dumps(agents)
-    assert "running" not in json.dumps(agents)
-    assert "failed" not in json.dumps(agents)
+    assert all(len(agent.label) <= len("Agent IV") for agent in agents)
+    encoded = json.dumps(document(model), sort_keys=True)
+    assert str(huge) not in encoded
+    assert "running" not in encoded
+    assert "failed" not in encoded
 
 
 def test_trial_and_agent_collections_are_capped_at_256_with_boolean_omission_flags() -> None:
@@ -653,8 +831,8 @@ def test_trial_and_agent_collections_are_capped_at_256_with_boolean_omission_fla
         )
     )
     assert len(trial_value["trials"]) == 256
-    assert trial_value["trials_more_omitted"] is True
-    assert type(trial_value["trials_more_omitted"]) is bool
+    assert trial_value["more_trials_omitted"] is True
+    assert type(trial_value["more_trials_omitted"]) is bool
 
     arms = tuple(
         {"arm_id": f"hidden-arm-{index}", "arm_ordinal": index}
@@ -664,17 +842,72 @@ def test_trial_and_agent_collections_are_capped_at_256_with_boolean_omission_fla
         "oversized-arm-trial",
         replay_value=replay("oversized-arm-trial", arms=arms),
     )
-    arm_row = document(
-        WatchProjector().project(
-            catalog(arm_source), backend="jsonl", read_at=1.0,
-        )
-    )["trials"][0]
-    assert len(arm_row["agents"]) == 256
-    assert arm_row["agents_more_omitted"] is True
-    assert arm_row["agents"][0]["label"] == "Agent A"
-    assert arm_row["agents"][25]["label"] == "Agent Z"
-    assert arm_row["agents"][26]["label"] == "Agent AA"
-    assert arm_row["agents"][-1]["label"] == "Agent IV"
+    arm_model = WatchProjector().project(
+        catalog(arm_source), backend="jsonl", read_at=1.0,
+    )
+    detail = arm_model.trials[0].detail
+    assert detail is not None
+    assert len(detail.agents) == 256
+    assert detail.arms.value == 256
+    assert detail.arms.more_omitted is True
+    assert detail.agents[0].label == "Agent A"
+    assert detail.agents[25].label == "Agent Z"
+    assert detail.agents[26].label == "Agent AA"
+    assert detail.agents[-1].label == "Agent IV"
+
+
+def test_counts_are_bounded_and_duplicate_phase_completions_count_once() -> None:
+    arm_id = "raw-arm"
+    source_replay = replay(
+        "raw-counts",
+        arms=({"arm_id": arm_id, "arm_ordinal": 0},),
+        completed=tuple(
+            {"arm_id": arm_id, "phase": f"hidden-phase-{index}"}
+            for index in range(258)
+        ),
+    )
+    source_replay = dataclasses.replace(
+        source_replay,
+        evidence_bundles=tuple(cast(Any, object()) for _ in range(258)),
+        reviews=tuple(cast(Any, {}) for _ in range(258)),
+        resolutions=tuple(
+            cast(Any, HiddenResolution(resolved=True)) for _ in range(258)
+        ),
+    )
+
+    model = WatchProjector().project(
+        catalog(inspection("raw-counts", replay_value=source_replay)),
+        backend="jsonl",
+        read_at=1.0,
+    )
+    detail = model.trials[0].detail
+
+    assert detail is not None
+    assert detail.completed_agents.value == 1
+    assert detail.completed_agents.more_omitted is False
+    assert detail.agents[0].completion_recorded is True
+    for count in (detail.evidence, detail.reviews, detail.resolutions):
+        assert count.value == 256
+        assert count.more_omitted is True
+
+
+def test_legacy_scalar_arms_keep_declaration_order() -> None:
+    source = inspection(
+        "raw-legacy",
+        replay_value=replay(
+            "raw-legacy",
+            arms=("raw-z", "raw-a"),
+            completed=({"arm_id": "raw-a", "status": BLIND_LEAK_SENTINEL},),
+        ),
+    )
+
+    model = WatchProjector().project(
+        catalog(source), backend="jsonl", read_at=1.0,
+    )
+    detail = model.trials[0].detail
+
+    assert detail is not None
+    assert [agent.completion_recorded for agent in detail.agents] == [False, True]
 
 
 def hidden_variant(
@@ -728,8 +961,8 @@ def test_safe_fingerprint_ignores_hidden_data_read_time_and_selection() -> None:
     second_digest = watch_fingerprint(hidden_only_change)
 
     assert first_digest == second_digest
-    assert isinstance(first_digest, str) and first_digest
-    assert BLIND_LEAK_SENTINEL not in first_digest
+    assert isinstance(first_digest, tuple) and first_digest
+    assert BLIND_LEAK_SENTINEL not in repr(first_digest)
 
 
 def test_safe_fingerprint_changes_when_visible_structure_changes() -> None:
@@ -804,5 +1037,5 @@ def test_projection_and_fingerprint_have_no_runtime_or_external_side_effects(
         catalog(source), backend="jsonl", read_at=1.0,
     )
 
-    assert document(model)["trials"][0]["label"] == "Trial 1"
+    assert model.trials[0].label == "Trial 1"
     assert watch_fingerprint(model)
