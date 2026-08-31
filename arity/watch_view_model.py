@@ -688,6 +688,13 @@ def _project_trial(
         )
         if replay.request_usage != recorded_request_usage:
             raise ValueError("verified replay request usage is inconsistent")
+        recorded_observations = tuple(
+            Observation.from_dict(event.payload["observation"])
+            for event in replay.events
+            if event.event_type == "observation.recorded"
+        )
+        if replay.observations != recorded_observations:
+            raise ValueError("verified replay observations are inconsistent")
         if replay.delivery is not None and not isinstance(replay.delivery, Mapping):
             raise TypeError("verified replay delivery is not an object")
         boundary_sequence = (
