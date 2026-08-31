@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
@@ -28,13 +30,19 @@ KNOWN_EVENT_TYPES = {
     "resolution.recorded",
     "delivery.completed",
 }
+TRIAL_PHASES = {"trial", "conference"}
 _JOURNAL_LOCKS_GUARD = threading.Lock()
 _JOURNAL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 
 
 def _journal_lock(store: RecordStore, trial_id: str) -> threading.RLock:
     location = getattr(store, "path", None) or getattr(store, "root", None)
-    store_key = str(location) if location is not None else f"object:{id(store)}"
+    if location is None:
+        store_key = f"object:{id(store)}"
+    else:
+        store_type = f"{type(store).__module__}.{type(store).__qualname__}"
+        canonical_location = os.path.normcase(str(Path(location).resolve()))
+        store_key = f"{store_type}:{canonical_location}"
     key = (store_key, trial_id)
     with _JOURNAL_LOCKS_GUARD:
         return _JOURNAL_LOCKS.setdefault(key, threading.RLock())
@@ -323,6 +331,8 @@ def replay_trial(
         payload = event.payload
         if event.event_type == "arm.completed":
             phase = str(payload.get("phase", "trial"))
+            if phase not in TRIAL_PHASES:
+                raise ValueError(f"unsupported trial phase {phase!r}")
             if phase in frozen_phases:
                 raise ValueError("an arm cannot complete after its phase evidence was frozen")
             arm_id = str(payload.get("arm_id", ""))
@@ -361,6 +371,8 @@ def replay_trial(
             if dict(started.get("hidden_test_hashes") or {}) != dict(bundle.hidden_test_hashes):
                 raise ValueError("frozen evidence tests do not match the trial declaration")
             phase = str(bundle.metadata.get("phase", "trial"))
+            if phase not in TRIAL_PHASES:
+                raise ValueError(f"unsupported trial phase {phase!r}")
             if phase in frozen_phases:
                 raise ValueError("a trial phase can freeze evidence only once")
             evidence_arms = {(phase, candidate.arm_id) for candidate in bundle.candidates}
@@ -425,7 +437,11 @@ def replay_trial(
                     raise ValueError("frozen evidence does not match its completed arm identity")
             parent_hash = bundle.metadata.get("parent_evidence_hash")
             if phase == "conference":
-                if not bundles or parent_hash != bundles[-1].evidence_hash:
+                if (
+                    not bundles
+                    or bundles[-1].metadata.get("phase", "trial") != "trial"
+                    or parent_hash != bundles[-1].evidence_hash
+                ):
                     raise ValueError("conference evidence must link to the prior frozen evidence")
             elif parent_hash is not None:
                 raise ValueError("initial evidence cannot declare a parent bundle")
