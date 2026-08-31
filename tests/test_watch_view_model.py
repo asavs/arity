@@ -316,6 +316,11 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
                 "unknown",
                 "unsupported",
             }
+            assert cache_heat["activity_confidence"] in {
+                None,
+                "confirmed",
+                "estimated",
+            }
             assert cache_heat["deadline_at"] is None or type(
                 cache_heat["deadline_at"]
             ) is float

@@ -9,8 +9,9 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 
+from .cache_heat import CacheHeatMode, CacheHeatView, project_cache_heat
 from .inspection import InspectionIssue, TrialCatalog, TrialInspection
 from .observations import Observation
 from .trial_events import (
@@ -24,6 +25,7 @@ from .trial_events import (
 MAX_WATCH_TRIALS = 256
 MAX_WATCH_AGENTS = 256
 MAX_WATCH_COUNT = 256
+_CACHE_POLICIES = frozenset({"conservative", "exact", "off"})
 
 WatchBackend = Literal["jsonl", "sqlite"]
 WatchIntegrity = Literal["valid", "partial", "corrupt"]
@@ -159,6 +161,7 @@ class WatchTrialDetail:
     reviews: BoundedCount
     resolutions: BoundedCount
     delivery_recorded: bool
+    cache_heat: Optional[CacheHeatView] = None
     mechanical_observations: BoundedCount = field(
         default_factory=lambda: BoundedCount(0)
     )
@@ -188,6 +191,8 @@ class WatchTrialDetail:
                 raise TypeError("watch detail counts must be bounded")
         if type(self.delivery_recorded) is not bool:
             raise TypeError("delivery_recorded must be a boolean")
+        if self.cache_heat is not None and type(self.cache_heat) is not CacheHeatView:
+            raise TypeError("cache_heat must be an exact CacheHeatView or None")
 
 
 @dataclass(frozen=True)
@@ -364,10 +369,15 @@ class WatchLabelRegistry:
 class WatchProjector:
     """Retain neutral labels while projecting successive snapshots in one session."""
 
-    __slots__ = ("_label_registry",)
+    __slots__ = ("_label_registry", "_cache_policy")
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        cache_policy: CacheHeatMode = "conservative",
+    ) -> None:
         self._label_registry = WatchLabelRegistry()
+        self._cache_policy = _validate_cache_policy(cache_policy)
 
     def project(
         self,
@@ -383,6 +393,7 @@ class WatchProjector:
             read_at=read_at,
             selected_trial_id=selected_trial_id,
             label_registry=self._label_registry,
+            cache_policy=self._cache_policy,
         )
 
     def _trial_id_for_number(self, trial_number: int) -> str:
@@ -411,6 +422,12 @@ def _finite_number(value: object) -> bool:
         return math.isfinite(float(value))
     except (OverflowError, TypeError, ValueError):
         return False
+
+
+def _validate_cache_policy(value: object) -> CacheHeatMode:
+    if type(value) is not str or value not in _CACHE_POLICIES:
+        raise ValueError("unsupported watch cache policy")
+    return cast(CacheHeatMode, value)
 
 
 def _bounded_count(value: int) -> BoundedCount:
@@ -535,7 +552,12 @@ def _ordered_arm_ids(replay: TrialReplay) -> tuple[str, ...]:
     raise ValueError("verified replay mixes structured and legacy arm declarations")
 
 
-def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
+def _trial_detail(
+    replay: TrialReplay,
+    *,
+    read_at: float,
+    cache_policy: CacheHeatMode,
+) -> WatchTrialDetail:
     arm_ids = _ordered_arm_ids(replay)
     completed_ids: set[str] = set()
     for completion in replay.completed_arms:
@@ -557,6 +579,15 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
     )
     if len(observation_kinds) != len(replay.observations):
         raise TypeError("verified replay observations are invalid")
+    cache_heat = (
+        None
+        if cache_policy == "off"
+        else project_cache_heat(
+            replay.request_usage,
+            now=read_at,
+            mode=cache_policy,
+        )
+    )
     return WatchTrialDetail(
         agents=agents,
         arms=_bounded_count(len(arm_ids)),
@@ -565,6 +596,7 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
         reviews=_bounded_count(len(replay.reviews)),
         resolutions=_bounded_count(len(replay.resolutions)),
         delivery_recorded=replay.delivery is not None,
+        cache_heat=cache_heat,
         mechanical_observations=_bounded_count(
             observation_kinds.count("mechanical")
         ),
@@ -573,7 +605,12 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
     )
 
 
-def _project_trial(inspection: TrialInspection) -> _TrialSource:
+def _project_trial(
+    inspection: TrialInspection,
+    *,
+    read_at: float,
+    cache_policy: CacheHeatMode,
+) -> _TrialSource:
     raw_integrity = inspection.integrity
     if raw_integrity == "corrupt":
         return _TrialSource(
@@ -644,6 +681,13 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
             raise TypeError("verified replay collections must be tuples")
         if replay.unhandled_events:
             raise ValueError("verified replay contains unhandled events")
+        recorded_request_usage = tuple(
+            event.payload
+            for event in replay.events
+            if event.event_type == "request.usage_recorded"
+        )
+        if replay.request_usage != recorded_request_usage:
+            raise ValueError("verified replay request usage is inconsistent")
         if replay.delivery is not None and not isinstance(replay.delivery, Mapping):
             raise TypeError("verified replay delivery is not an object")
         boundary_sequence = (
@@ -660,7 +704,11 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
             or lifecycle == "unknown"
         ):
             raise ValueError("verified replay lifecycle is invalid")
-        detail = _trial_detail(replay)
+        detail = _trial_detail(
+            replay,
+            read_at=read_at,
+            cache_policy=cache_policy,
+        )
         trusted_updated_at = _trusted_timestamp(
             replay,
             boundary_sequence=boundary_sequence,
@@ -734,6 +782,7 @@ def build_watch_view_model(
     read_at: float,
     selected_trial_id: Optional[str] = None,
     label_registry: Optional[WatchLabelRegistry] = None,
+    cache_policy: CacheHeatMode = "conservative",
 ) -> WatchViewModel:
     """Build one blind-safe snapshot without consulting any live or writable seam.
 
@@ -752,11 +801,18 @@ def build_watch_view_model(
         raise ValueError("selected_trial_id must be a non-empty string or None")
     if label_registry is not None and type(label_registry) is not WatchLabelRegistry:
         raise TypeError("label_registry must be WatchLabelRegistry or None")
+    resolved_cache_policy = _validate_cache_policy(cache_policy)
+    resolved_read_at = float(read_at)
 
     registry = label_registry if label_registry is not None else WatchLabelRegistry()
     projected = sorted(
         _collapse_duplicate_trials(
-            _project_trial(inspection) for inspection in catalog.trials
+            _project_trial(
+                inspection,
+                read_at=resolved_read_at,
+                cache_policy=resolved_cache_policy,
+            )
+            for inspection in catalog.trials
         ),
         key=_trial_sort_key,
     )
@@ -792,7 +848,7 @@ def build_watch_view_model(
     )
     return WatchViewModel(
         backend=backend,
-        read_at=float(read_at),
+        read_at=resolved_read_at,
         trials=rows,
         more_trials_omitted=len(projected) > MAX_WATCH_TRIALS,
         catalog_integrity=catalog_integrity,
@@ -809,12 +865,35 @@ def watch_fingerprint(model: WatchViewModel) -> tuple[object, ...]:
     """Return only visible, journal-derived values that may cue an update."""
     if type(model) is not WatchViewModel:
         raise TypeError("model must be a WatchViewModel")
+
+    def detail_fingerprint(detail: Optional[WatchTrialDetail]) -> object:
+        if detail is None:
+            return None
+        cache_fingerprint = (
+            None
+            if detail.cache_heat is None
+            else detail.cache_heat.stable_fingerprint
+        )
+        return (
+            detail.agents,
+            detail.arms,
+            detail.completed_agents,
+            detail.evidence,
+            detail.reviews,
+            detail.resolutions,
+            detail.delivery_recorded,
+            detail.mechanical_observations,
+            detail.model_observations,
+            detail.human_observations,
+            cache_fingerprint,
+        )
+
     trials = tuple(
         (
             trial.trial_number,
             trial.integrity,
             trial.lifecycle,
-            trial.detail,
+            detail_fingerprint(trial.detail),
             None if trial.issue is None else trial.issue.code,
         )
         for trial in model.trials
