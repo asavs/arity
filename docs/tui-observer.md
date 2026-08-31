@@ -51,7 +51,9 @@ selected: Trial 2
 ```
 
 The renderer uses a fixed line-oriented hierarchy and lets the surrounding terminal
-wrap naturally. It does not query terminal width.
+wrap naturally. It does not query terminal width. If a finite read timestamp is
+outside the host platform's local-time range, the header uses the fixed unknown value
+`read ??:??:??` instead of inventing a time.
 
 ## Deferred Stage 3 wireframe
 
@@ -91,7 +93,8 @@ data for valid trials, but contains experimental identities and paths that the v
 model must discard.
 
 The allowlist contains only finite structural values: neutral trial and agent labels,
-the closed integrity and lifecycle enums, completion-recorded booleans, bounded counts
+the closed integrity and lifecycle enums, the closed whole-catalog integrity
+aggregate, completion-recorded and bounded selection-state booleans, bounded counts
 of verified-prefix arms/evidence/reviews/resolutions, delivery presence, allowlisted
 issue codes with canned text, local read time, and store backend (`jsonl` or `sqlite`).
 It never carries `task_name`, brief, role, raw trial/arm/candidate/evaluator/resolution
@@ -112,6 +115,15 @@ negative or enormous ordinal can affect only its sorted position: it never contr
 allocation, indentation, label width, or character count. Legacy scalar arms retain
 declaration order. Rendering is capped at 256 trials and 256 arms per trial with only a
 structural `more omitted` flag.
+
+The projector computes `catalog_integrity` across the complete projected catalog
+before applying the 256-row display cap. It is an exact plain string from the closed
+set `valid`, `partial`, and `corrupt`, so an offscreen degraded row cannot make a
+displayed snapshot claim a weaker exit severity. `selected_trial_omitted` is a
+bounded, exact boolean used only when the requested trial exists beyond that cap. In
+that state no uncapped neutral number for the selection enters the view model: the
+renderer emits only
+`selected: omitted trial | details unavailable`.
 
 All fixed labels are supplied by the renderer, not persisted text. If a future
 allowlisted field permits persisted text, it must pass the current control-character
@@ -176,6 +188,8 @@ configured_store_spec
   -> close reader
   -> injected clock
   -> WatchProjector
+  -> project the complete catalog and aggregate catalog_integrity
+  -> select at most 256 display rows and bound offscreen selection to a boolean
   -> allowlisted WatchViewModel (the blind-safe boundary)
   -> fixed ASCII renderer
   -> exit
@@ -206,9 +220,11 @@ their validated replay timestamp; unsupported trials may use only the last finit
 timestamp in the verified replay prefix. Trials without a trusted timestamp use an
 opaque internal trial-identity tie-break that is never rendered. No post-boundary raw
 event, timestamp, physical event count, payload, or summary value may influence row
-order or the fingerprint. Stage 2 uses an exact requested full trial ID only to select
-within its one snapshot. Stage 3 will retain selection by that internal identity,
-never by row number; polling itself will not animate the spiral.
+order or the fingerprint. The fingerprint includes the closed catalog aggregate, so
+a safe severity change beyond the display cap remains observable without exposing
+the hidden row or source count. Stage 2 uses an exact requested full trial ID only to
+select within its one snapshot. Stage 3 will retain selection by that internal
+identity, never by row number; polling itself will not animate the spiral.
 
 ### Exceptional snapshots
 
@@ -217,6 +233,11 @@ never by row number; polling itself will not animate the spiral.
 - **Empty store:** render the same empty state.
 - **Requested trial missing:** emit only `arity: trial_not_found` on stderr, without
   echoing the raw ID, and exit `3`.
+- **Requested trial beyond the display cap:** retain the complete catalog's severity,
+  emit `selected: omitted trial | details unavailable`, and never render its raw ID,
+  uncapped neutral number, detail, or source rank.
+- **Unrepresentable local read time:** render `??:??:??`; do not substitute midnight
+  or another invented time.
 - **Future event or nested schema:** label the trial `partial`, derive lifecycle and
   agent structure only from `inspection.replay`, and show an allowlisted issue code
   with canned text. With no verified replay, show no lifecycle or agent detail. Never
@@ -231,6 +252,8 @@ never by row number; polling itself will not animate the spiral.
   repair it.
 - **Other read failure:** emit no snapshot, report only
   `arity: record_read_error` on stderr, and exit `1`.
+- **Output write, short-write, or flush failure:** return operational exit `1`
+  without a traceback or an attempted unsafe diagnostic containing the exception.
 
 Stage 3 may retain a last successful snapshot, show a store-error banner, and retry
 after a change or read failure. Stage 2 never keeps state or retries.
@@ -243,8 +266,10 @@ belongs on the existing JSON commands.
 
 Typed physical read failures take precedence because no trustworthy catalog exists.
 After a successful catalog read, a missing requested trial returns `3`; otherwise a
-corrupt trial or catalog issue returns `5`, a partial trial returns `4`, and a fully
-valid or empty snapshot returns `0`.
+`corrupt` whole-catalog aggregate returns `5`, a `partial` aggregate returns `4`, and
+a `valid` or empty aggregate returns `0`. That aggregate is computed before the
+256-row cap, so the `5 > 4 > 0` precedence includes offscreen projected trials and
+catalog issues.
 
 ## Implementation seams
 
@@ -256,14 +281,25 @@ Stage 2 keeps the feature in three small layers:
    typed and logical outcomes to fixed stdout/stderr text and semantic exit codes.
    Neither function owns runtime/provider/tool objects.
 2. **Pure view model:** neutral-label mapping, safe text, selection, capability flags,
-   and the exact state mapping above. It has no terminal or filesystem access.
+   the pre-cap `catalog_integrity` aggregate, the bounded
+   `selected_trial_omitted` boolean, and the exact state mapping above. It has no
+   terminal or filesystem access.
 3. **Pure renderer:** `render_watch_snapshot` accepts only an exact `WatchViewModel`
-   and returns one canonical printable-ASCII string ending in one LF. It has no
+   and returns one canonical printable-ASCII string ending in one LF. It uses
+   `??:??:??` when the platform cannot represent the local read time and has no
    terminal, clock, or filesystem access.
 
 The thin CLI parser accepts the optional exact trial ID plus `--ascii` and
 `--no-motion`, then dispatches once. Stage 2 has no terminal capability or cleanup
 context because it never changes terminal state.
+
+For the default process stdout and stderr, `run_watch_command` encodes the already
+validated frame or canned error as strict ASCII and writes it through the stream's
+binary buffer. This bypasses platform newline translation, so Windows and POSIX
+receive the same byte-exact LF-only output. Explicitly injected text streams remain
+the embedding and test seam; they receive the same canonical strings and are flushed.
+A write, incomplete write, encoding, or flush failure is contained and returns `1`
+without printing a traceback or echoing the exception.
 
 ### Deferred Stage 3 controller
 
@@ -305,13 +341,25 @@ fallback remains complete.
 - Negative and enormous arm ordinals produce bounded position-based labels without
   large allocation, padding, Unicode lookup, or a renderer error. The 256-item caps
   report only `more omitted`, never an unbounded source count.
+- The closed `catalog_integrity` field aggregates every projected row before the
+  256-row cap and preserves `corrupt > partial > valid` exit severity even when the
+  degraded row is offscreen.
+- An offscreen exact selection sets only the bounded `selected_trial_omitted` boolean
+  and renders `selected: omitted trial | details unavailable`; no `Trial 257`, raw
+  identity, uncapped source count, or rank reaches the model or output.
 - Every Stage 2 snapshot is printable ASCII and ANSI-free, ends in exactly one LF,
-  and is identical across `--ascii` and `--no-motion` combinations.
+  and is identical across `--ascii` and `--no-motion` combinations. Default CLI
+  stdout/stderr are asserted as byte-exact LF-only output on Windows-like and POSIX
+  streams; explicit injected text streams remain supported.
+- Finite read times outside the platform's representable local-time range render
+  exactly `??:??:??`.
+- Output write, incomplete-write, and flush fixtures return `1` without a traceback
+  or exception-text leak for both default process streams and injected text streams.
 - Exactly one complete catalog is read through one query-only reader; the reader
   closes before the clock is read. No trial is selected implicitly.
 - Missing selection and typed physical failures emit only fixed safe stderr codes.
-  Logical partial and corrupt catalogs remain visible on stdout with semantic exit
-  codes `4` and `5`.
+  Logical partial and corrupt catalogs remain visible on stdout, while the pre-cap
+  aggregate drives semantic exit codes `4` and `5`.
 - Existing `trials`, `trial show`, and `trial replay` human output, version-1 JSON
   shapes, and semantic exit-code tests remain unchanged.
 
@@ -322,9 +370,11 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
   command adversarial, golden, capability, and query-only reader tests.
 - Ubuntu/Python 3.14 keeps build and Twine validation, installs the
   wheel, then runs the one-shot `arity watch --ascii --no-motion` acceptance outside
-  the source checkout.
+  the source checkout. Acceptance checks exact empty-state and missing-selection
+  stdout/stderr bytes and rejects CRLF translation.
 - Windows/Python 3.14 runs `acceptance/verify_installed.py`, including the installed
-  one-shot command outside the source checkout.
+  one-shot command outside the source checkout with the same byte-exact LF-only
+  assertions.
 
 ### Deferred Stage 3 criteria
 
