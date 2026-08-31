@@ -20,12 +20,15 @@ The command shape is deliberately small:
 arity watch [trial-id] [--ascii] [--no-motion]
 ```
 
-- With an interactive terminal, `j`/`k` or arrow keys move, Enter expands, `r`
-  retries immediately, `?` shows help, and `q` quits.
-- With redirected output or a terminal that cannot be controlled safely, the command
-  prints one ANSI-free catalog snapshot and exits. It never hangs in a pipeline.
-- `NO_COLOR` disables color. `--ascii` replaces non-ASCII glyphs and borders.
-  `--no-motion` keeps the spiral still. These modes preserve all words and states.
+- Interactive mode starts only when both stdin and stdout are controllable TTYs.
+  `j`/`k` or arrow keys move, Enter expands, `r` retries immediately, `?` shows help,
+  and `q` quits.
+- If either stream is redirected, terminal capability setup fails, or the terminal
+  cannot be controlled safely, the command prints one ANSI-free snapshot and exits.
+  It never hangs in a pipeline.
+- `NO_COLOR` disables color. `--ascii` uses only ASCII UI glyphs and escapes every
+  non-ASCII character in persisted text. `--no-motion` keeps the spiral still. These
+  modes preserve all words and states.
 - Machine consumers continue to use `arity trials --json` and
   `arity trial show ID --json`. The first `watch` release does not introduce another
   JSON schema or change their version-1 envelopes and exit codes.
@@ -36,17 +39,17 @@ arity watch [trial-id] [--ascii] [--no-motion]
  arity watch                    jsonl | 4 trials | read 12:04:09
              . o * @ * o .      journal update
 
- > trial 8f31  started    valid        agents 1/3
-     Agent A   completed
-     Agent B   pending *
-     Agent C   pending *
-   trial 6ca0  delivered  valid        agents 2/2
-   trial 103d  evidenced  partial      agents 2/2
-   trial 771e  unknown    corrupt      details unavailable
+ > Trial 1     started    valid        completions 1/3
+     Agent A   completion recorded
+     Agent B   no completion recorded *
+     Agent C   no completion recorded *
+   Trial 2     delivered  valid        completions 2/2
+   Trial 3     evidenced  partial      completions 2/2
+   Trial 4     unknown    corrupt      details unavailable
 
- selected: trial 8f31
- evidence -   reviews -   resolution -   delivery -
- * pending means no completion is recorded; activity is unknown
+ selected: Trial 1
+ evidence 0   reviews 0   resolution no   delivery no
+ * no completion record exists; activity is unknown
 
  [j/k] select  [enter] expand  [r] retry  [?] help  [q] quit
 ```
@@ -56,27 +59,39 @@ decoration plus an observed-journal-change cue, not a progress indicator.
 
 ## Truth and privacy rules
 
-### Neutral labels
+### The blind-safe view model
 
-The TUI derives `Agent A`, `Agent B`, ... from the stable `arm_ordinal` declared by
-`trial.started` (continuing `Z`, `AA`, `AB`, ... for larger trials). Legacy scalar
-arms use their declaration order. The mapping lives only in the view model.
+`WatchViewModel` is the only blind-safe boundary. It is a dedicated, positive
+allowlist built from inspection data; neither `TrialInspection`, `TrialSummary`, nor
+`inspection_overview` is safe to render directly. The overview remains useful source
+data for valid trials, but contains experimental identities and paths that the view
+model must discard.
 
-The default TUI never renders persisted `name`, `model`, `provider`, `signature`,
-`harness`, `tool_runner`, `skills`, `context`, evaluator identity, or raw candidate
-ID. Any of those can reveal an experimental axis. Candidate IDs are used internally
-only to map a completion or resolution back to its neutral agent label. There is no
-identity-reveal toggle in the first release.
+The allowlist contains only finite structural values: neutral trial and agent labels,
+the closed integrity and lifecycle enums, completion-recorded booleans, bounded counts
+of verified-prefix arms/evidence/reviews/resolutions, delivery presence, allowlisted
+issue codes with canned text, local read time, and store backend (`jsonl` or `sqlite`).
+It never carries `task_name`, brief, role, raw trial/arm/candidate/evaluator/resolution
+or evidence IDs, names, signatures, model, provider, harness, tool runner, skills,
+context, raw completion/review status, output, artifact or delivery file paths, raw
+issue messages, or credentials. There is no identity-reveal toggle in the first
+release.
 
-Task names may appear. Ad-hoc trials are labeled by a shortened, terminal-safe trial
-ID rather than by their brief in the list. The detail pane may show the existing
-content-safe summary, but never full replay, candidate output, artifact bodies, raw
-review text, or credentials. Users who deliberately need those local records already
-have `arity trial replay ID --json` and its documented sensitivity warning.
+Trials receive in-memory neutral labels (`Trial 1`, `Trial 2`, ...). Raw trial IDs are
+kept only in controller selection state so an exact requested ID can be found; they do
+not enter the view model. Arms from the verified declaration are sorted by ordinal,
+then labeled by their bounded list position (`Agent A`, `Agent B`, ...), not by the
+numeric ordinal itself. A negative or enormous ordinal can affect only its sorted
+position: it never controls allocation, indentation, label width, or character count.
+Legacy scalar arms retain declaration order. Rendering is capped at 256 trials and 256
+arms per trial with only a structural `more omitted` flag.
 
-All persisted strings pass through the same control-character and bidirectional-mark
-escaping rule used by the current ANSI-free inspection renderer. Color, glyph shape,
-animation, and cursor position are never the only carriers of meaning.
+All fixed labels are supplied by the renderer, not persisted text. If a future
+allowlisted field permits persisted text, it must pass the current control-character
+and bidirectional-mark escaping rule; `--ascii` additionally escapes each non-ASCII
+code point. Color, glyph shape, animation, and cursor position are never the only
+carriers of meaning. Users who deliberately need raw local records already have
+`arity trial replay ID --json` and its documented sensitivity warning.
 
 ### Lifecycle is not liveness
 
@@ -92,13 +107,13 @@ The two current dimensions remain separate:
 | status `unresolved` | A recorded resolution has no winner. |
 | status `resolved` | A winner was recorded, but delivery is not recorded. |
 | status `delivered` | Delivery was recorded. |
-| agent `pending` | No `arm.completed` event exists for that arm. Activity is unknown. |
-| agent completion status | Display the terminal-safe recorded value; do not reinterpret it as live state. |
+| agent `no completion recorded` | No verified-prefix `arm.completed` exists for that arm. Activity is unknown. |
+| agent `completion recorded` | A verified-prefix completion exists. Its raw status remains hidden. |
 
 Today `run_race` appends `trial.started` before dispatch, but appends all initial
 `arm.completed` events only after the dispatcher returns. There is no durable
 `arm.started`, model-turn, heartbeat, or process-liveness event. The first TUI must
-therefore never relabel `pending` as `queued`, `working`, `thinking`, or `running`, and
+therefore never relabel an absent completion as `queued`, `working`, `thinking`, or `running`, and
 must not derive progress from elapsed time, event count, completed-arm ratio, token
 count, or lifecycle phase.
 
@@ -131,16 +146,16 @@ configured_store_spec
   -> open_record_reader (new reader for this refresh)
   -> inspect_trials
   -> selected TrialInspection
-  -> inspection_overview
-  -> neutral WatchViewModel
+  -> inspection/replay source data
+  -> allowlisted WatchViewModel (the blind-safe boundary)
   -> terminal renderer
 ```
 
-`inspection_overview`, currently shared by `trial show --json` inside
-`gorkbot.inspection_cli`, is the content-safe detail boundary. Before implementing the
-TUI, move or wrap it as an intentionally shared projection without changing its JSON
-shape. The TUI must consume Python data, not scrape human CLI output and not launch an
-`arity --json` subprocess.
+`inspection_overview`, currently used by `trial show --json` inside
+`gorkbot.inspection_cli`, may be shared as source data without changing its JSON shape.
+It is not the TUI's content, privacy, or blindness boundary. The TUI must construct the
+strict allowlist above, consume Python data rather than scrape human CLI output, and
+never launch an `arity --json` subprocess.
 
 A refresh opens and closes a reader every time so JSONL receives its strict file
 snapshot and SQLite receives its bounded private snapshot. The watcher never holds a
@@ -148,22 +163,36 @@ writable `RecordStore` and never uses the live runtime `Observer` protocol. A pu
 injectable clock controls read timestamps and the short visual pulse; it cannot alter
 journal-derived state.
 
-The view model fingerprints only content-safe projected fields to decide whether a
-journal update was observed. Polling itself does not animate the spiral. Selection is
-stable by full trial ID, not row number, when the catalog reorders.
+For a valid inspection, the view model may derive structural fields from its validated
+replay. For an unsupported inspection, it derives them only from
+`inspection.replay`, which is the verified prefix; when that replay is absent it emits
+only a neutral trial label, `partial`, and an allowlisted safe issue. For corruption it
+emits only a neutral trial label, `corrupt / unknown`, and an allowlisted safe issue.
+It never reads `TrialInspection.events` or raw-summary timestamps/counts for an
+unsupported or corrupt view.
+
+Sorting and fingerprinting operate on the allowlisted view model. Valid trials may use
+their validated replay timestamp; unsupported trials may use only the last finite
+timestamp in the verified replay prefix. Trials without a trusted timestamp use an
+opaque internal trial-identity tie-break that is never rendered. No post-boundary raw
+event, timestamp, physical event count, payload, or summary value may influence row
+order, animation, or the fingerprint. Polling itself does not animate the spiral.
+Selection remains stable by internal full trial ID, never by row number.
 
 ### Exceptional snapshots
 
 - **Missing store:** render `No persisted trials.` and keep watching without creating
   `.gorkbot/`.
 - **Empty store:** render the same empty state.
-- **Requested trial missing:** report the stable `trial_not_found` condition; an
+- **Requested trial missing:** report `trial_not_found` without echoing the raw ID; an
   interactive catalog may remain usable.
-- **Future event or nested schema:** label the trial `partial`, show its best-known
-  lifecycle and verified-prefix agents, and show the safe issue code. Never trust later
-  known-looking events across the unsupported boundary.
+- **Future event or nested schema:** label the trial `partial`, derive lifecycle and
+  agent structure only from `inspection.replay`, and show an allowlisted issue code
+  with canned text. With no verified replay, show no lifecycle or agent detail. Never
+  trust later known-looking events across the unsupported boundary.
 - **Logically corrupt trial:** retain its catalog row, label it `corrupt / unknown`,
-  suppress the untrusted agent tree, and show only content-safe diagnostics.
+  suppress all raw summary and agent data, and show only an allowlisted issue code with
+  canned text.
 - **Physical corruption:** keep the last successful snapshot visible with a prominent
   store-error banner. If no successful snapshot exists, show only the error state.
 - **Store changed during read:** treat `RecordChanged` as transient, retain the last
@@ -189,6 +218,15 @@ Keep the feature in three small layers:
    drawing. Terminal capabilities and clock are injected so tests do not sleep or need
    a real console.
 
+The controller owns terminal state through one cleanup context. It enters interactive
+mode only after stdin and stdout both pass TTY and platform capability checks. On every
+return path, setup failure, renderer exception, EOF, `KeyboardInterrupt`, Ctrl-C,
+supported platform termination signal, and ordinary `q`, it restores the original
+POSIX termios or Windows console mode, leaves the alternate screen, and makes the
+cursor visible before propagating the exit. A partial setup unwinds only the changes
+that succeeded. Capability failure selects the one-shot fallback instead of leaving a
+half-configured console.
+
 The first implementation should preserve Arity's zero mandatory runtime dependencies.
 A richer renderer can later live behind an optional extra, provided the plain and
 non-interactive fallbacks remain complete.
@@ -200,27 +238,52 @@ non-interactive fallbacks remain complete.
 - Watching a missing store leaves the filesystem byte-for-byte absent at that path.
 - Golden snapshots cover every lifecycle value and all three integrity values on JSONL
   and SQLite fixtures.
-- No rendered TUI snapshot contains the fixture's model, provider, signature, harness,
-  tool runner, context, evaluator ID, candidate ID, output, or artifact body.
-- `pending` is always accompanied by `no completion recorded` or `activity unknown`;
-  no view says running or shows a percentage without a future activity contract.
+- One adversarial fixture places the unique marker `BLIND_LEAK_SENTINEL` in every
+  free-form or identity field, including event/idempotency values, task name, brief,
+  role, every raw ID/name/signature/axis/status, issue/evaluator fields, output,
+  artifact path/body, and delivery file path. The marker and its encoded fragments
+  never occur in `WatchViewModel` or rendered output.
+- Agent state is only `completion recorded` or `no completion recorded`; no view says
+  running or shows a percentage without a future activity contract.
 - Future-schema, corrupt, orphan-record, physical-store, and changing-store fixtures
   render the exceptional states above without a traceback or untrusted nested data.
+  Adversarial future events after the boundary change no label, ordering key,
+  fingerprint, pulse, trusted timestamp, or count.
+- Negative and enormous arm ordinals produce bounded position-based labels without
+  large allocation, padding, Unicode lookup, or a renderer error. The 256-item caps
+  report only `more omitted`, never an unbounded source count.
 - Control characters and bidirectional markers cannot control the terminal. Very long
   and very narrow content truncates predictably without changing semantic labels.
-- Reduced-motion tests produce no timer-driven frame change. ASCII and no-color golden
-  snapshots contain no non-ASCII or ANSI bytes and remain understandable.
+- Reduced-motion tests produce no timer-driven frame change. ASCII golden snapshots
+  contain no non-ASCII output and escape non-ASCII persisted input. Separate no-color
+  snapshots contain no SGR color sequences while retaining textual state; Unicode and
+  terminal cursor control remain independently testable capabilities.
+- Non-interactive snapshots are ANSI-free. Tests cover every stdin/stdout TTY
+  combination, partial setup failure, render failure, EOF, Ctrl-C, supported signals,
+  and normal quit, asserting exact restoration of console/raw mode and cursor state.
 - A journal-change pulse occurs only after the safe snapshot fingerprint changes; an
   unchanged `started` trial becomes and remains visually still.
 - Existing `trials`, `trial show`, and `trial replay` human output, version-1 JSON
   shapes, and semantic exit-code tests remain unchanged.
-- The pure view model and fallbacks pass the supported Python 3.10/3.14 Linux and
-  Windows CI matrix without a real terminal.
+
+Before shipping, CI must add these exact gates; current Windows wheel acceptance does
+not yet cover the TUI:
+
+- Ubuntu/Python 3.10 runs the full source suite, including new
+  `tests/test_watch_view_model.py` and `tests/test_watch_terminal.py` adversarial,
+  golden, capability, and cleanup tests.
+- Ubuntu/Python 3.14 keeps build and Twine validation and additionally installs the
+  wheel, then runs the one-shot `arity watch --ascii --no-motion` acceptance outside
+  the source checkout.
+- Windows/Python 3.14 runs the injected Windows console restoration cases from
+  `tests/test_watch_terminal.py`, then extends `acceptance/verify_installed.py` to run
+  the installed one-shot `arity watch --ascii --no-motion` outside the source checkout.
 
 ## Staged path
 
-1. Extract and freeze the shared content-safe overview projection; add blindness and
-   terminal-safety view-model tests.
+1. Build the dedicated allowlisted `WatchViewModel`; treat existing inspection and
+   overview objects only as untrusted source data and add the adversarial blindness
+   tests.
 2. Add a one-snapshot `arity watch` renderer with ASCII, no-color, narrow-terminal, and
    non-interactive behavior.
 3. Add polling, stable selection, keyboard control, last-good-snapshot errors, and the
