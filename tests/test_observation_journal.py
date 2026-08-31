@@ -64,7 +64,7 @@ def test_existing_blind_review_attempts_become_separate_model_observations(
 ) -> None:
     report = _mock_report(
         tmp_path,
-        judges=["private-reviewer-one", "private-reviewer-two"],
+        judges=["gpt-5.6-sol", "claude-3-7-sonnet"],
         review="always",
     )
     replay = report.journal.replay()
@@ -95,8 +95,8 @@ def test_existing_blind_review_attempts_become_separate_model_observations(
     encoded = json.dumps(
         [event.to_dict()["payload"] for event in _observation_events(report)]
     )
-    assert "private-reviewer-one" not in encoded
-    assert "private-reviewer-two" not in encoded
+    assert "gpt-5.6-sol" not in encoded
+    assert "claude-3-7-sonnet" not in encoded
 
 
 def test_human_decline_is_durable_without_becoming_a_resolution(tmp_path) -> None:

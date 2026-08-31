@@ -28,11 +28,13 @@ import math
 import shutil
 import tempfile
 import textwrap
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from .archivist import ArchivistEntry, ImpartialArchivist
+from ._version import __version__
 from .evidence import (
     ArtifactEvidence,
     CandidateEvidence,
@@ -47,6 +49,13 @@ from .evidence import (
 )
 from .handlers import JsonlRecordStore, default_record_store
 from .ledger import Seat, SeatLedger
+from .observations import (
+    HumanDecisionReference,
+    MechanicalEvidenceReference,
+    ModelReviewReference,
+    Observation,
+    ObservationSubject,
+)
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
@@ -532,6 +541,18 @@ def _record_completed_arms(report: RaceReport, phase: str) -> None:
         )
 
 
+def _record_observation(report: RaceReport, observation: Observation) -> None:
+    """Persist one attributed lens without granting it resolution authority."""
+    if report.journal is None:
+        return
+    report.journal.append(
+        "observation.recorded",
+        {"observation": observation.to_dict()},
+        timestamp=observation.observed_at,
+        idempotency_key=f"observation.recorded:{observation.observation_id}",
+    )
+
+
 def freeze_report_evidence(
     report: RaceReport,
     *,
@@ -602,10 +623,23 @@ def freeze_report_evidence(
         StoreRecord(kind="evidence_bundle", record=bundle.to_dict())
     )
     if report.journal:
-        report.journal.append(
+        frozen_event = report.journal.append(
             "evidence.frozen",
             {"bundle": bundle.to_dict()},
             idempotency_key=f"evidence.frozen:{bundle.evidence_hash}",
+        )
+        _record_observation(
+            report,
+            Observation(
+                observer_kind="mechanical",
+                observer_id="arity.archivist",
+                observer_version=__version__,
+                observed_at=frozen_event.timestamp,
+                phase=phase,
+                status="recorded",
+                subject=ObservationSubject("evidence", bundle.evidence_hash),
+                reference=MechanicalEvidenceReference(bundle.evidence_hash),
+            ),
         )
     return bundle
 
@@ -669,7 +703,7 @@ def _record_review_attempt(
             if evaluation is not None
             else f"review.attempt:{report.evidence.evidence_hash if report.evidence else 'none'}:{evaluator_id}:{status}"
         )
-        report.journal.append(
+        review_event = report.journal.append(
             "review.recorded",
             {
                 "evaluator_id": evaluator_id,
@@ -680,6 +714,34 @@ def _record_review_attempt(
                 "raw": raw,
             },
             idempotency_key=review_key,
+        )
+        attempt_status = status if status in {"completed", "failed", "invalid", "missing"} else "failed"
+        observation_status = {
+            "completed": "recorded",
+            "failed": "failed",
+            "invalid": "failed",
+            "missing": "unavailable",
+        }[attempt_status]
+        review_id = f"event-{review_event.sequence}"
+        _record_observation(
+            report,
+            Observation(
+                observer_kind="model",
+                observer_id="arity.reviewer",
+                observer_version=__version__,
+                observed_at=review_event.timestamp,
+                phase="review",
+                status=observation_status,
+                subject=ObservationSubject("review", review_id),
+                reference=ModelReviewReference(
+                    evidence_hash=report.evidence.evidence_hash,
+                    review_id=review_id,
+                    attempt_status=attempt_status,
+                    evaluation_id=(
+                        evaluation.evaluation_id if evaluation is not None else None
+                    ),
+                ),
+            ),
         )
 
 
@@ -1246,7 +1308,13 @@ def judges_split(rep: RaceReport) -> bool:
     return len(firsts) > 1
 
 
-def human_pick(rep: RaceReport, ask: Callable[[str], str] = input, printer: Callable[..., None] = print) -> Optional[TerrariumCandidateResult]:
+def human_pick(
+    rep: RaceReport,
+    ask: Callable[[str], str] = input,
+    printer: Callable[..., None] = print,
+    *,
+    observer_id: str = "local-human",
+) -> Optional[TerrariumCandidateResult]:
     """The secretary's question: facts tied and the judges disagree, so Asa picks. Records the pick."""
     names = {r.candidate_id: (r.spec.name if r.spec else r.candidate_id) for r in rep.active_results}
     firsts: dict[str, list[str]] = {}
@@ -1269,6 +1337,28 @@ def human_pick(rep: RaceReport, ask: Callable[[str], str] = input, printer: Call
         pick = options[idx] if 0 <= idx < len(options) else None
     except Exception:
         pick = None
+    if rep.journal is not None:
+        if rep.evidence is None:
+            raise RuntimeError("a journaled human choice requires frozen evidence")
+        evidence_hash = rep.evidence.evidence_hash
+        decision = "selected" if pick is not None else "declined"
+        _record_observation(
+            rep,
+            Observation(
+                observer_kind="human",
+                observer_id=observer_id,
+                observer_version=__version__,
+                observed_at=time.time(),
+                phase="resolution",
+                status="recorded" if pick is not None else "declined",
+                subject=ObservationSubject("evidence", evidence_hash),
+                reference=HumanDecisionReference(
+                    evidence_hash=evidence_hash,
+                    decision=decision,
+                    candidate_id=pick.candidate_id if pick is not None else None,
+                ),
+            ),
+        )
     if rep.archivist.store:
         rep.archivist.store.append(StoreRecord(kind="human_pick", record={
             "task_id": rep.task.id, "options": [r.candidate_id for r in options],

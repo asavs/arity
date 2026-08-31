@@ -38,6 +38,7 @@ WatchIssueCode = Literal[
     "unsupported_event_schema",
     "unsupported_evidence_schema",
     "unsupported_usage_evidence_schema",
+    "unsupported_observation_schema",
     "unsupported_evaluation_schema",
     "unsupported_resolution_schema",
     "inspection_incomplete",
@@ -64,6 +65,9 @@ _ISSUE_MESSAGES: dict[str, str] = {
     "unsupported_usage_evidence_schema": (
         "The trial contains a newer usage-evidence schema."
     ),
+    "unsupported_observation_schema": (
+        "The trial contains a newer observation schema."
+    ),
     "unsupported_evaluation_schema": (
         "The trial contains a newer evaluation schema."
     ),
@@ -77,6 +81,7 @@ _UNSUPPORTED_ISSUES = {
     "unsupported_event_schema",
     "unsupported_evidence_schema",
     "unsupported_usage_evidence_schema",
+    "unsupported_observation_schema",
     "unsupported_evaluation_schema",
     "unsupported_resolution_schema",
 }
@@ -602,6 +607,7 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
             replay.events,
             replay.completed_arms,
             replay.request_usage,
+            replay.observations,
             replay.evidence_bundles,
             replay.reviews,
             replay.evaluations,
