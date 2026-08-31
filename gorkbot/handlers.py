@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ._version import USER_AGENT
+
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[<>=]|\x1b\][^\x07]*\x07")
 """CSI sequences, private-mode toggles, and OSC strings emitted by terminal-UI CLIs."""
 
@@ -59,7 +61,7 @@ class OpenAIModelProvider:
         endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "arity/0.3.0",
+            "User-Agent": USER_AGENT,
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

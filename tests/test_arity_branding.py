@@ -9,6 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from gorkbot import __version__
 from gorkbot.cli import main
 from gorkbot.orchestrator import ArityOrchestrator, GorkbotOrchestrator
 from gorkbot.race import run_front_door
@@ -106,7 +107,7 @@ class TestArityBranding(unittest.TestCase):
             with self.assertRaises(SystemExit) as stopped:
                 main()
         self.assertEqual(stopped.exception.code, 0)
-        self.assertIn("Arity 0.3.0", output.getvalue())
+        self.assertIn(f"Arity {__version__}", output.getvalue())
         self.assertIn("Python API: import gorkbot", output.getvalue())
 
         run_help = io.StringIO()
