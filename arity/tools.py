@@ -42,6 +42,70 @@ def resolve_sandbox_path(workspace_root: Path, relative_path: str) -> Path:
     return target
 
 
+class RoleEnforcingToolRunner(ToolRunner):
+    """Apply one role boundary in front of any pluggable tool runner.
+
+    Schema filtering is advisory because a model can emit an unadvertised call. This
+    adapter repeats the check at execution time and applies the same path/host locks
+    to sandbox, MCP, local-shell, and custom runners.
+    """
+
+    _PATH_ARGUMENTS = ("path", "cwd", "directory")
+    _HOST_ARGUMENTS = ("url", "host", "endpoint")
+
+    def __init__(self, delegate: ToolRunner, role: Role, workspace_root: Path):
+        self.delegate = delegate
+        self.role = role
+        self.workspace_root = workspace_root.resolve()
+
+    def get_schemas(self) -> list[dict[str, Any]]:
+        return [
+            schema
+            for schema in self.delegate.get_schemas()
+            if self.role.can_use_tool(schema.get("function", {}).get("name", ""))
+        ]
+
+    def _denial(self, effect: ExecuteTool, reason: str) -> ToolCompleted:
+        return ToolCompleted(
+            call_id=effect.call_id,
+            tool_name=effect.name,
+            output=f"Security Denial: Role '{self.role.name}' {reason}",
+            is_error=True,
+        )
+
+    def execute(self, effect: ExecuteTool) -> ToolCompleted:
+        if not self.role.can_use_tool(effect.name):
+            return self._denial(effect, f"is not permitted to execute tool '{effect.name}'")
+
+        for argument in self._PATH_ARGUMENTS:
+            if argument not in effect.arguments:
+                continue
+            requested = str(effect.arguments[argument])
+            if not self.role.can_access_path(requested):
+                return self._denial(effect, f"is denied access to path '{requested}'")
+            try:
+                resolve_sandbox_path(self.workspace_root, requested)
+            except PathTraversalError:
+                return self._denial(effect, f"is denied access outside its workspace via '{requested}'")
+
+        for argument in self._HOST_ARGUMENTS:
+            if argument in effect.arguments:
+                requested = str(effect.arguments[argument])
+                if not self.role.can_access_host(requested):
+                    return self._denial(effect, f"is denied network access to '{requested}'")
+
+        if "command" in effect.arguments:
+            command = str(effect.arguments["command"])
+            for denied_path in self.role.denial_set.denied_paths:
+                if denied_path and denied_path.lower() in command.lower():
+                    return self._denial(
+                        effect,
+                        f"is denied a command referencing path '{denied_path}'",
+                    )
+
+        return self.delegate.execute(effect)
+
+
 class SandboxToolRunner(ToolRunner):
     """Enforces workspace path confinement, AST syntax checks, and role denial sets."""
 

@@ -27,7 +27,7 @@ from .handlers import (
     OMPModelProvider,
     create_model_provider,
 )
-from .tools import SandboxToolRunner, create_mcp_tool_runner
+from .tools import RoleEnforcingToolRunner, SandboxToolRunner, create_mcp_tool_runner
 from .ledger import Seat, SeatLedger
 from .roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
@@ -522,6 +522,7 @@ class TerrariumDispatcher:
                 tool_runner = spec.tool_runner_type(workspace)
         else:
             tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
+        tool_runner = RoleEnforcingToolRunner(tool_runner, actual_role, workspace)
 
         # 3. Setup Brief Compiler & Skills Axis (+ Context Axis: what the child inherits)
         compiled_brief = self.compiler.assemble(
