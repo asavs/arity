@@ -22,6 +22,7 @@ from .types import StoreRecord
 
 
 TRIAL_EVENT_SCHEMA_VERSION = 1
+TRIAL_REPLAY_SCHEMA_VERSION = 1
 KNOWN_EVENT_TYPES = {
     "trial.started",
     "arm.completed",
@@ -186,9 +187,7 @@ class TrialReplay:
         return self.resolutions[-1] if self.resolutions else None
 
     @property
-    def status(self) -> str:
-        if self.unhandled_events:
-            return "incomplete"
+    def lifecycle_status(self) -> str:
         if self.delivery is not None:
             return "delivered"
         if self.latest_resolution is not None:
@@ -197,11 +196,38 @@ class TrialReplay:
             return "evidenced"
         return "started"
 
+    @property
+    def status(self) -> str:
+        if self.unhandled_events:
+            return "incomplete"
+        return self.lifecycle_status
+
     def evidence(self, evidence_hash: str) -> EvidenceBundle:
         for bundle in self.evidence_bundles:
             if bundle.evidence_hash == evidence_hash:
                 return bundle
         raise KeyError(evidence_hash)
+
+    def to_dict(self, *, include_events: bool = True) -> dict[str, Any]:
+        """Return an explicit, versioned JSON projection without lossy coercion."""
+        projection: dict[str, Any] = {
+            "schema_version": TRIAL_REPLAY_SCHEMA_VERSION,
+            "trial_id": self.trial_id,
+            "status": self.status,
+            "lifecycle_status": self.lifecycle_status,
+            "started": _thaw_json(self.started),
+            "completed_arms": [_thaw_json(arm) for arm in self.completed_arms],
+            "evidence_bundles": [bundle.to_dict() for bundle in self.evidence_bundles],
+            "reviews": [_thaw_json(review) for review in self.reviews],
+            "evaluations": [evaluation.to_dict() for evaluation in self.evaluations],
+            "resolutions": [resolution.to_dict() for resolution in self.resolutions],
+            "resolution_sequences": list(self.resolution_sequences),
+            "delivery": None if self.delivery is None else _thaw_json(self.delivery),
+            "unhandled_events": [event.to_dict() for event in self.unhandled_events],
+        }
+        if include_events:
+            projection["events"] = [event.to_dict() for event in self.events]
+        return projection
 
 
 class TrialJournal:
