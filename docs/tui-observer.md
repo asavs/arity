@@ -3,10 +3,10 @@
 Status: Stage 1 blind-safe view model, Stage 2 deterministic one-shot command, and
 Stage 3 interactive terminal observer implemented on this branch.
 
-`arity watch` is a read-only local view of what Arity's persisted trial journal can
-prove. It is an observer, never a participant: opening it must not run an agent,
-contact a provider, execute a tool, attach to a runtime, repair a record, or create a
-missing store.
+Plain `arity` opens a read-only live view of what Arity's persisted trial journal can
+prove; `arity watch` retains the deterministic one-shot form. The UI is an observer,
+never a participant: opening it must not run an agent, contact a provider, execute a
+tool, attach to a runtime, repair a record, or create a missing store.
 
 Here "observer" describes the user interface. It does not mean the live runtime
 `Observer` hook, and it does not mean `TrialEvaluator`. Runtime observers may collect
@@ -15,8 +15,8 @@ telemetry while work executes; evaluators may form decisions from frozen evidenc
 
 ## Approved Stage 3 decisions (2026-08-31)
 
-- Ordinary `arity watch` remains the deterministic one-shot command. Live terminal
-  behavior is entered explicitly with `arity watch --follow`.
+- Ordinary `arity watch` remains the deterministic one-shot command. Plain `arity`
+  is the live terminal front door; `arity watch --follow` is its explicit spelling.
 - The live view remains a presentation client, not a control plane. It may select,
   expand, retry a read, or quit, but it cannot start, stop, steer, repair, evaluate,
   or pre-warm work.
@@ -59,17 +59,19 @@ arity watch [trial-id] [--ascii] [--no-motion]
   JSON schema or change their version-1 envelopes and exit codes.
 
 Those rules still describe ordinary `arity watch`. The interactive behavior below is
-entered only through explicit `--follow`.
+entered through plain `arity` or explicit `arity watch --follow`.
 
 ## Current Stage 3 live observer
 
 ```text
+arity
 arity watch [trial-id] --follow [--ascii] [--no-motion]
             [--cache-policy conservative|exact|off]
 ```
 
-When stdin and stdout support the terminal contract, follow mode opens one managed
-terminal session and obtains successive query-only snapshots. It reuses only the
+Plain `arity` requests follow mode with conservative cache policy, Unicode, and motion
+defaults. When stdin and stdout support the terminal contract, follow mode opens one
+managed terminal session and obtains successive query-only snapshots. It reuses only the
 in-memory neutral-label registry; every refresh opens and closes a reader. Default
 watch readers fail closed above a 64 MiB physical snapshot or 65,536 queried journal
 records, before the 256-row display cap. `j`/`k`
@@ -129,8 +131,8 @@ outside the host platform's local-time range, the header uses the fixed unknown 
 
 The implementation collapses this layout to a width-bounded stacked list. Its spiral
 remains decoration plus an observed-journal-change cue, not a progress indicator.
-The controls are available only in explicit follow mode; ordinary Stage 2 output is
-still non-interactive.
+The controls are available only in follow mode, reached through plain `arity` or the
+explicit follow command; ordinary Stage 2 output is still non-interactive.
 
 ## Truth and privacy rules
 
@@ -351,9 +353,11 @@ The retained one-shot path has three small layers:
    `??:??:??` when the platform cannot represent the local read time and has no
    terminal, clock, or filesystem access.
 
-The CLI parser also accepts explicit `--follow` and its presentation/cache-policy
-options. Without `--follow`, Stage 2 performs no terminal capability or cleanup work
-because it never changes terminal state.
+With no subcommand, the CLI normalizes plain `arity` to the existing follow path with
+conservative cache policy and Unicode/motion defaults. The parser also accepts explicit
+`--follow` and its presentation/cache-policy options. Ordinary `arity watch`, without
+`--follow`, performs no terminal capability or cleanup work because it never changes
+terminal state.
 
 For the default process stdout and stderr, `run_watch_command` encodes the already
 validated frame or canned error as strict ASCII and writes it through the stream's
@@ -431,12 +435,13 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
 - Ubuntu/Python 3.10 runs the full source suite, including the view-model and one-shot
   command adversarial, golden, capability, and query-only reader tests.
 - Ubuntu/Python 3.14 keeps build and Twine validation, installs the
-  wheel, then runs the one-shot `arity watch --ascii --no-motion` acceptance outside
-  the source checkout. Acceptance checks exact empty-state and missing-selection
-  stdout/stderr bytes and rejects CRLF translation.
+  wheel, then runs plain `arity`, `python -m arity`, and the one-shot
+  `arity watch --ascii --no-motion` acceptance outside the source checkout.
+  Acceptance checks exact empty-state and missing-selection stdout/stderr bytes,
+  rejects CRLF translation, and rejects observer-created state.
 - Windows/Python 3.14 runs `acceptance/verify_installed.py`, including the installed
-  one-shot command outside the source checkout with the same byte-exact LF-only
-  assertions.
+  default and one-shot commands outside the source checkout with the same byte-exact
+  LF-only assertions.
 
 ### Implemented Stage 3 criteria
 
