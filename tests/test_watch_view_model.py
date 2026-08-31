@@ -70,6 +70,11 @@ class HiddenResolution:
     kind: str = BLIND_LEAK_SENTINEL
 
 
+class LeakyStr(str):
+    def __repr__(self) -> str:
+        return BLIND_LEAK_SENTINEL
+
+
 def hidden_blob(marker: str = BLIND_LEAK_SENTINEL) -> dict[str, Any]:
     """Place one unique marker in every currently known free-form family."""
     return {
@@ -555,7 +560,7 @@ def test_post_boundary_issue_append_cannot_change_projection_or_fingerprint() ->
         timestamp=4.0,
     )
     boundary = InspectionIssue(
-        code="unsupported_event_schema",
+        code=BLIND_LEAK_SENTINEL,
         message=BLIND_LEAK_SENTINEL,
         sequence=2,
         event_type=BLIND_LEAK_SENTINEL,
@@ -582,9 +587,65 @@ def test_post_boundary_issue_append_cannot_change_projection_or_fingerprint() ->
     )
 
     assert before.trials[0].issue is not None
-    assert before.trials[0].issue.code == "unsupported_event_schema"
+    assert before.trials[0].issue.code == "inspection_incomplete"
     assert document(before) | {"read_at": 2.0} == document(after)
     assert watch_fingerprint(before) == watch_fingerprint(after)
+
+
+def test_partial_replay_cannot_retain_a_post_boundary_event() -> None:
+    valid = inspection(
+        "raw-valid",
+        replay_value=lifecycle_replay("raw-valid", "started", timestamp=50.0),
+    )
+
+    def forged_partial(timestamp: float) -> BoundaryInspection:
+        prefix = replay(
+            "raw-partial",
+            arms=({"arm_id": "raw-arm", "arm_ordinal": 0},),
+            timestamp=10.0,
+        )
+        future = event(
+            "raw-partial",
+            2,
+            "arm.completed",
+            {
+                "arm_id": "raw-arm",
+                "candidate_id": BLIND_LEAK_SENTINEL,
+                "status": BLIND_LEAK_SENTINEL,
+            },
+            timestamp=timestamp,
+        )
+        forged = dataclasses.replace(prefix, events=prefix.events + (future,))
+        return BoundaryInspection(
+            "raw-partial",
+            "unsupported",
+            forged,
+            InspectionIssue(
+                code="unsupported_event_schema",
+                message=BLIND_LEAK_SENTINEL,
+                sequence=2,
+                event_type=BLIND_LEAK_SENTINEL,
+            ),
+        )
+
+    before = WatchProjector().project(
+        catalog(forged_partial(100.0), valid),
+        backend="jsonl",
+        read_at=1.0,
+    )
+    after = WatchProjector().project(
+        catalog(forged_partial(0.0), valid),
+        backend="jsonl",
+        read_at=2.0,
+    )
+
+    assert [(trial.integrity, trial.lifecycle) for trial in before.trials] == [
+        ("valid", "started"),
+        ("partial", "unknown"),
+    ]
+    assert document(before) | {"read_at": 2.0} == document(after)
+    assert watch_fingerprint(before) == watch_fingerprint(after)
+    assert BLIND_LEAK_SENTINEL not in repr(before)
 
 
 def test_sorting_uses_only_verified_prefix_timestamps() -> None:
@@ -592,13 +653,21 @@ def test_sorting_uses_only_verified_prefix_timestamps() -> None:
         "raw-older",
         "unsupported",
         lifecycle_replay("raw-older", "evidenced", timestamp=10.0),
-        InspectionIssue(code="unsupported_event", message=BLIND_LEAK_SENTINEL),
+        InspectionIssue(
+            code="unsupported_event",
+            message=BLIND_LEAK_SENTINEL,
+            sequence=2,
+        ),
     )
     newer = BoundaryInspection(
         "raw-newer",
         "unsupported",
         lifecycle_replay("raw-newer", "started", timestamp=20.0),
-        InspectionIssue(code="unsupported_event", message=BLIND_LEAK_SENTINEL),
+        InspectionIssue(
+            code="unsupported_event",
+            message=BLIND_LEAK_SENTINEL,
+            sequence=2,
+        ),
     )
 
     model = WatchProjector().project(
@@ -607,6 +676,56 @@ def test_sorting_uses_only_verified_prefix_timestamps() -> None:
 
     assert [trial.lifecycle for trial in model.trials] == ["started", "evidenced"]
     assert [trial.trial_number for trial in model.trials] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["mismatched_id", "missing_event", "split_started", "bad_resolution"],
+)
+def test_self_inconsistent_replay_objects_fail_closed(malformation: str) -> None:
+    source_replay = replay(
+        "raw-consistent",
+        arms=({"arm_id": "raw-arm", "arm_ordinal": 0},),
+    )
+    if malformation == "mismatched_id":
+        source_replay = dataclasses.replace(source_replay, trial_id="raw-other")
+    elif malformation == "missing_event":
+        source_replay = dataclasses.replace(
+            source_replay,
+            events=(cast(Any, None),),
+        )
+    elif malformation == "split_started":
+        source_replay = dataclasses.replace(
+            source_replay,
+            started=cast(Any, {"arms": [BLIND_LEAK_SENTINEL]}),
+        )
+    else:
+        source_replay = dataclasses.replace(
+            source_replay,
+            resolutions=(cast(Any, object()),),
+        )
+
+    source = TrialInspection(
+        trial_id="raw-consistent",
+        integrity="valid",
+        status="started",
+        events=(),
+        replay=source_replay,
+    )
+
+    model = WatchProjector().project(
+        catalog(source),
+        backend="jsonl",
+        read_at=1.0,
+    )
+    row = model.trials[0]
+
+    assert row.integrity == "corrupt"
+    assert row.lifecycle == "unknown"
+    assert row.detail is None
+    assert row.issue is not None
+    assert row.issue.code == "inspection_incomplete"
+    assert BLIND_LEAK_SENTINEL not in repr(model)
 
 
 def test_safe_issue_text_is_canned_and_unknown_issue_codes_become_generic() -> None:
@@ -619,6 +738,7 @@ def test_safe_issue_text_is_canned_and_unknown_issue_codes_become_generic() -> N
                 code="unsupported_event",
                 message=f"first raw message {BLIND_LEAK_SENTINEL}",
                 trial_id=BLIND_LEAK_SENTINEL,
+                sequence=2,
             ),
             InspectionIssue(
                 code=BLIND_LEAK_SENTINEL,
@@ -636,6 +756,7 @@ def test_safe_issue_text_is_canned_and_unknown_issue_codes_become_generic() -> N
                 code="unsupported_event",
                 message="a completely different raw message",
                 trial_id="another hidden id",
+                sequence=2,
             ),
         ),
     )
@@ -648,6 +769,7 @@ def test_safe_issue_text_is_canned_and_unknown_issue_codes_become_generic() -> N
                 code=BLIND_LEAK_SENTINEL,
                 message=BLIND_LEAK_SENTINEL,
                 trial_id=BLIND_LEAK_SENTINEL,
+                sequence=2,
             ),
         ),
     )
@@ -726,6 +848,33 @@ def test_trial_labels_survive_reordering_insertion_selection_and_removal() -> No
     }
     assert third_by_lifecycle == {"resolved": 3, "unresolved": 4}
     assert third["selected_trial_number"] is None
+
+
+def test_duplicate_trial_id_collapses_to_one_failure_closed_row() -> None:
+    duplicate_id = "raw-duplicate"
+    first = inspection(
+        duplicate_id,
+        replay_value=lifecycle_replay(duplicate_id, "started", timestamp=20.0),
+    )
+    second = inspection(
+        duplicate_id,
+        replay_value=lifecycle_replay(duplicate_id, "evidenced", timestamp=10.0),
+    )
+
+    model = WatchProjector().project(
+        catalog(first, second),
+        backend="jsonl",
+        read_at=1.0,
+        selected_trial_id=duplicate_id,
+    )
+
+    assert len(model.trials) == 1
+    assert model.trials[0].integrity == "corrupt"
+    assert model.trials[0].lifecycle == "unknown"
+    assert model.trials[0].detail is None
+    assert model.trials[0].selected is True
+    assert model.selected_trial_number == model.trials[0].trial_number
+    assert model.requested_trial_missing is False
 
 
 def test_missing_and_offscreen_selection_are_safe_structural_state() -> None:
@@ -910,6 +1059,29 @@ def test_legacy_scalar_arms_keep_declaration_order() -> None:
     assert [agent.completion_recorded for agent in detail.agents] == [False, True]
 
 
+def test_duplicate_legacy_arm_ids_fail_closed_instead_of_double_counting() -> None:
+    duplicate_id = "raw-duplicate-arm"
+    source = inspection(
+        "raw-legacy-duplicate",
+        replay_value=replay(
+            "raw-legacy-duplicate",
+            arms=(duplicate_id, duplicate_id),
+            completed=({"arm_id": duplicate_id},),
+        ),
+    )
+
+    model = WatchProjector().project(
+        catalog(source), backend="jsonl", read_at=1.0,
+    )
+    row = model.trials[0]
+
+    assert row.integrity == "corrupt"
+    assert row.lifecycle == "unknown"
+    assert row.detail is None
+    assert row.issue is not None
+    assert row.issue.code == "inspection_incomplete"
+
+
 def hidden_variant(
     marker: str,
     *,
@@ -978,6 +1150,37 @@ def test_projection_rejects_non_allowlisted_backends(backend: str) -> None:
         WatchProjector().project(
             catalog(inspection("raw")), backend=backend, read_at=1.0,
         )
+
+
+def test_string_subclasses_cannot_smuggle_custom_representations() -> None:
+    leaky_backend = LeakyStr("jsonl")
+    with pytest.raises((TypeError, ValueError)) as captured:
+        WatchProjector().project(
+            catalog(inspection("raw")),
+            backend=cast(Any, leaky_backend),
+            read_at=1.0,
+        )
+    assert BLIND_LEAK_SENTINEL not in str(captured.value)
+
+    source = inspection(
+        "raw-partial",
+        integrity="unsupported",
+        replay_value=replay("raw-partial"),
+        issues=(
+            InspectionIssue(
+                code=cast(Any, LeakyStr("unsupported_event")),
+                message=BLIND_LEAK_SENTINEL,
+            ),
+        ),
+    )
+    model = WatchProjector().project(
+        catalog(source), backend="jsonl", read_at=1.0,
+    )
+
+    assert model.trials[0].issue is not None
+    assert model.trials[0].issue.code == "inspection_incomplete"
+    assert BLIND_LEAK_SENTINEL not in repr(model)
+    assert BLIND_LEAK_SENTINEL not in repr(watch_fingerprint(model))
 
 
 @pytest.mark.parametrize("read_at", [float("nan"), float("inf"), -float("inf"), True])
