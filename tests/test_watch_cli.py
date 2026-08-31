@@ -3,13 +3,27 @@
 The Stage-2 public API is intentionally narrow::
 
     from gorkbot.watch_terminal import render_watch_snapshot
-    from gorkbot.watch_cli import run_watch_command
+    from gorkbot.watch_cli import load_watch_model, run_watch_command
 
 ``render_watch_snapshot(model: WatchViewModel) -> str`` is a pure, canonical ASCII
-renderer.  ``run_watch_command(args, *, clock, stdout, stderr) -> int`` takes an
-``argparse.Namespace`` with ``trial_id``, ``ascii``, and ``no_motion`` fields, reads
-one complete inspection catalog through the configured query-only reader, renders
-one snapshot, and returns the documented semantic exit code.
+renderer.  The public source seam is::
+
+    load_watch_model(
+        spec,
+        *,
+        selected_trial_id,
+        projector,
+        clock,
+        reader_opener=open_record_reader,
+        inspector=inspect_trials,
+    ) -> WatchViewModel
+
+It opens exactly one query-only reader, obtains one complete catalog snapshot, closes
+the reader, samples the clock once, and then passes that catalog/read time to the
+supplied projector.
+``run_watch_command(args, *, clock, stdout, stderr) -> int`` takes an
+``argparse.Namespace`` with ``trial_id``, ``ascii``, and ``no_motion`` fields, uses
+that source seam, renders one snapshot, and returns the documented semantic exit code.
 
 Stage 2 deliberately has no interactive or terminal-capability mode.  The two flags
 are accepted compatibility promises and cannot alter this already-ASCII snapshot.
@@ -59,7 +73,7 @@ from gorkbot.record_readers import (
 from gorkbot.stores.sqlite import SqliteRecordStore
 from gorkbot.trial_events import TrialEvent, TrialReplay
 from gorkbot.types import StoreRecord
-from gorkbot.watch_cli import run_watch_command
+from gorkbot.watch_cli import load_watch_model, run_watch_command
 from gorkbot.watch_terminal import render_watch_snapshot
 from gorkbot.watch_view_model import (
     BoundedCount,
@@ -68,10 +82,17 @@ from gorkbot.watch_view_model import (
     WatchTrial,
     WatchTrialDetail,
     WatchViewModel,
+    WatchProjector,
 )
 
 
 BLIND_LEAK_SENTINEL = "BLIND_LEAK_SENTINEL"
+ADVERSARIAL_IDENTITY = (
+    BLIND_LEAK_SENTINEL
+    + "\x00\x1b[31m\r\n\t"
+    + "\u202a\u202e\u2066\u2069"
+    + " snowman=\u2603 han=\u96ea"
+)
 READ_AT = datetime(2030, 1, 2, 12, 4, 9).timestamp()
 READ_TIME = "12:04:09"
 
@@ -214,7 +235,17 @@ def assert_blind_output(value: str, *extra_forbidden: str) -> None:
     lowered = value.lower()
     for fragment in encoded_fragments:
         assert fragment not in value
-    for claim in ("running", "working", "thinking", "progress", "percent", "%"):
+    for claim in (
+        "running",
+        "working",
+        "thinking",
+        "progress",
+        "percent",
+        "queued",
+        "alive",
+        "active",
+        "%",
+    ):
         assert claim not in lowered
     assert_printable_ascii_snapshot(value)
 
@@ -466,6 +497,68 @@ def sentinel_events(trial_id: str) -> tuple[TrialEvent, ...]:
     return started, future
 
 
+def hostile_identity_events(trial_id: str) -> tuple[TrialEvent, ...]:
+    """Put terminal controls, bidi marks, and Unicode in every identity family."""
+    arm_id = f"arm:{ADVERSARIAL_IDENTITY}"
+    started = TrialEvent.create(
+        trial_id=trial_id,
+        sequence=1,
+        event_type="trial.started",
+        payload={
+            "task_id": ADVERSARIAL_IDENTITY,
+            "task_name": ADVERSARIAL_IDENTITY,
+            "brief": ADVERSARIAL_IDENTITY,
+            "role": ADVERSARIAL_IDENTITY,
+            "evaluator_ids": [ADVERSARIAL_IDENTITY],
+            "hidden_test_hashes": {
+                ADVERSARIAL_IDENTITY: ADVERSARIAL_IDENTITY,
+            },
+            "arms": [
+                {
+                    "arm_id": arm_id,
+                    "arm_ordinal": 10**100,
+                    "name": ADVERSARIAL_IDENTITY,
+                    "signature": ADVERSARIAL_IDENTITY,
+                    "model": ADVERSARIAL_IDENTITY,
+                    "provider": ADVERSARIAL_IDENTITY,
+                    "role": ADVERSARIAL_IDENTITY,
+                    "harness": ADVERSARIAL_IDENTITY,
+                    "tool_runner": ADVERSARIAL_IDENTITY,
+                    "skills": [ADVERSARIAL_IDENTITY],
+                    "context": ADVERSARIAL_IDENTITY,
+                    "context_adapter": ADVERSARIAL_IDENTITY,
+                }
+            ],
+        },
+        timestamp=1.0,
+        idempotency_key=f"start:{ADVERSARIAL_IDENTITY}",
+    )
+    future = TrialEvent.create(
+        trial_id=trial_id,
+        sequence=2,
+        event_type=f"future.{ADVERSARIAL_IDENTITY}",
+        payload={
+            "arm_id": arm_id,
+            "candidate_id": ADVERSARIAL_IDENTITY,
+            "evaluator_id": ADVERSARIAL_IDENTITY,
+            "resolution_id": ADVERSARIAL_IDENTITY,
+            "status": ADVERSARIAL_IDENTITY,
+            "output": ADVERSARIAL_IDENTITY,
+            "artifact": {
+                "path": ADVERSARIAL_IDENTITY,
+                "body": ADVERSARIAL_IDENTITY,
+            },
+            "delivery": {
+                "files": [ADVERSARIAL_IDENTITY],
+                "answer": ADVERSARIAL_IDENTITY,
+            },
+        },
+        timestamp=2.0,
+        idempotency_key=f"future:{ADVERSARIAL_IDENTITY}",
+    )
+    return started, future
+
+
 def test_empty_renderer_is_exact_and_independent_of_backend_and_clock() -> None:
     for backend in ("jsonl", "sqlite"):
         rendered = render_watch_snapshot(
@@ -473,6 +566,25 @@ def test_empty_renderer_is_exact_and_independent_of_backend_and_clock() -> None:
         )
         assert rendered == "No persisted trials.\n"
         assert_printable_ascii_snapshot(rendered)
+
+
+@pytest.mark.parametrize("read_at", [1e308, -1e308])
+def test_unrepresentable_finite_read_time_uses_fixed_safe_hhmmss(
+    read_at: float,
+) -> None:
+    """Finite model values outside the platform datetime range never escape."""
+    rendered = render_watch_snapshot(
+        model(
+            valid_trial(1),
+            read_at=read_at,
+        )
+    )
+
+    assert rendered == (
+        "arity watch | jsonl | 1 trial | read 00:00:00\n"
+        "  Trial 1 | started | valid | completions 0/0\n"
+    )
+    assert_printable_ascii_snapshot(rendered)
 
 
 def test_renderer_has_one_canonical_line_for_every_lifecycle() -> None:
@@ -698,6 +810,94 @@ def test_renderer_does_not_query_terminal_capabilities(
     assert_printable_ascii_snapshot(rendered)
 
 
+def test_load_watch_model_is_one_injected_reader_and_samples_clock_after_close() -> None:
+    events: list[str] = []
+    raw_id = f"raw-{BLIND_LEAK_SENTINEL}"
+    source_catalog = TrialCatalog(trials=(valid_inspection(raw_id),))
+    spec = StoreSpec("sqlite", Path(BLIND_LEAK_SENTINEL) / "records.db")
+    reader = object()
+    projector = WatchProjector()
+
+    def reader_opener(actual: StoreSpec | None = None) -> ReaderContext:
+        assert actual is spec
+        events.append("reader_open")
+        return ReaderContext(events, reader)
+
+    def inspector(actual: object) -> TrialCatalog:
+        assert actual is reader
+        events.append("inspect_trials")
+        return source_catalog
+
+    def clock() -> float:
+        events.append("clock")
+        return READ_AT
+
+    loaded = load_watch_model(
+        spec,
+        selected_trial_id=raw_id,
+        projector=projector,
+        clock=clock,
+        reader_opener=reader_opener,
+        inspector=inspector,
+    )
+
+    assert type(loaded) is WatchViewModel
+    assert loaded.backend == "sqlite"
+    assert loaded.read_at == READ_AT
+    assert loaded.selected_trial_number == 1
+    assert loaded.requested_trial_missing is False
+    assert events == [
+        "reader_open",
+        "reader_enter",
+        "inspect_trials",
+        "reader_close",
+        "clock",
+    ]
+    assert BLIND_LEAK_SENTINEL not in repr(loaded)
+
+
+def test_load_watch_model_closes_and_propagates_typed_failure_before_clock() -> None:
+    events: list[str] = []
+    spec = StoreSpec("jsonl", Path(BLIND_LEAK_SENTINEL) / "records")
+    reader = object()
+    failure = RecordCorruption(
+        f"corrupt {BLIND_LEAK_SENTINEL}",
+        path=Path(BLIND_LEAK_SENTINEL),
+    )
+
+    def reader_opener(actual: StoreSpec | None = None) -> ReaderContext:
+        assert actual is spec
+        events.append("reader_open")
+        return ReaderContext(events, reader)
+
+    def inspector(actual: object) -> TrialCatalog:
+        assert actual is reader
+        events.append("inspect_trials")
+        raise failure
+
+    def clock() -> float:
+        events.append("clock")
+        return READ_AT
+
+    with pytest.raises(RecordCorruption) as captured:
+        load_watch_model(
+            spec,
+            selected_trial_id=None,
+            projector=WatchProjector(),
+            clock=clock,
+            reader_opener=reader_opener,
+            inspector=inspector,
+        )
+
+    assert captured.value is failure
+    assert events == [
+        "reader_open",
+        "reader_enter",
+        "inspect_trials",
+        "reader_close",
+    ]
+
+
 def test_source_takes_one_full_catalog_snapshot_closes_then_reads_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -822,6 +1022,67 @@ def test_logical_partial_and_corrupt_snapshots_render_on_stdout(
     assert_blind_output(stdout)
 
 
+def test_requested_missing_beats_other_logical_partial_and_corrupt_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = f"missing-{BLIND_LEAK_SENTINEL}"
+    install_catalog_source(
+        monkeypatch,
+        TrialCatalog(
+            trials=(
+                partial_inspection("raw-partial"),
+                corrupt_inspection("raw-corrupt"),
+            ),
+            issues=(
+                InspectionIssue(
+                    code="orphan_event",
+                    message=BLIND_LEAK_SENTINEL,
+                    trial_id=BLIND_LEAK_SENTINEL,
+                ),
+            ),
+        ),
+    )
+
+    code, stdout, stderr = run_direct(watch_args(requested))
+
+    assert (code, stdout, stderr) == (3, "", "arity: trial_not_found\n")
+    assert_blind_output(stderr, requested)
+
+
+@pytest.mark.parametrize(
+    ("other", "expected_code", "expected_integrity"),
+    [
+        (partial_inspection("raw-other-partial"), 4, "partial"),
+        (corrupt_inspection("raw-other-corrupt"), 5, "corrupt"),
+    ],
+)
+def test_selected_valid_trial_does_not_hide_other_logical_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    other: TrialInspection,
+    expected_code: int,
+    expected_integrity: str,
+) -> None:
+    selected = f"selected-valid-{BLIND_LEAK_SENTINEL}"
+    install_catalog_source(
+        monkeypatch,
+        TrialCatalog(
+            trials=(
+                valid_inspection(selected, timestamp=10.0),
+                other,
+            ),
+        ),
+    )
+
+    code, stdout, stderr = run_direct(watch_args(selected))
+
+    assert code == expected_code
+    assert stderr == ""
+    assert "> Trial 1 | started | valid |" in stdout
+    assert f"| {expected_integrity} |" in stdout
+    assert "selected: Trial 1" in stdout
+    assert_blind_output(stdout, selected)
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code", "expected_stderr"),
     [
@@ -877,6 +1138,55 @@ def test_typed_physical_failures_close_once_and_emit_only_canned_stderr(
     assert events.count("reader_close") == 1
     assert clock_calls == 0
     assert_blind_output(stderr)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code", "expected_stderr"),
+    [
+        (
+            RecordChanged(
+                f"changed {BLIND_LEAK_SENTINEL}",
+                path=Path(BLIND_LEAK_SENTINEL),
+            ),
+            1,
+            "arity: record_store_changed\n",
+        ),
+        (
+            RecordReadError(
+                f"failed {BLIND_LEAK_SENTINEL}",
+                path=Path(BLIND_LEAK_SENTINEL),
+            ),
+            1,
+            "arity: record_read_error\n",
+        ),
+        (
+            RecordCorruption(
+                f"corrupt {BLIND_LEAK_SENTINEL}",
+                path=Path(BLIND_LEAK_SENTINEL),
+            ),
+            5,
+            "arity: record_store_corrupt\n",
+        ),
+    ],
+)
+def test_physical_failure_keeps_its_code_when_a_trial_was_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    error: RecordReadError,
+    expected_code: int,
+    expected_stderr: str,
+) -> None:
+    requested = f"requested-{BLIND_LEAK_SENTINEL}"
+    events = install_catalog_source(
+        monkeypatch,
+        TrialCatalog(trials=()),
+        inspect_error=error,
+    )
+
+    code, stdout, stderr = run_direct(watch_args(requested))
+
+    assert (code, stdout, stderr) == (expected_code, "", expected_stderr)
+    assert events.count("reader_close") == 1
+    assert_blind_output(stderr, requested)
 
 
 def test_missing_selected_trial_is_fixed_exit_three_without_raw_identity(
@@ -1014,6 +1324,50 @@ def test_recursive_persisted_sentinel_and_encodings_are_blind(
     assert_blind_output(stdout, raw_id, str(tmp_path))
 
 
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_control_escape_bidi_and_non_ascii_identities_cannot_reach_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    raw_id = f"trial:{ADVERSARIAL_IDENTITY}"
+    persist_events(tmp_path, backend, hostile_identity_events(raw_id))
+    before = tree_snapshot(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", backend)
+
+    code, stdout, stderr = run_direct(
+        watch_args(raw_id, ascii=True, no_motion=True),
+    )
+
+    assert code == 4
+    assert stderr == ""
+    assert "| partial |" in stdout
+    assert "issue unsupported_event" in stdout
+    assert "Agent A | no completion recorded" in stdout
+    assert tree_snapshot(tmp_path) == before
+    assert ADVERSARIAL_IDENTITY not in stdout
+    for dangerous in (
+        "\x00",
+        "\x1b",
+        "\r",
+        "\t",
+        "\u202a",
+        "\u202e",
+        "\u2066",
+        "\u2069",
+        "\u2603",
+        "\u96ea",
+    ):
+        assert dangerous not in stdout
+    assert_blind_output(
+        stdout,
+        raw_id,
+        base64.b64encode(ADVERSARIAL_IDENTITY.encode("utf-8")).decode("ascii"),
+        ADVERSARIAL_IDENTITY.encode("utf-8").hex(),
+    )
+
+
 def test_ascii_and_no_motion_flags_are_accepted_output_identical_and_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1083,7 +1437,9 @@ def test_one_shot_watch_invokes_no_terminal_runtime_provider_tool_auth_or_writer
         raise AssertionError("one-shot watch invoked an out-of-scope capability")
 
     monkeypatch.setattr(sys, "stdin", GuardedInput())
+    monkeypatch.setattr(sys, "__stdin__", GuardedInput())
     monkeypatch.setattr(builtins, "input", forbidden)
+    monkeypatch.setattr(os, "isatty", forbidden)
     monkeypatch.setattr(os, "get_terminal_size", forbidden)
     monkeypatch.setattr(shutil, "get_terminal_size", forbidden)
     monkeypatch.setattr(time, "sleep", forbidden)
@@ -1145,6 +1501,28 @@ def invoke_cli(
     code = cli_main()
     captured = capsys.readouterr()
     return code, captured.out, captured.err
+
+
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_cli_main_real_one_shot_smoke_uses_default_handler_without_creating_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    backend: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", backend)
+
+    result = invoke_cli(
+        monkeypatch,
+        capsys,
+        "watch",
+        "--ascii",
+        "--no-motion",
+    )
+
+    assert result == (0, "No persisted trials.\n", "")
+    assert not (tmp_path / ".gorkbot").exists()
 
 
 @pytest.mark.parametrize(
