@@ -15,7 +15,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Mapping
 
 from .seams import RecordReader
 
@@ -132,7 +132,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise _AmbiguousJson(f"duplicate object key {key!r}")
+            raise _AmbiguousJson("duplicate object key")
         result[key] = value
     return result
 
@@ -363,48 +363,14 @@ class SqliteRecordReader:
                 f"SQLite record store is not a file: {self.path}", path=self.path,
             )
 
-        open_path = self.path
-        mode = "ro"
-        wal_path = self.path.with_name(f"{self.path.name}-wal")
-        try:
-            wal_stat = wal_path.stat()
-        except FileNotFoundError:
-            wal_stat = None
-        except OSError as exc:
-            raise RecordReadError(
-                f"could not inspect SQLite WAL file {wal_path}: {exc}", path=self.path,
-            ) from exc
-        if wal_stat is not None:
-            if not stat_module.S_ISREG(wal_stat.st_mode):
-                raise RecordCorruption(
-                    f"SQLite WAL path is not a regular file: {wal_path}", path=self.path,
-                )
-            open_path = self._private_wal_snapshot(wal_path)
-            mode = "rw"
-        else:
-            # Close the most useful WAL-creation race before opening the source.
-            # Once a WAL exists we must only open its private copy, or SQLite may
-            # create ``-shm`` beside the user's database even in read-only mode.
-            try:
-                rechecked_wal_stat = wal_path.stat()
-            except FileNotFoundError:
-                rechecked_wal_stat = None
-            except OSError as exc:
-                raise RecordReadError(
-                    f"could not recheck SQLite WAL file {wal_path}: {exc}",
-                    path=self.path,
-                ) from exc
-            if rechecked_wal_stat is not None:
-                if not stat_module.S_ISREG(rechecked_wal_stat.st_mode):
-                    raise RecordCorruption(
-                        f"SQLite WAL path is not a regular file: {wal_path}",
-                        path=self.path,
-                    )
-                open_path = self._private_wal_snapshot(wal_path)
-                mode = "rw"
+        # SQLite's ``mode=ro`` can still create a ``-shm`` companion beside a
+        # WAL database. Always open a bounded private snapshot, even when no WAL
+        # is currently visible, so a concurrent journal-mode change cannot turn
+        # inspection into a source mutation.
+        open_path = self._private_snapshot()
 
         try:
-            uri = open_path.resolve().as_uri() + f"?mode={mode}&cache=private"
+            uri = open_path.resolve().as_uri() + "?mode=rw&cache=private"
         except (OSError, ValueError) as exc:
             self.close()
             raise RecordReadError(
@@ -440,15 +406,95 @@ class SqliteRecordReader:
             getattr(file_stat, "st_ino", 0),
         )
 
+    @classmethod
+    def _optional_file_marker(cls, path: Path) -> tuple[int, int, int, int] | None:
+        try:
+            return cls._file_marker(path)
+        except FileNotFoundError:
+            return None
+
+    def _write_private_snapshot(self, snapshot: Mapping[Path, bytes]) -> Path:
+        try:
+            self._snapshot_directory = tempfile.TemporaryDirectory(
+                prefix="arity-record-reader-",
+            )
+            private_root = Path(self._snapshot_directory.name)
+            for source, content in snapshot.items():
+                (private_root / source.name).write_bytes(content)
+        except OSError as exc:
+            if self._snapshot_directory is not None:
+                self._snapshot_directory.cleanup()
+                self._snapshot_directory = None
+            raise RecordReadError(
+                f"could not create a private SQLite snapshot for {self.path}: {exc}",
+                path=self.path,
+            ) from exc
+        return private_root / self.path.name
+
+    def _private_snapshot(self) -> Path:
+        wal_path = self.path.with_name(f"{self.path.name}-wal")
+        journal_path = self.path.with_name(f"{self.path.name}-journal")
+        for _attempt in range(3):
+            try:
+                wal_before = self._optional_file_marker(wal_path)
+                journal_before = self._optional_file_marker(journal_path)
+                if journal_before is not None:
+                    raise RecordChanged(
+                        f"SQLite rollback journal is active: {journal_path}",
+                        path=self.path,
+                    )
+                if wal_before is not None:
+                    return self._private_wal_snapshot(wal_path)
+
+                before = self._file_marker(self.path)
+                content = self.path.read_bytes()
+                after = self._file_marker(self.path)
+                wal_after = self._optional_file_marker(wal_path)
+                journal_after = self._optional_file_marker(journal_path)
+            except (RecordChanged, RecordCorruption):
+                raise
+            except FileNotFoundError as exc:
+                raise RecordChanged(
+                    f"SQLite record store changed while it was being read: {self.path}",
+                    path=self.path,
+                ) from exc
+            except OSError as exc:
+                raise RecordReadError(
+                    f"could not snapshot SQLite record store {self.path}: {exc}",
+                    path=self.path,
+                ) from exc
+
+            if journal_after is not None:
+                raise RecordChanged(
+                    f"SQLite rollback journal appeared while reading: {journal_path}",
+                    path=self.path,
+                )
+            if wal_after is not None:
+                # Retry through the DB+WAL path; the source itself is never opened.
+                continue
+            if before == after and len(content) == after[0]:
+                return self._write_private_snapshot({self.path: content})
+        raise RecordChanged(
+            f"SQLite record store kept changing while it was being read: {self.path}",
+            path=self.path,
+        )
+
     def _private_wal_snapshot(self, wal_path: Path) -> Path:
         paths = (self.path, wal_path)
+        journal_path = self.path.with_name(f"{self.path.name}-journal")
         snapshot: dict[Path, bytes] | None = None
         for _attempt in range(2):
             try:
+                if self._optional_file_marker(journal_path) is not None:
+                    raise RecordChanged(
+                        f"SQLite rollback journal is active: {journal_path}",
+                        path=self.path,
+                    )
                 before = {path: self._file_marker(path) for path in paths}
                 content = {path: path.read_bytes() for path in paths}
                 after = {path: self._file_marker(path) for path in paths}
-            except RecordCorruption:
+                journal_after = self._optional_file_marker(journal_path)
+            except (RecordChanged, RecordCorruption):
                 raise
             except FileNotFoundError as exc:
                 raise RecordChanged(
@@ -460,6 +506,11 @@ class SqliteRecordReader:
                     f"could not snapshot SQLite WAL store {self.path}: {exc}",
                     path=self.path,
                 ) from exc
+            if journal_after is not None:
+                raise RecordChanged(
+                    f"SQLite rollback journal appeared while reading: {journal_path}",
+                    path=self.path,
+                )
             if before == after and all(
                 len(content[path]) == after[path][0] for path in paths
             ):
@@ -471,23 +522,7 @@ class SqliteRecordReader:
                 path=self.path,
             )
 
-        try:
-            self._snapshot_directory = tempfile.TemporaryDirectory(
-                prefix="arity-record-reader-",
-            )
-            private_root = Path(self._snapshot_directory.name)
-            private_database = private_root / self.path.name
-            private_database.write_bytes(snapshot[self.path])
-            (private_root / wal_path.name).write_bytes(snapshot[wal_path])
-        except OSError as exc:
-            if self._snapshot_directory is not None:
-                self._snapshot_directory.cleanup()
-                self._snapshot_directory = None
-            raise RecordReadError(
-                f"could not create a private SQLite snapshot for {self.path}: {exc}",
-                path=self.path,
-            ) from exc
-        return private_database
+        return self._write_private_snapshot(snapshot)
 
     def _validate_schema(self) -> None:
         if self._connection is None:

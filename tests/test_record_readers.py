@@ -113,6 +113,36 @@ def test_sqlite_reader_is_query_only_and_byte_preserving(tmp_path: Path) -> None
     assert _tree_snapshot(tmp_path) == before
 
 
+def test_sqlite_reader_never_opens_the_no_wal_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "records.db"
+    writer = SqliteRecordStore(path)
+    writer.append(StoreRecord(kind="trial_event", record={"trial_id": "private"}))
+    writer.close()
+    scratch = tmp_path / "private-snapshots"
+    scratch.mkdir()
+    monkeypatch.setattr("arity.record_readers.tempfile.tempdir", str(scratch))
+    opened: list[str] = []
+    original_connect = sqlite3.connect
+
+    def observed_connect(database: str, *args: object, **kwargs: object):
+        opened.append(str(database))
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", observed_connect)
+    reader = SqliteRecordReader(path)
+    try:
+        assert reader.query("trial_event")[0]["trial_id"] == "private"
+        assert len(opened) == 1
+        assert path.resolve().as_uri() not in opened[0]
+        assert "arity-record-reader-" in opened[0]
+    finally:
+        reader.close()
+    assert list(scratch.iterdir()) == []
+
+
 def test_sqlite_reader_does_not_create_a_missing_store(tmp_path: Path) -> None:
     missing = tmp_path / "missing" / "records.db"
     with pytest.raises(RecordNotFound):
@@ -184,6 +214,19 @@ def test_jsonl_reader_rejects_ambiguous_or_unbounded_json(
 
     with pytest.raises(RecordCorruption, match="malformed JSONL"):
         JsonlRecordReader(root).query("trial_event")
+
+
+def test_duplicate_key_diagnostic_does_not_echo_persisted_content(tmp_path: Path) -> None:
+    root = tmp_path / "records"
+    root.mkdir()
+    (root / "trial_event.jsonl").write_text(
+        '{"TOP_SECRET":1,"TOP_SECRET":2}\n', encoding="utf-8"
+    )
+
+    with pytest.raises(RecordCorruption) as failure:
+        JsonlRecordReader(root).query("trial_event")
+    assert "duplicate object key" in str(failure.value)
+    assert "TOP_SECRET" not in str(failure.value)
 
 
 def test_jsonl_kind_and_filters_are_type_and_case_strict(tmp_path: Path) -> None:
@@ -380,8 +423,12 @@ def test_sqlite_lock_is_changed_not_corruption(tmp_path: Path) -> None:
     writer.close()
     locker = sqlite3.connect(path, timeout=0)
     locker.execute("BEGIN EXCLUSIVE")
+    locker.execute(
+        "INSERT INTO records(kind, record) VALUES (?, ?)",
+        ("trial_event", '{}'),
+    )
     try:
-        with pytest.raises(RecordChanged, match="locked"):
+        with pytest.raises(RecordChanged, match="rollback journal"):
             SqliteRecordReader(path)
     finally:
         locker.rollback()
