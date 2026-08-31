@@ -13,6 +13,7 @@ from .evidence import (
     _thaw_json,
 )
 from .seams import RecordReader
+from .telemetry import UnsupportedUsageEvidenceSchema
 from .trial_events import (
     KNOWN_EVENT_TYPES,
     TRIAL_EVENT_SCHEMA_VERSION,
@@ -346,7 +347,7 @@ def _nested_schema_inspection(
     for index, event in enumerate(events):
         try:
             last_replay = replay_trial(events[: index + 1], trial_id)
-        except UnsupportedEvidenceContractSchema as exc:
+        except (UnsupportedEvidenceContractSchema, UnsupportedUsageEvidenceSchema) as exc:
             issues = inherited + _unhandled_issues(last_replay, trial_id)
             issues.append(
                 _issue(
@@ -477,7 +478,7 @@ def _inspect_records(
         if prefix:
             try:
                 replay = replay_trial(prefix, trial_id)
-            except UnsupportedEvidenceContractSchema:
+            except (UnsupportedEvidenceContractSchema, UnsupportedUsageEvidenceSchema):
                 return _nested_schema_inspection(
                     trial_id,
                     prefix,
@@ -519,7 +520,7 @@ def _inspect_records(
 
     try:
         replay = replay_trial(supported, trial_id)
-    except UnsupportedEvidenceContractSchema:
+    except (UnsupportedEvidenceContractSchema, UnsupportedUsageEvidenceSchema):
         return _nested_schema_inspection(
             trial_id,
             tuple(supported),
