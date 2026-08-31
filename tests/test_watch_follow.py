@@ -357,10 +357,18 @@ def test_cli_default_enters_follow_and_explicit_watch_preserves_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    seen: list[tuple[bool, bool, bool, str]] = []
+    seen: list[tuple[bool, bool, bool, str, bool]] = []
 
     def handler(args: argparse.Namespace) -> int:
-        seen.append((args.follow, args.ascii, args.no_motion, args.cache_policy))
+        seen.append(
+            (
+                args.follow,
+                args.ascii,
+                args.no_motion,
+                args.cache_policy,
+                bool(getattr(args, "lobby", False)),
+            )
+        )
         return 23
 
     monkeypatch.setattr(watch_cli, "run_watch_command", handler)
@@ -382,11 +390,11 @@ def test_cli_default_enters_follow_and_explicit_watch_preserves_dispatch(
         assert capsys.readouterr() == ("", "")
 
     assert seen == [
-        (True, False, False, "conservative"),
-        (False, False, False, "conservative"),
-        (True, False, False, "conservative"),
-        (True, False, False, "exact"),
-        (True, False, False, "off"),
+        (True, False, False, "conservative", True),
+        (False, False, False, "conservative", False),
+        (True, False, False, "conservative", False),
+        (True, False, False, "exact", False),
+        (True, False, False, "off", False),
     ]
 
 
