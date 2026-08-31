@@ -500,7 +500,13 @@ def _positive_arity_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def main():
+def _non_empty_trial_id(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("trial_id must be a non-empty string")
+    return value
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         prog="arity",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -522,6 +528,30 @@ def main():
     subparsers.add_parser("skills", help="List active and discovered skills")
     subparsers.add_parser("roles", help="List staff roles, capabilities, and denial sets")
     subparsers.add_parser("redphone", help="Inspect Red Phone channels")
+
+    trials_parser = subparsers.add_parser(
+        "trials", help="List persisted trial journals without running agents"
+    )
+    trials_parser.add_argument("--json", action="store_true", help="Emit a versioned JSON catalog")
+
+    trial_parser = subparsers.add_parser(
+        "trial", help="Inspect or replay one persisted trial journal"
+    )
+    trial_subparsers = trial_parser.add_subparsers(dest="trial_action", required=True)
+    trial_show = trial_subparsers.add_parser(
+        "show", help="Show a content-safe projection of one trial"
+    )
+    trial_show.add_argument(
+        "trial_id", type=_non_empty_trial_id, help="Exact persisted trial id"
+    )
+    trial_show.add_argument("--json", action="store_true", help="Emit graph-ready metadata as JSON")
+    trial_replay = trial_subparsers.add_parser(
+        "replay", help="Replay and validate one trial's ordered event stream"
+    )
+    trial_replay.add_argument(
+        "trial_id", type=_non_empty_trial_id, help="Exact persisted trial id"
+    )
+    trial_replay.add_argument("--json", action="store_true", help="Emit the full replay record as JSON")
 
     race_parser = subparsers.add_parser(
         "race",
@@ -606,6 +636,12 @@ def main():
         show_tasks()
     elif args.command == "standings":
         show_standings(by=args.by)
+    elif args.command == "trials":
+        from .inspection_cli import run_trials_command
+        return run_trials_command(args)
+    elif args.command == "trial":
+        from .inspection_cli import run_trial_command
+        return run_trial_command(args)
     elif args.command == "chat":
         interactive_chat()
     elif args.command == "status":
@@ -630,6 +666,7 @@ def main():
         handle_run_command(args)
     else:
         run_demo()
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
