@@ -182,7 +182,14 @@ def test_designer_prompt_has_a_stable_evidence_and_handoff_output_contract() -> 
 
 
 def test_designer_has_an_exhaustive_read_only_tool_allowlist() -> None:
-    expected = ("read_file", "list_directory", "search_files", "fetch_url", "message")
+    expected = (
+        "read_file",
+        "list_directory",
+        "search_files",
+        "web_search",
+        "fetch_url",
+        "message",
+    )
 
     assert DESIGNER_ROLE.allowed_tools == expected
     for tool_name in expected:
@@ -260,6 +267,14 @@ def test_dispatcher_enforces_designer_authority_across_every_tool_axis(tmp_path)
         assert result.status == "completed", axis
         assert not (workspace / "production.py").exists(), axis
         assert len(provider.calls) == 2, axis
+        exposed_tools = {
+            schema["function"]["name"]
+            for schema in provider.calls[0].tools
+        }
+        if axis == "mcp":
+            assert "web_search" in exposed_tools
+            assert "write_file" not in exposed_tools
+            assert "execute_command" not in exposed_tools
         tool_result = provider.calls[1].messages[-1]
         assert tool_result["role"] == "tool", axis
         assert "Security Denial" in tool_result["content"], axis
@@ -363,7 +378,7 @@ def test_resolved_designer_candidate_does_not_receive_implementation_tdd(tmp_pat
     assert result.skills_used == []
     assert "Skill: pytest-tdd" not in system_prompt
     assert "Fix any failures" not in system_prompt
-    assert tool_names == set(DESIGNER_ROLE.allowed_tools)
+    assert tool_names == set(DESIGNER_ROLE.allowed_tools) - {"web_search"}
 
 
 def test_designer_constant_is_exported_from_the_installed_package_surface() -> None:
