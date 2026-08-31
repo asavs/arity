@@ -24,7 +24,7 @@ from .watch_view_model import WatchProjector, WatchViewModel
 
 
 EXIT_OK = 0
-EXIT_USAGE_OR_READ = 1
+EXIT_OPERATIONAL = 1
 EXIT_NOT_FOUND = 3
 EXIT_PARTIAL = 4
 EXIT_CORRUPT = 5
@@ -89,8 +89,35 @@ def _typed_read_failure(error: RecordReadError) -> tuple[int, str]:
     if isinstance(error, RecordCorruption):
         return EXIT_CORRUPT, RecordCorruption.code
     if isinstance(error, RecordChanged):
-        return EXIT_USAGE_OR_READ, RecordChanged.code
-    return EXIT_USAGE_OR_READ, RecordReadError.code
+        return EXIT_OPERATIONAL, RecordChanged.code
+    return EXIT_OPERATIONAL, RecordReadError.code
+
+
+def _write_snapshot_text(
+    stream: TextIO,
+    value: str,
+    *,
+    raw_ascii: bool,
+) -> bool:
+    """Write one frame without leaking I/O failures or translating default LFs."""
+
+    try:
+        if raw_ascii:
+            buffer = getattr(stream, "buffer", None)
+            if buffer is not None:
+                encoded = value.encode("ascii", errors="strict")
+                written = buffer.write(encoded)
+                if type(written) is not int or written != len(encoded):
+                    raise OSError("incomplete watch output")
+                buffer.flush()
+                return True
+        written = stream.write(value)
+        if type(written) is not int or written != len(value):
+            raise OSError("incomplete watch output")
+        stream.flush()
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
 
 
 def run_watch_command(
@@ -107,6 +134,8 @@ def run_watch_command(
 ) -> int:
     """Execute one blind snapshot without polling or terminal interaction."""
 
+    output_is_default = stdout is None
+    errors_are_default = stderr is None
     output = stdout if stdout is not None else sys.stdout
     errors = stderr if stderr is not None else sys.stderr
     trial_id = getattr(args, "trial_id", None)
@@ -127,19 +156,30 @@ def run_watch_command(
         )
     except RecordReadError as error:
         exit_code, safe_code = _typed_read_failure(error)
-        errors.write(f"arity: {safe_code}\n")
+        if not _write_snapshot_text(
+            errors,
+            f"arity: {safe_code}\n",
+            raw_ascii=errors_are_default,
+        ):
+            return EXIT_OPERATIONAL
         return exit_code
 
     exit_code = watch_exit_code(model)
     if exit_code == EXIT_NOT_FOUND:
-        errors.write("arity: trial_not_found\n")
+        if not _write_snapshot_text(
+            errors,
+            "arity: trial_not_found\n",
+            raw_ascii=errors_are_default,
+        ):
+            return EXIT_OPERATIONAL
         return exit_code
 
     if renderer is not None:
         frame = renderer(model)
     else:
         frame = render_watch_snapshot(model)
-    output.write(frame)
+    if not _write_snapshot_text(output, frame, raw_ascii=output_is_default):
+        return EXIT_OPERATIONAL
     return exit_code
 
 
@@ -147,8 +187,8 @@ __all__ = [
     "EXIT_CORRUPT",
     "EXIT_NOT_FOUND",
     "EXIT_OK",
+    "EXIT_OPERATIONAL",
     "EXIT_PARTIAL",
-    "EXIT_USAGE_OR_READ",
     "load_watch_model",
     "run_watch_command",
     "watch_exit_code",
