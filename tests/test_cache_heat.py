@@ -120,7 +120,9 @@ def test_non_provider_cache_counts_are_estimated_and_never_confirm(basis: str) -
 
 
 @pytest.mark.parametrize("cache_count", [None, 0])
-def test_context_or_ordinary_tokens_never_invent_cache_heat(cache_count: int | None) -> None:
+def test_context_or_ordinary_tokens_never_invent_confirmation(
+    cache_count: int | None,
+) -> None:
     marker = "PRIVATE_FORK_CONTEXT"
     view = project_cache_heat(
         [
@@ -134,7 +136,11 @@ def test_context_or_ordinary_tokens_never_invent_cache_heat(cache_count: int | N
         mode="exact",
     )
 
-    assert view == CacheHeatView(state="unknown")
+    assert view == CacheHeatView(
+        state="estimated",
+        deadline_at=400.0,
+        seconds_remaining=290,
+    )
     assert marker not in repr(view)
     assert marker not in repr(view.to_dict())
 
@@ -226,7 +232,12 @@ def test_conservative_uses_shortest_recorded_window_and_never_extends_exact() ->
     records = [
         _record(_evidence(window=3600), ordinal=1, started_at=100.0),
         _record(
-            _evidence(read=None, write=None, window=300),
+            _evidence(
+                read=None,
+                write=None,
+                window=300,
+                refresh_on_reuse=False,
+            ),
             ordinal=2,
             started_at=101.0,
         ),
