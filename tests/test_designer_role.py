@@ -1,13 +1,18 @@
 """Contracts for the packaged tier-1 Arity designer role."""
 from __future__ import annotations
 
+import contextlib
 from importlib import resources
+import io
 from pathlib import Path
+import sys
 import urllib.request
+from unittest.mock import MagicMock, patch
 
 import arity
 import pytest
-from arity.handlers import JsonlRecordStore
+from arity.cli import main
+from arity.handlers import CLIModelProvider, JsonlRecordStore
 from arity.ledger import Seat, SeatLedger
 from arity.race import resolve_candidates
 from arity.roles import (
@@ -28,7 +33,8 @@ from arity.tools import (
     _PublicHTTPRedirectHandler,
     create_mcp_tool_runner,
 )
-from arity.types import CallModel, ExecuteTool, ModelCompleted, ToolCompleted
+from arity.types import CallModel, ExecuteTool, ModelCompleted, ModelFailed, ToolCompleted
+from arity.wire import FallbackModelProvider
 
 
 class _ToolAttemptProvider:
@@ -170,6 +176,20 @@ def test_common_design_briefs_route_to_designer_without_stealing_implementation(
         assert registry.resolve(brief).name == "developer:python", brief
 
     assert registry.resolve("design the TUI system architecture").name == "engineer"
+
+
+def test_generic_technical_prototypes_do_not_route_to_designer() -> None:
+    registry = RoleRegistry()
+
+    for brief in ("prototype an API client", "prototype a rate limiter"):
+        assert registry.resolve(brief).name == "developer:python", brief
+
+    for brief in (
+        "prototype a terminal lobby",
+        "prototype an accessible TUI",
+        "prototype the blind interface user journey",
+    ):
+        assert registry.resolve(brief).name == "designer", brief
 
 
 def test_designer_prompt_owns_experience_without_inventing_runtime_behavior() -> None:
@@ -560,6 +580,25 @@ def test_skills_preset_fails_closed_for_designer_without_false_arm_labels() -> N
         resolve_candidates("skills", DESIGNER_ROLE, placeholder_seats_for_designer_test())
 
 
+def test_cli_reports_unsupported_designer_skills_axis_without_a_traceback() -> None:
+    stderr = io.StringIO()
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            ["arity", "race", "compare layouts", "--role", "designer", "--variants", "skills", "--mock"],
+        ),
+        contextlib.redirect_stderr(stderr),
+        pytest.raises(SystemExit) as stopped,
+    ):
+        main()
+
+    assert stopped.value.code == 2
+    assert "skills preset is not supported for role 'designer'" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
 def test_skills_preset_remains_a_distinct_developer_comparison() -> None:
     seats = placeholder_seats_for_designer_test()
     specs, _ = resolve_candidates("skills", DEVELOPER_ROLE, seats)
@@ -571,6 +610,94 @@ def test_skills_preset_remains_a_distinct_developer_comparison() -> None:
 
 def placeholder_seats_for_designer_test() -> list[Seat]:
     return [Seat(id="preset-seat", provider="test", model="preset-model")]
+
+
+@pytest.mark.parametrize("harness", ("cli", "codex", "claude", "omp"))
+def test_closed_authority_role_rejects_intrinsic_tool_harness_before_process(
+    tmp_path,
+    harness: str,
+) -> None:
+    seat = Seat(id="designer-seat", provider="test", model="design-model")
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        quiet=True,
+    )
+
+    with (
+        patch("arity.handlers.subprocess.run") as process,
+        pytest.raises(PermissionError, match="closed tool authority.*intrinsic-tool harness"),
+    ):
+        dispatcher.dispatch_single(
+            TaskRecord(brief="Specify the terminal lobby."),
+            CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness=harness, skills=[]),
+            run_verification=False,
+        )
+    process.assert_not_called()
+
+
+def test_closed_authority_role_disables_known_cli_wire_fallback(tmp_path) -> None:
+    seat = Seat(id="designer-seat", provider="test", model="design-model")
+    primary = MagicMock()
+    primary.call.return_value = ModelCompleted(content="Direct wire result.", usage={})
+    fallback = CLIModelProvider(harness="codex", model="design-model")
+    fallback.call = MagicMock(return_value=ModelCompleted(content="unsafe fallback", usage={}))
+    provider = FallbackModelProvider(primary=primary, fallback=fallback)
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: provider,
+        quiet=True,
+    )
+
+    direct = dispatcher.dispatch_single(
+        TaskRecord(brief="Specify the terminal lobby."),
+        CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+    assert direct.output == "Direct wire result."
+    fallback.call.assert_not_called()
+
+    primary.reset_mock()
+    primary.call.return_value = ModelFailed(error="wire unavailable", retryable=True)
+    denied = dispatcher.dispatch_single(
+        TaskRecord(brief="Specify another terminal lobby."),
+        CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+
+    assert denied.status == "halted"
+    assert denied.fallbacks == 0
+    assert primary.call.call_count == 1
+    fallback.call.assert_not_called()
+
+
+def test_developer_wire_fallback_behavior_is_preserved(tmp_path) -> None:
+    seat = Seat(id="developer-seat", provider="test", model="dev-model")
+    primary = MagicMock()
+    primary.call.return_value = ModelFailed(error="wire unavailable", retryable=True)
+    fallback = CLIModelProvider(harness="codex", model="dev-model")
+    fallback.call = MagicMock(return_value=ModelCompleted(content="developer fallback", usage={}))
+    provider = FallbackModelProvider(primary=primary, fallback=fallback)
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: provider,
+        quiet=True,
+    )
+
+    result = dispatcher.dispatch_single(
+        TaskRecord(brief="Implement the terminal."),
+        CandidateSpec(seat=seat, role=DEVELOPER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+
+    assert result.output == "developer fallback"
+    assert result.fallbacks == 1
+    fallback.call.assert_called_once()
 
 
 def test_designer_constant_is_exported_from_the_installed_package_surface() -> None:
