@@ -10,7 +10,7 @@ import pytest
 import arity.watch_terminal as watch_terminal
 import arity.watch_view_model as watch_view_model
 from arity.cache_heat import CacheHeatView
-from arity.inspection import TrialCatalog, TrialInspection
+from arity.inspection import TrialCatalog, TrialInspection, inspect_trial
 from arity.telemetry import CachePolicyHint, TokenMeasurement, UsageEvidence
 from arity.trial_events import TrialEvent, replay_trial
 from arity.watch_follow import FollowController
@@ -70,7 +70,7 @@ def _catalog(*, started_at: float = 100.0, window: int = 300) -> TrialCatalog:
         sequence=2,
         event_type="request.usage_recorded",
         payload=_usage_payload(started_at=started_at, window=window),
-        timestamp=2.0,
+        timestamp=started_at + 2.0,
     )
     replay = replay_trial((started, usage), trial_id=PRIVATE_TRIAL)
     return TrialCatalog(
@@ -187,6 +187,63 @@ def test_forged_usage_projection_without_a_matching_event_fails_closed() -> None
     assert model.trials[0].detail is None
     assert model.trials[0].issue is not None
     assert model.trials[0].issue.code == "inspection_incomplete"
+
+
+class _EventReader:
+    def __init__(self, events: tuple[TrialEvent, ...]) -> None:
+        self.events = events
+
+    def query(self, kind: str, **filters):
+        assert kind == "trial_event"
+        assert filters == {"trial_id": PRIVATE_TRIAL}
+        return tuple(event.to_dict() for event in self.events)
+
+    def close(self) -> None:
+        return None
+
+
+def test_forged_usage_time_fails_closed_before_cache_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = TrialEvent.create(
+        trial_id=PRIVATE_TRIAL,
+        sequence=1,
+        event_type="trial.started",
+        payload={"arms": [{"arm_id": PRIVATE_ARM, "arm_ordinal": 0}]},
+        timestamp=1.0,
+    )
+    usage = TrialEvent.create(
+        trial_id=PRIVATE_TRIAL,
+        sequence=2,
+        event_type="request.usage_recorded",
+        payload=_usage_payload(started_at=100.0, window=300),
+        timestamp=999.0,
+    )
+    inspection = inspect_trial(_EventReader((started, usage)), PRIVATE_TRIAL)
+
+    assert inspection.integrity == "corrupt"
+    assert inspection.replay is None
+    assert inspection.issues[0].code == "invalid_replay"
+
+    def forbidden_cache_projection(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("corrupt replay reached cache projection")
+
+    monkeypatch.setattr(
+        watch_view_model,
+        "project_cache_heat",
+        forbidden_cache_projection,
+    )
+    model = WatchProjector(cache_policy="exact").project(
+        TrialCatalog(trials=(inspection,)),
+        backend="jsonl",
+        read_at=110.0,
+    )
+
+    assert model.catalog_integrity == "corrupt"
+    assert model.trials[0].detail is None
+    assert model.trials[0].issue is not None
+    assert model.trials[0].issue.code == "invalid_replay"
 
 
 class _UnavailableTerminal:
