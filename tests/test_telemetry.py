@@ -8,6 +8,7 @@ import pytest
 
 from arity.handlers import JsonlRecordStore
 from arity.inspection import inspect_trial
+from arity.race import RaceConfig, run_race
 from arity.stores.sqlite import SqliteRecordStore
 from arity.telemetry import (
     CachePolicyHint,
@@ -435,3 +436,76 @@ def test_future_nested_usage_schema_is_a_blind_safe_partial_boundary(tmp_path) -
     )
     assert marker not in repr(projected)
     assert projected.trials[0].issue.code == "unsupported_usage_evidence_schema"
+
+
+def test_race_journals_each_candidate_request_before_publishing_its_arm(tmp_path) -> None:
+    marker = "PRIVATE_USAGE_WIRING_MARKER"
+    report = run_race(
+        RaceConfig(
+            prompt=f"Build a tiny cache without repeating {marker}.",
+            mock=True,
+            workspace_root=tmp_path / "workspaces",
+            store_root=tmp_path / "records",
+        )
+    )
+
+    replay = report.journal.replay()
+    declarations = {
+        str(candidate.metadata["arm_id"]): candidate for candidate in report.candidates
+    }
+    usage_events = [
+        event for event in replay.events if event.event_type == "request.usage_recorded"
+    ]
+    completion_sequence = {
+        str(event.payload["arm_id"]): event.sequence
+        for event in replay.events
+        if event.event_type == "arm.completed" and event.payload.get("phase") == "trial"
+    }
+
+    assert usage_events
+    assert {str(event.payload["arm_id"]) for event in usage_events} == set(declarations)
+    for arm_id in declarations:
+        arm_events = [
+            event for event in usage_events if event.payload["arm_id"] == arm_id
+        ]
+        assert [event.payload["request_ordinal"] for event in arm_events] == list(
+            range(1, len(arm_events) + 1)
+        )
+        assert all(event.sequence < completion_sequence[arm_id] for event in arm_events)
+        assert all(event.payload["actor_ref"] == arm_id for event in arm_events)
+        assert all(event.payload["outcome"] == "completed" for event in arm_events)
+
+    serialized_usage = json.dumps([event.payload for event in usage_events])
+    assert marker not in serialized_usage
+    for candidate in report.candidates:
+        assert candidate.seat.provider not in serialized_usage
+        assert candidate.seat.model not in serialized_usage
+        assert str(candidate.seat.id) not in serialized_usage
+
+
+def test_conference_reuses_one_ordinal_stream_per_arm_without_inventing_cache_hits(
+    tmp_path,
+) -> None:
+    report = run_race(
+        RaceConfig(
+            prompt="Build a tiny cache.",
+            mock=True,
+            conference=2,
+            workspace_root=tmp_path / "workspaces",
+            store_root=tmp_path / "records",
+        )
+    )
+
+    conference_usage = [
+        payload
+        for payload in report.journal.replay().request_usage
+        if payload["phase"] == "conference"
+    ]
+    for candidate in report.candidates:
+        arm_id = str(candidate.metadata["arm_id"])
+        arm_usage = [payload for payload in conference_usage if payload["arm_id"] == arm_id]
+        assert [payload["request_ordinal"] for payload in arm_usage] == [1, 2]
+        for payload in arm_usage:
+            evidence = UsageEvidence.from_dict(payload["evidence"])
+            assert evidence.cache_read_tokens == TokenMeasurement(None, "unavailable")
+            assert evidence.cache_write_tokens == TokenMeasurement(None, "unavailable")
