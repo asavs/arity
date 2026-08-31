@@ -43,6 +43,8 @@ jobs:
         run: python -m build
       - name: Check distribution metadata
         run: python -m twine check dist/*
+      - name: Run installed-wheel acceptance
+        run: python acceptance/verify_installed.py
 
   installed-wheel-windows:
     name: Installed wheel (Python 3.14, Windows)

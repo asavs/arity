@@ -1,6 +1,7 @@
-"""Build HEAD, install its wheel in a fresh venv, and run the resolution gate."""
+"""Build HEAD, install its wheel in a fresh venv, and run package gates."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,46 @@ def run(command: list[str], *, cwd: Path) -> None:
 
 def venv_python(root: Path) -> Path:
     return root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def venv_arity(root: Path) -> Path:
+    return root / ("Scripts/arity.exe" if sys.platform == "win32" else "bin/arity")
+
+
+def verify_watch_command(environment: Path, *, cwd: Path) -> None:
+    command = [str(venv_arity(environment)), "watch", "--ascii", "--no-motion"]
+    print("+", " ".join(command), flush=True)
+    env = os.environ.copy()
+    env["ARITY_STORE"] = "jsonl"
+    env["PYTHONNOUSERSITE"] = "1"
+    env.pop("GORKBOT_STORE", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    store_root = cwd / ".gorkbot"
+    if store_root.exists():
+        raise RuntimeError("watch acceptance run root must start without a store")
+
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"installed arity watch returned {result.returncode}")
+    if result.stdout != "No persisted trials.\n":
+        raise RuntimeError("installed arity watch changed its empty-state output")
+    if result.stderr:
+        raise RuntimeError("installed arity watch wrote to stderr")
+    if not result.stdout.isascii() or "\x1b" in result.stdout:
+        raise RuntimeError("installed arity watch output was not fixed ANSI-free ASCII")
+    if store_root.exists():
+        raise RuntimeError("installed arity watch created a missing store")
 
 
 def main() -> None:
@@ -70,6 +111,7 @@ def main() -> None:
             ],
             cwd=run_root,
         )
+        verify_watch_command(environment, cwd=run_root)
         run(
             [
                 str(python),
