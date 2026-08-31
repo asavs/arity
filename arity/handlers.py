@@ -537,12 +537,12 @@ class LocalToolRunner:
 
 def default_record_store() -> "RecordStore":
     """Select Arity's store while retaining legacy settings and state paths."""
-    from .tools import get_config_value
-    store_kind = get_config_value("ARITY_STORE") or get_config_value("ARITY_STORE") or "jsonl"
-    if store_kind.lower() == "sqlite":
+    from .record_readers import configured_store_spec
+    spec = configured_store_spec()
+    if spec.backend == "sqlite":
         from .stores.sqlite import SqliteRecordStore
-        return SqliteRecordStore(Path(".arity/records.db"))
-    return JsonlRecordStore()
+        return SqliteRecordStore(spec.path)
+    return JsonlRecordStore(spec.path)
 
 
 class JsonlRecordStore:
