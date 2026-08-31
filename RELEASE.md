@@ -50,6 +50,16 @@ happened.
      resolution, frozen-byte delivery, persisted replay, JSONL/SQLite inspection behavior, and the
      installed `arity` command outside the source checkout.
 
+6. **A deliberate public-release security boundary**
+   - Arity is MIT licensed and checked on Python 3.10 and 3.14 across Linux and Windows. Release
+     builds validate both source distributions and installed wheels.
+   - No provider OAuth client identity or secret is bundled. Experimental native OAuth adapters
+     require caller-supplied configuration, fail before opening a browser, callback server, or
+     network request when it is absent, and retain the supplied configuration for later refreshes.
+   - Credential-file updates use same-directory atomic replacement and POSIX owner-only mode where
+     supported. Credentials remain plaintext, and model-directed tools remain outside any OS-level
+     sandbox; these limits are explicit in `SECURITY.md`.
+
 ## arity 0.3.0 — Trials
 
 **Release Date:** 2026-08-29
