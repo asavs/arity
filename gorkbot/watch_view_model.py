@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from .inspection import InspectionIssue, TrialCatalog, TrialInspection
-from .trial_events import TrialReplay
+from .trial_events import (
+    KNOWN_EVENT_TYPES,
+    TRIAL_EVENT_SCHEMA_VERSION,
+    TrialEvent,
+    TrialReplay,
+)
 
 
 MAX_WATCH_TRIALS = 256
@@ -100,9 +105,11 @@ class WatchIssue:
     message: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if type(self.code) is not str:
+            raise TypeError("watch issue code must be a plain string")
         message = _ISSUE_MESSAGES.get(self.code)
         if message is None:
-            raise ValueError(f"unsupported watch issue code {self.code!r}")
+            raise ValueError("unsupported watch issue code")
         object.__setattr__(self, "message", message)
 
 
@@ -143,9 +150,9 @@ class WatchTrialDetail:
     delivery_recorded: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.agents, tuple) or len(self.agents) > MAX_WATCH_AGENTS:
+        if type(self.agents) is not tuple or len(self.agents) > MAX_WATCH_AGENTS:
             raise ValueError("agents must be a bounded tuple")
-        if any(not isinstance(agent, WatchAgent) for agent in self.agents):
+        if any(type(agent) is not WatchAgent for agent in self.agents):
             raise TypeError("agents must contain only WatchAgent values")
         for value in (
             self.arms,
@@ -154,7 +161,7 @@ class WatchTrialDetail:
             self.reviews,
             self.resolutions,
         ):
-            if not isinstance(value, BoundedCount):
+            if type(value) is not BoundedCount:
                 raise TypeError("watch detail counts must be bounded")
         if type(self.delivery_recorded) is not bool:
             raise TypeError("delivery_recorded must be a boolean")
@@ -174,13 +181,17 @@ class WatchTrial:
     def __post_init__(self) -> None:
         if type(self.trial_number) is not int or self.trial_number < 1:
             raise ValueError("trial_number must be a positive integer")
-        if self.integrity not in {"valid", "partial", "corrupt"}:
-            raise ValueError(f"unsupported watch integrity {self.integrity!r}")
-        if self.lifecycle not in _LIFECYCLES:
-            raise ValueError(f"unsupported watch lifecycle {self.lifecycle!r}")
-        if self.detail is not None and not isinstance(self.detail, WatchTrialDetail):
+        if type(self.integrity) is not str or self.integrity not in {
+            "valid",
+            "partial",
+            "corrupt",
+        }:
+            raise ValueError("unsupported watch integrity")
+        if type(self.lifecycle) is not str or self.lifecycle not in _LIFECYCLES:
+            raise ValueError("unsupported watch lifecycle")
+        if self.detail is not None and type(self.detail) is not WatchTrialDetail:
             raise TypeError("detail must be WatchTrialDetail or None")
-        if self.issue is not None and not isinstance(self.issue, WatchIssue):
+        if self.issue is not None and type(self.issue) is not WatchIssue:
             raise TypeError("issue must be WatchIssue or None")
         if type(self.selected) is not bool:
             raise TypeError("selected must be a boolean")
@@ -215,18 +226,18 @@ class WatchViewModel:
     requested_trial_missing: bool = False
 
     def __post_init__(self) -> None:
-        if self.backend not in {"jsonl", "sqlite"}:
-            raise ValueError(f"unsupported watch backend {self.backend!r}")
-        if not _finite_number(self.read_at):
+        if type(self.backend) is not str or self.backend not in {"jsonl", "sqlite"}:
+            raise ValueError("unsupported watch backend")
+        if type(self.read_at) is not float or not _finite_number(self.read_at):
             raise ValueError("read_at must be a finite number")
-        if not isinstance(self.trials, tuple) or len(self.trials) > MAX_WATCH_TRIALS:
+        if type(self.trials) is not tuple or len(self.trials) > MAX_WATCH_TRIALS:
             raise ValueError("trials must be a bounded tuple")
-        if any(not isinstance(trial, WatchTrial) for trial in self.trials):
+        if any(type(trial) is not WatchTrial for trial in self.trials):
             raise TypeError("trials must contain only WatchTrial values")
         if type(self.more_trials_omitted) is not bool:
             raise TypeError("more_trials_omitted must be a boolean")
-        if not isinstance(self.catalog_issues, tuple) or any(
-            not isinstance(issue, WatchIssue) for issue in self.catalog_issues
+        if type(self.catalog_issues) is not tuple or any(
+            type(issue) is not WatchIssue for issue in self.catalog_issues
         ):
             raise TypeError("catalog_issues must contain only WatchIssue values")
         codes = tuple(issue.code for issue in self.catalog_issues)
@@ -268,7 +279,7 @@ class WatchLabelRegistry:
 
     def assign(self, trial_ids: Iterable[str]) -> None:
         for trial_id in trial_ids:
-            if not isinstance(trial_id, str) or not trial_id:
+            if type(trial_id) is not str or not trial_id:
                 raise ValueError("trial labels require non-empty string identities")
             if trial_id not in self._labels:
                 self._labels[trial_id] = self._next_number
@@ -354,29 +365,69 @@ def _trial_issue(
     if integrity == "valid":
         return None
     allowed = _UNSUPPORTED_ISSUES if integrity == "partial" else _CORRUPT_ISSUES
-    # Inspection emits issues in boundary order.  Keep the first safe boundary so
-    # appending later, post-boundary diagnostics cannot change the projection.
-    for issue in inspection.issues:
-        if issue.code in allowed:
-            return WatchIssue(issue.code)  # type: ignore[arg-type]
+    # Inspection emits issues in boundary order.  Keep the first boundary even when
+    # its code is unknown, so appended diagnostics cannot change the projection.
+    issues = inspection.issues
+    if type(issues) is not tuple or not issues or type(issues[0]) is not InspectionIssue:
+        return WatchIssue("inspection_incomplete")
+    code = issues[0].code
+    if type(code) is str and code in allowed:
+        return WatchIssue(code)  # type: ignore[arg-type]
     return WatchIssue("inspection_incomplete")
 
 
 def _catalog_issues(issues: Iterable[InspectionIssue]) -> tuple[WatchIssue, ...]:
     codes: set[str] = set()
     for issue in issues:
-        if issue.code in _CATALOG_ISSUES:
+        if (
+            type(issue) is InspectionIssue
+            and type(issue.code) is str
+            and issue.code in _CATALOG_ISSUES
+        ):
             codes.add(issue.code)
         else:
             codes.add("inspection_incomplete")
     return tuple(WatchIssue(code) for code in sorted(codes))  # type: ignore[arg-type]
 
 
-def _trusted_timestamp(replay: TrialReplay) -> Optional[float]:
-    if not replay.events:
+def _trusted_timestamp(
+    replay: TrialReplay,
+    *,
+    boundary_sequence: Optional[int],
+) -> float:
+    if type(replay.events) is not tuple or not replay.events:
+        raise ValueError("verified replay has no events")
+    for expected_sequence, event in enumerate(replay.events, 1):
+        if (
+            type(event) is not TrialEvent
+            or type(event.schema_version) is not int
+            or event.schema_version != TRIAL_EVENT_SCHEMA_VERSION
+            or type(event.trial_id) is not str
+            or event.trial_id != replay.trial_id
+            or type(event.sequence) is not int
+            or event.sequence != expected_sequence
+            or type(event.event_type) is not str
+            or event.event_type not in KNOWN_EVENT_TYPES
+            or type(event.timestamp) is not float
+            or not _finite_number(event.timestamp)
+        ):
+            raise ValueError("verified replay structure is inconsistent")
+    first = replay.events[0]
+    if first.event_type != "trial.started" or replay.started is not first.payload:
+        raise ValueError("verified replay start is inconsistent")
+    if boundary_sequence is not None and boundary_sequence != len(replay.events) + 1:
+        raise ValueError("verified replay crosses its unsupported boundary")
+    last = replay.events[-1]
+    timestamp = last.timestamp
+    return float(timestamp)
+
+
+def _partial_boundary_sequence(inspection: TrialInspection) -> Optional[int]:
+    issues = inspection.issues
+    if type(issues) is not tuple or not issues or type(issues[0]) is not InspectionIssue:
         return None
-    timestamp = replay.events[-1].timestamp
-    return float(timestamp) if _finite_number(timestamp) else None
+    sequence = issues[0].sequence
+    return sequence if type(sequence) is int and sequence >= 1 else None
 
 
 def _ordered_arm_ids(replay: TrialReplay) -> tuple[str, ...]:
@@ -393,7 +444,7 @@ def _ordered_arm_ids(replay: TrialReplay) -> tuple[str, ...]:
             arm_id = arm.get("arm_id")
             ordinal = arm.get("arm_ordinal")
             if (
-                not isinstance(arm_id, str)
+                type(arm_id) is not str
                 or not arm_id
                 or type(ordinal) is not int
                 or arm_id in seen_ids
@@ -405,8 +456,11 @@ def _ordered_arm_ids(replay: TrialReplay) -> tuple[str, ...]:
             structured.append((ordinal, index, arm_id))
         structured.sort(key=lambda item: (item[0], item[1]))
         return tuple(item[2] for item in structured)
-    if all(isinstance(arm, str) and arm for arm in encoded):
-        return tuple(encoded)
+    if all(type(arm) is str and arm for arm in encoded):
+        legacy = tuple(encoded)
+        if len(legacy) != len(set(legacy)):
+            raise ValueError("verified replay has duplicate legacy arm identities")
+        return legacy
     raise ValueError("verified replay mixes structured and legacy arm declarations")
 
 
@@ -417,7 +471,7 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
         if not isinstance(completion, Mapping):
             raise TypeError("verified replay completion is not an object")
         arm_id = completion.get("arm_id")
-        if not isinstance(arm_id, str) or not arm_id:
+        if type(arm_id) is not str or not arm_id:
             raise ValueError("verified replay completion has no arm identity")
         completed_ids.add(arm_id)
     completed_count = sum(arm_id in completed_ids for arm_id in arm_ids)
@@ -477,18 +531,11 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
             detail=None,
             issue=_trial_issue(inspection, integrity),
         )
-    if replay.unhandled_events:
-        return _TrialSource(
-            trial_id=inspection.trial_id,
-            trusted_updated_at=None,
-            integrity="corrupt" if integrity == "valid" else "partial",
-            lifecycle="unknown",
-            detail=None,
-            issue=WatchIssue("inspection_incomplete"),
-        )
-
-    lifecycle = replay.lifecycle_status
-    if lifecycle not in _LIFECYCLES or lifecycle == "unknown":
+    if (
+        type(replay) is not TrialReplay
+        or type(replay.trial_id) is not str
+        or replay.trial_id != inspection.trial_id
+    ):
         return _TrialSource(
             trial_id=inspection.trial_id,
             trusted_updated_at=None,
@@ -498,7 +545,41 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
             issue=WatchIssue("inspection_incomplete"),
         )
     try:
+        replay_collections = (
+            replay.events,
+            replay.completed_arms,
+            replay.evidence_bundles,
+            replay.reviews,
+            replay.evaluations,
+            replay.resolutions,
+            replay.resolution_sequences,
+            replay.unhandled_events,
+        )
+        if any(type(value) is not tuple for value in replay_collections):
+            raise TypeError("verified replay collections must be tuples")
+        if replay.unhandled_events:
+            raise ValueError("verified replay contains unhandled events")
+        if replay.delivery is not None and not isinstance(replay.delivery, Mapping):
+            raise TypeError("verified replay delivery is not an object")
+        boundary_sequence = (
+            None
+            if integrity == "valid"
+            else _partial_boundary_sequence(inspection)
+        )
+        if integrity == "partial" and boundary_sequence is None:
+            raise ValueError("partial replay has no trusted boundary")
+        lifecycle = replay.lifecycle_status
+        if (
+            type(lifecycle) is not str
+            or lifecycle not in _LIFECYCLES
+            or lifecycle == "unknown"
+        ):
+            raise ValueError("verified replay lifecycle is invalid")
         detail = _trial_detail(replay)
+        trusted_updated_at = _trusted_timestamp(
+            replay,
+            boundary_sequence=boundary_sequence,
+        )
     except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
         return _TrialSource(
             trial_id=inspection.trial_id,
@@ -510,7 +591,7 @@ def _project_trial(inspection: TrialInspection) -> _TrialSource:
         )
     return _TrialSource(
         trial_id=inspection.trial_id,
-        trusted_updated_at=_trusted_timestamp(replay),
+        trusted_updated_at=trusted_updated_at,
         integrity=integrity,
         lifecycle=lifecycle,  # type: ignore[arg-type]
         detail=detail,
@@ -522,6 +603,28 @@ def _trial_sort_key(source: _TrialSource) -> tuple[int, float, str]:
     if source.trusted_updated_at is None:
         return (1, 0.0, source.trial_id)
     return (0, -source.trusted_updated_at, source.trial_id)
+
+
+def _collapse_duplicate_trials(
+    sources: Iterable[_TrialSource],
+) -> tuple[_TrialSource, ...]:
+    """Represent an impossible duplicate identity once and without trusted detail."""
+    by_id: dict[str, _TrialSource] = {}
+    order: list[str] = []
+    for source in sources:
+        if source.trial_id not in by_id:
+            by_id[source.trial_id] = source
+            order.append(source.trial_id)
+            continue
+        by_id[source.trial_id] = _TrialSource(
+            trial_id=source.trial_id,
+            trusted_updated_at=None,
+            integrity="corrupt",
+            lifecycle="unknown",
+            detail=None,
+            issue=WatchIssue("inspection_incomplete"),
+        )
+    return tuple(by_id[trial_id] for trial_id in order)
 
 
 def build_watch_view_model(
@@ -537,22 +640,24 @@ def build_watch_view_model(
     Pass the same ``WatchLabelRegistry`` on every refresh to retain session labels.
     Omitting it is appropriate for a single non-interactive snapshot.
     """
-    if backend not in {"jsonl", "sqlite"}:
-        raise ValueError(f"unsupported watch backend {backend!r}")
+    if type(catalog) is not TrialCatalog:
+        raise TypeError("catalog must be a TrialCatalog")
+    if type(backend) is not str or backend not in {"jsonl", "sqlite"}:
+        raise ValueError("unsupported watch backend")
     if not _finite_number(read_at):
         raise ValueError("read_at must be a finite number")
     if selected_trial_id is not None and (
-        not isinstance(selected_trial_id, str) or not selected_trial_id
+        type(selected_trial_id) is not str or not selected_trial_id
     ):
         raise ValueError("selected_trial_id must be a non-empty string or None")
-    if label_registry is not None and not isinstance(
-        label_registry, WatchLabelRegistry
-    ):
+    if label_registry is not None and type(label_registry) is not WatchLabelRegistry:
         raise TypeError("label_registry must be WatchLabelRegistry or None")
 
     registry = label_registry if label_registry is not None else WatchLabelRegistry()
     projected = sorted(
-        (_project_trial(inspection) for inspection in catalog.trials),
+        _collapse_duplicate_trials(
+            _project_trial(inspection) for inspection in catalog.trials
+        ),
         key=_trial_sort_key,
     )
     registry.assign(source.trial_id for source in projected)
@@ -592,7 +697,7 @@ def build_watch_view_model(
 
 def watch_fingerprint(model: WatchViewModel) -> tuple[object, ...]:
     """Return only visible, journal-derived values that may cue an update."""
-    if not isinstance(model, WatchViewModel):
+    if type(model) is not WatchViewModel:
         raise TypeError("model must be a WatchViewModel")
     trials = tuple(
         (
