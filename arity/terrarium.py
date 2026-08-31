@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol, Union
+from typing import Any, Callable, Mapping, Optional, Protocol, Union
 
 from .handlers import (
     default_record_store,
@@ -33,6 +33,7 @@ from .roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
 from .seams import ModelProvider, RecordStore, ToolRunner
 from .tiers import BriefCompiler, CompiledBrief, PredecessorAccounts
+from .telemetry import JournaledModelProvider, UsageRecordingContext
 from .types import (
     CallModel,
     Event,
@@ -422,6 +423,7 @@ class TerrariumDispatcher:
         candidate_id: Optional[str] = None,
         mailbox: Optional[dict[str, list[str]]] = None,
         peer_letter: Optional[str] = None,
+        usage_context: Optional[UsageRecordingContext] = None,
     ) -> TerrariumCandidateResult:
         """Run a single candidate kernel in an isolated sandbox with multidimensional seams.
 
@@ -497,7 +499,11 @@ class TerrariumDispatcher:
                 skills=spec.skills,
                 context_adapter=spec.context_adapter,
             )
-            peer_res = self.dispatch_single(task=peer_task, candidate_or_seat=peer_spec)
+            peer_res = self.dispatch_single(
+                task=peer_task,
+                candidate_or_seat=peer_spec,
+                usage_context=usage_context,
+            )
             return peer_res.output or f"[{target_peer.name} replied with no output]"
 
         # 2. Setup Tool Runner Axis (Sandbox / AST vs. MCP vs. Shell vs. Custom)
@@ -558,9 +564,13 @@ class TerrariumDispatcher:
             if cli is not None and hasattr(cli, "cwd"):
                 cli.cwd = str(workspace)
 
+        runtime_provider: ModelProvider = model_provider
+        if usage_context is not None:
+            runtime_provider = JournaledModelProvider(model_provider, usage_context)
+
         metrics = MetricsObserver()
         runtime = Runtime(
-            model_provider=model_provider,
+            model_provider=runtime_provider,
             tool_runner=tool_runner,
             store=self.store,
             transport=(_NullTransport() if self.quiet else ConsoleTransport(bot_name=f"{actual_role.name}@{seat.id}")),
@@ -712,6 +722,7 @@ class TerrariumDispatcher:
         max_workers: int = 4,
         run_verification: bool = True,
         test_command: Optional[str] = None,
+        usage_contexts: Optional[Mapping[str, UsageRecordingContext]] = None,
     ) -> list[TerrariumCandidateResult]:
         """Dispatch task concurrently across multidimensional CandidateSpecs (A/B/C testing)."""
         if not candidates:
@@ -725,6 +736,14 @@ class TerrariumDispatcher:
 
         # Execute concurrently but return declaration order.  Completion timing is an observed
         # metric, not a stable arm identity for evidence, evaluators, or replay.
+        def usage_context_for(candidate: CandidateSpec) -> Optional[UsageRecordingContext]:
+            if usage_contexts is None:
+                return None
+            arm_id = str(candidate.metadata.get("arm_id", ""))
+            if not arm_id or arm_id not in usage_contexts:
+                raise ValueError("every journaled candidate requires a declared usage context")
+            return usage_contexts[arm_id]
+
         ordered_results: list[Optional[TerrariumCandidateResult]] = [None] * len(candidates)
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidates), max_workers)) as executor:
             future_to_cand = {
@@ -735,6 +754,7 @@ class TerrariumDispatcher:
                     None,
                     run_verification,
                     test_command,
+                    usage_context=usage_context_for(cand),
                 ): (index, cand)
                 for index, cand in enumerate(candidates)
             }
@@ -833,6 +853,7 @@ class TerrariumDispatcher:
         archivist: Optional[Any] = None,
         tester: Optional[CandidateSpec] = None,
         teardown: bool = False,
+        usage_contexts: Optional[Mapping[str, UsageRecordingContext]] = None,
     ) -> tuple[Optional[TerrariumCandidateResult], list[TerrariumCandidateResult], list[Any]]:
         """Execute an empirical race between multidimensional candidates, audit and rank them.
 
@@ -858,6 +879,7 @@ class TerrariumDispatcher:
             max_workers=max_workers,
             run_verification=True,
             test_command=test_command,
+            usage_contexts=usage_contexts,
         )
 
         if archivist is None:
@@ -880,6 +902,7 @@ class TerrariumDispatcher:
         rounds: int = 2,
         max_workers: int = 4,
         test_command: Optional[str] = None,
+        usage_contexts: Optional[Mapping[str, UsageRecordingContext]] = None,
     ) -> list[TerrariumCandidateResult]:
         """Wake the candidates back up, together, and let them sort out a final draft.
 
@@ -978,6 +1001,11 @@ class TerrariumDispatcher:
                     round_task, round_spec, run_verification=False, test_command=test_command,
                     workspace=prev.workspace_path, candidate_id=f"{by_letter[L].candidate_id}_c{rnd}",
                     mailbox=mailbox, peer_letter=L,
+                    usage_context=(
+                        None
+                        if usage_contexts is None
+                        else usage_contexts[str(round_spec.metadata.get("arm_id", ""))]
+                    ),
                 )
                 res.brief = task.brief
                 return L, res

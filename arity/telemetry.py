@@ -381,6 +381,11 @@ class JournaledModelProvider:
     context: UsageRecordingContext
     clock: Clock = time.time
 
+    def __getattr__(self, name: str) -> Any:
+        """Preserve non-call provider capabilities such as fallback accounting."""
+        provider = object.__getattribute__(self, "provider")
+        return getattr(provider, name)
+
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
         started_at = _finite_number(self.clock(), label="request start time")
         ordinal = self.context.ordinals.take()
