@@ -475,7 +475,9 @@ def test_race_journals_each_candidate_request_before_publishing_its_arm(tmp_path
         assert all(event.payload["actor_ref"] == arm_id for event in arm_events)
         assert all(event.payload["outcome"] == "completed" for event in arm_events)
 
-    serialized_usage = json.dumps([event.payload for event in usage_events])
+    serialized_usage = json.dumps(
+        [event.to_dict()["payload"] for event in usage_events]
+    )
     assert marker not in serialized_usage
     for candidate in report.candidates:
         assert candidate.seat.provider not in serialized_usage

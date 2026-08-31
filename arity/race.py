@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import shutil
 import tempfile
 import textwrap
@@ -49,6 +50,7 @@ from .ledger import Seat, SeatLedger
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
+from .telemetry import CachePolicyHint, UsageRecordingContext
 from .terrarium import CONTEXT_MODES, CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
 from .trial_events import TrialJournal
 from .tools import resolve_arity
@@ -458,6 +460,45 @@ def _arm_declaration(candidate: CandidateSpec) -> dict[str, Any]:
     }
 
 
+def _cache_policy_for_seat(seat: Seat) -> CachePolicyHint:
+    """Translate only an explicit seat policy into timing semantics."""
+    value = seat.warm_window_seconds
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+        or not float(value).is_integer()
+    ):
+        return CachePolicyHint()
+    return CachePolicyHint(
+        window_seconds=int(value),
+        refresh_on_reuse=True,
+        basis="configured",
+        clock_basis="request_started",
+    )
+
+
+def _usage_recording_contexts(
+    candidates: list[CandidateSpec],
+    journal: TrialJournal,
+    *,
+    phase: str,
+) -> dict[str, UsageRecordingContext]:
+    contexts: dict[str, UsageRecordingContext] = {}
+    for candidate in candidates:
+        arm_id = str(candidate.metadata["arm_id"])
+        contexts[arm_id] = UsageRecordingContext(
+            journal=journal,
+            phase=phase,
+            arm_id=arm_id,
+            actor_kind="candidate",
+            actor_ref=arm_id,
+            cache_policy=_cache_policy_for_seat(candidate.seat),
+        )
+    return contexts
+
+
 def _record_completed_arms(report: RaceReport, phase: str) -> None:
     if report.journal is None:
         return
@@ -794,6 +835,9 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         },
         idempotency_key="trial.started",
     )
+    trial_usage_contexts = _usage_recording_contexts(
+        candidates, journal, phase="trial"
+    )
     tester_spec: Optional[CandidateSpec] = None
     if cfg.tester:
         tester_seat = candidates[0].seat
@@ -810,6 +854,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     winner, results, entries = dispatcher.race(
         task=task, candidates=candidates, test_command=cfg.test_command, max_workers=cfg.workers,
         archivist=archivist, tester=tester_spec, teardown=False,
+        usage_contexts=trial_usage_contexts,
     )
     report = RaceReport(
         task=task,
@@ -829,8 +874,12 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     initial_bundle = freeze_report_evidence(report)
 
     if cfg.conference > 0 and results:
+        conference_usage_contexts = _usage_recording_contexts(
+            candidates, journal, phase="conference"
+        )
         phase2 = dispatcher.conference(task, results, entries=entries, rounds=cfg.conference,
-                                       max_workers=cfg.workers, test_command=cfg.test_command)
+                                       max_workers=cfg.workers, test_command=cfg.test_command,
+                                       usage_contexts=conference_usage_contexts)
         c_winner, c_entries = archivist.evaluate_trial(phase2)
         report.conference_results, report.conference_entries, report.conference_winner = phase2, c_entries, c_winner
         _record_completed_arms(report, "conference")
