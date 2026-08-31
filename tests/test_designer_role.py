@@ -555,6 +555,24 @@ def test_resolved_designer_candidate_does_not_receive_implementation_tdd(tmp_pat
     assert tool_names == set(DESIGNER_ROLE.allowed_tools) - {"web_search"}
 
 
+def test_skills_preset_fails_closed_for_designer_without_false_arm_labels() -> None:
+    with pytest.raises(ValueError, match="skills preset.*designer.*implementation"):
+        resolve_candidates("skills", DESIGNER_ROLE, placeholder_seats_for_designer_test())
+
+
+def test_skills_preset_remains_a_distinct_developer_comparison() -> None:
+    seats = placeholder_seats_for_designer_test()
+    specs, _ = resolve_candidates("skills", DEVELOPER_ROLE, seats)
+
+    assert [spec.skill_names for spec in specs] == [["pytest-tdd"], []]
+    assert [spec.name.rsplit(" / ", 1)[-1] for spec in specs] == ["pytest-tdd", "baseline"]
+    assert len({spec.signature() for spec in specs}) == 2
+
+
+def placeholder_seats_for_designer_test() -> list[Seat]:
+    return [Seat(id="preset-seat", provider="test", model="preset-model")]
+
+
 def test_designer_constant_is_exported_from_the_installed_package_surface() -> None:
     packaged_definition = resources.files("arity").joinpath("definitions", "roles", "designer.md")
 
