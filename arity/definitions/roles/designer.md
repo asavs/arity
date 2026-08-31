@@ -8,6 +8,7 @@ allowed_tools:
   - read_file
   - list_directory
   - search_files
+  - web_search
   - fetch_url
   - message
 denied_tools:
