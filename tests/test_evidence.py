@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -15,7 +15,14 @@ from arity.evidence import (
 )
 
 
-def candidate(candidate_id: str, *, rank: int, tied_with: tuple[str, ...] = ()) -> CandidateEvidence:
+def candidate(
+    candidate_id: str,
+    *,
+    rank: int,
+    tied_with: tuple[str, ...] = (),
+    tier: int = 3,
+    supported: bool = True,
+) -> CandidateEvidence:
     return CandidateEvidence.create(
         candidate_id=candidate_id,
         name=candidate_id,
@@ -30,9 +37,9 @@ def candidate(candidate_id: str, *, rank: int, tied_with: tuple[str, ...] = ()) 
         verdict="success",
         rank=rank,
         tied_with=tied_with,
-        test_results={"hidden": {"passed": 2, "total": 2}},
-        axes={"tier": 3, "hidden_rate": 1.0},
-        artifacts=(ArtifactEvidence.from_bytes("answer.py", candidate_id.encode()),),
+        test_results={"hidden": {"passed": 2, "total": 2, "has_tests": True}} if supported else {},
+        axes={"tier": tier, "hidden_rate": 1.0, "own_rate": 0.0},
+        artifacts=(ArtifactEvidence.from_bytes("answer.py", candidate_id.encode()),) if supported else (),
         arm_id=f"arm-{candidate_id}",
         arm_ordinal=ord(candidate_id[0]) - ord("a"),
     )
@@ -50,6 +57,16 @@ def bundle() -> EvidenceBundle:
         ),
         hidden_test_hashes={"hidden.py": "abc"},
         metadata={"requested_arity": 2, "nested": [1, 2]},
+    )
+
+
+def unique_bundle() -> EvidenceBundle:
+    return EvidenceBundle.create(
+        trial_id="trial-unique",
+        task_id="task-1",
+        task_name="example",
+        brief="do the thing",
+        candidates=(candidate("a", rank=1), candidate("b", rank=2, tier=2)),
     )
 
 
@@ -81,6 +98,20 @@ def test_evidence_is_deeply_immutable_content_addressed_and_round_trips() -> Non
     tampered["brief"] = "different"
     with pytest.raises(ValueError, match="hash"):
         EvidenceBundle.from_dict(tampered)
+    missing_hash = evidence.to_dict()
+    missing_hash.pop("evidence_hash")
+    with pytest.raises(ValueError, match="missing.*hash"):
+        EvidenceBundle.from_dict(missing_hash)
+
+
+def test_artifact_evidence_round_trips_binary_bytes_and_rejects_unsafe_paths() -> None:
+    artifact = ArtifactEvidence.from_bytes("assets/blob.bin", b"\x00\xff\x10")
+    restored = ArtifactEvidence.from_dict(artifact.to_dict())
+    assert restored == artifact
+    assert restored.text is None
+    assert restored.content_bytes() == b"\x00\xff\x10"
+    with pytest.raises(ValueError, match="safe relative"):
+        ArtifactEvidence.from_bytes("../escape.bin", b"no")
 
 
 def test_evaluation_requires_an_exact_candidate_permutation() -> None:
@@ -110,6 +141,11 @@ def test_evaluator_is_bound_to_the_frozen_bundle_and_identity() -> None:
     evaluation = evaluate_bundle(evidence, PickSecond())
     assert evaluation.order == ("b", "a")
     assert evaluation.evidence_hash == evidence.evidence_hash
+    assert Evaluation.from_dict(evidence, evaluation.to_dict()) == evaluation
+    missing_id = evaluation.to_dict()
+    missing_id.pop("evaluation_id")
+    with pytest.raises(ValueError, match="missing.*id"):
+        Evaluation.from_dict(evidence, missing_id)
 
     other = EvidenceBundle.create(
         trial_id="trial-2",
@@ -125,7 +161,8 @@ def test_evaluator_is_bound_to_the_frozen_bundle_and_identity() -> None:
 def test_resolution_facts_then_consensus_then_human() -> None:
     evidence = bundle()
 
-    facts = resolve_bundle(evidence, facts_candidate_id="a", facts_tied_with=())
+    unique_evidence = unique_bundle()
+    facts = resolve_bundle(unique_evidence, facts_candidate_id="a", facts_tied_with=())
     assert facts.kind is ResolutionKind.FACTS_WINNER
     assert facts.candidate_id == "a"
 
@@ -141,6 +178,16 @@ def test_resolution_facts_then_consensus_then_human() -> None:
     assert consensus.candidate_id == "b"
     assert consensus.eligible_candidate_ids == ("a", "b")
     assert consensus.to_dict()["status"] == "resolved"
+    restored = type(consensus).from_dict(consensus.to_dict())
+    restored.validate(evidence, (judge_one, judge_two))
+    assert restored == consensus
+    tampered_resolution = consensus.to_dict()
+    tampered_resolution["candidate_id"] = "a"
+    with pytest.raises(ValueError, match="resolution id"):
+        type(consensus).from_dict(tampered_resolution)
+    forged_resolution = replace(consensus, candidate_id="a", resolution_id="")
+    with pytest.raises(ValueError, match="rankings"):
+        forged_resolution.validate(evidence, (judge_one, judge_two))
 
     split = resolve_bundle(
         evidence,
@@ -194,7 +241,7 @@ def test_consensus_requires_the_complete_panel_and_a_unique_eligible_first() -> 
 
     with pytest.raises(ValueError, match="eligible"):
         resolve_bundle(
-            evidence,
+            unique_bundle(),
             facts_candidate_id="a",
             facts_tied_with=(),
             human_candidate_id="b",
@@ -202,7 +249,16 @@ def test_consensus_requires_the_complete_panel_and_a_unique_eligible_first() -> 
 
 
 def test_no_supported_factual_candidate_stays_unresolved() -> None:
-    evidence = bundle()
+    evidence = EvidenceBundle.create(
+        trial_id="trial-unsupported",
+        task_id="task-1",
+        task_name="example",
+        brief="do the thing",
+        candidates=(
+            candidate("a", rank=1, tied_with=("b",), supported=False),
+            candidate("b", rank=2, tied_with=("a",), supported=False),
+        ),
+    )
     evaluation = Evaluation.create(evidence, evaluator_id="judge", order=("b", "a"))
     resolution = resolve_bundle(
         evidence,
@@ -213,3 +269,13 @@ def test_no_supported_factual_candidate_stays_unresolved() -> None:
     )
     assert resolution.kind is ResolutionKind.UNRESOLVED
     assert "sufficient factual evidence" in resolution.reason
+    human = resolve_bundle(
+        evidence,
+        facts_candidate_id="a",
+        facts_tied_with=("b",),
+        facts_supported=False,
+        evaluations=(evaluation,),
+        human_candidate_id="a",
+    )
+    assert human.kind is ResolutionKind.UNRESOLVED
+    human.validate(evidence, (evaluation,))

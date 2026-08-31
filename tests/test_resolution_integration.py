@@ -5,11 +5,15 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from arity.evidence import Evaluation, EvidenceBundle, ResolutionKind, evaluate_bundle, resolve_bundle
 from arity.ledger import Seat
-from arity.race import RaceConfig, deliver, human_pick, run_race
+from arity.race import RaceConfig, deliver, human_pick, record_evaluation, run_race
 from arity.roles import BUILDER_ROLE
+from arity.stores.sqlite import SqliteRecordStore
 from arity.terrarium import CandidateSpec, ContextEnvelope
+from arity.trial_events import TrialJournal, replay_trial
 from arity.types import CallModel, ModelCompleted
 
 
@@ -114,6 +118,8 @@ def exact_arms(provider: SharedContextBuilder) -> list[CandidateSpec]:
 def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tmp_path: Path) -> None:
     provider = SharedContextBuilder()
     evaluator = PickAdapter("pick-treatment:v1", "marker:treatment:v1")
+    store_path = tmp_path / "records.sqlite"
+    store = SqliteRecordStore(store_path)
     report = run_race(RaceConfig(
         prompt="Write artifact.txt.",
         mock=True,
@@ -121,7 +127,7 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
         workers=1,
         evaluators=[evaluator],
         review="tie",
-        store_root=tmp_path / "records",
+        record_store=store,
         workspace_root=tmp_path / "workspaces",
         teardown=False,
     ))
@@ -135,12 +141,76 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
     assert report.resolution is not None
     assert report.resolution.kind is ResolutionKind.JUDGE_CONSENSUS
     assert report.resolved_candidate is not None and report.resolved_candidate.spec.name == "treatment"
+    fact_keys = {
+        (
+            int(candidate.axes["tier"]),
+            float(candidate.axes["hidden_rate"]),
+            float(candidate.axes["own_rate"]),
+        )
+        for candidate in report.evidence.candidates
+    }
+    assert len(fact_keys) == 1
+    assert report.evidence.candidates[0].tied_with == (report.evidence.candidates[1].candidate_id,)
+    assert report.evidence.candidates[1].tied_with == (report.evidence.candidates[0].candidate_id,)
 
+    with pytest.raises(ValueError, match="cannot override"):
+        deliver(report, out_dir=tmp_path / "wrong-delivery", final=report.winner)
+    assert not (tmp_path / "wrong-delivery").exists()
+    approved_resolution = report.resolution
+    report.resolution = None
+    with pytest.raises(RuntimeError, match="journaled trial"):
+        deliver(report, out_dir=tmp_path / "missing-resolution")
+    assert not (tmp_path / "missing-resolution").exists()
+    report.resolution = approved_resolution
+    resolution_sequence = report.resolution_event_sequence
+    report.resolution_event_sequence = None
+    with pytest.raises(RuntimeError, match="not persisted"):
+        deliver(report, out_dir=tmp_path / "unrecorded-resolution")
+    assert not (tmp_path / "unrecorded-resolution").exists()
+    report.resolution_event_sequence = resolution_sequence
+    approved_evidence = report.evidence
+    report.evidence = EvidenceBundle.create(
+        trial_id=approved_evidence.trial_id,
+        task_id=approved_evidence.task_id,
+        task_name=approved_evidence.task_name,
+        brief=approved_evidence.brief + " changed",
+        candidates=approved_evidence.candidates,
+        hidden_test_hashes=approved_evidence.hidden_test_hashes,
+        metadata=approved_evidence.metadata,
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        deliver(report, out_dir=tmp_path / "wrong-evidence")
+    assert not (tmp_path / "wrong-evidence").exists()
+    report.evidence = approved_evidence
+    occupied = tmp_path / "occupied-delivery"
+    occupied.mkdir()
+    with pytest.raises(FileExistsError, match="new output"):
+        deliver(report, out_dir=occupied)
+    (Path(report.resolved_candidate.workspace_path) / "artifact.txt").write_text(
+        "mutated after freeze\n", encoding="utf-8",
+    )
+    live_name = report.resolved_candidate.spec.name
+    live_signature = report.resolved_candidate.signature
+    report.resolved_candidate.spec.name = "mutated live name"
+    report.resolved_candidate.signature = "mutated-live-signature"
+    stale_journal = TrialJournal(store, report.task.id)
     delivery = deliver(report, out_dir=tmp_path / "delivery")
     assert delivery.delivered
     assert delivery.winner_name == "treatment"
     assert delivery.resolution_source == "judge_consensus"
+    assert delivery.signature == approved_evidence.candidate(report.resolution.candidate_id).signature
     assert (tmp_path / "delivery" / "artifact.txt").read_text(encoding="utf-8") == "treatment\n"
+    report.resolved_candidate.spec.name = live_name
+    report.resolved_candidate.signature = live_signature
+    event_count = len(report.journal.events)
+    with pytest.raises(RuntimeError, match="completed delivery"):
+        deliver(report, out_dir=tmp_path / "delivery-copy")
+    assert not (tmp_path / "delivery-copy").exists()
+    assert len(report.journal.events) == event_count
+    report.journal = stale_journal
+    with pytest.raises(RuntimeError, match="completed delivery"):
+        deliver(report, out_dir=tmp_path / "stale-journal-delivery")
+    assert not (tmp_path / "stale-journal-delivery").exists()
 
     report_json = report.to_dict()
     assert report_json["winner"] == "control"
@@ -159,6 +229,8 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
 
     reloaded = EvidenceBundle.from_dict(frozen_dict)
     alternate = evaluate_bundle(reloaded, PickAdapter("pick-control:v2", "marker:control:v1"))
+    record_evaluation(report, alternate)
+    assert alternate.evidence_hash == reloaded.evidence_hash
     provisional = report.winner.candidate_id
     tied_with = tuple(report.entry_for(report.winner).tied_with)
     alternate_resolution = resolve_bundle(
@@ -172,6 +244,27 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
     assert reloaded.evidence_hash == frozen_hash
     assert provider.calls == builder_calls
     assert len(report.archivist.store.query("terrarium_trial")) == trial_records == 2
+    assert report.resolution.candidate_id != alternate_resolution.candidate_id
+
+    replay = report.journal.replay()
+    assert replay.status == "delivered"
+    assert [arm["arm_id"] for arm in replay.completed_arms] == ["control", "treatment"]
+    assert [evaluation.evaluator_id for evaluation in replay.evaluations] == [
+        "pick-treatment:v1", "pick-control:v2",
+    ]
+    event_types = [event.event_type for event in replay.events]
+    assert event_types.index("evidence.frozen") > max(
+        index for index, event_type in enumerate(event_types) if event_type == "arm.completed"
+    )
+    assert event_types.index("delivery.completed") < len(event_types) - 1
+
+    store.close()
+    reopened = SqliteRecordStore(store_path)
+    reopened_replay = replay_trial(reopened, report.task.id)
+    assert reopened_replay.status == "delivered"
+    assert reopened_replay.latest_resolution.candidate_id == report.resolution.candidate_id
+    assert reopened_replay.delivery["candidate_id"] == report.resolution.candidate_id
+    reopened.close()
 
 
 def test_split_evaluators_withhold_delivery(tmp_path: Path) -> None:
@@ -231,6 +324,13 @@ def test_human_pick_revises_an_unresolved_tie(tmp_path: Path) -> None:
     assert picked is treatment
     assert report.resolution.kind is ResolutionKind.HUMAN_PICK
     assert report.resolution.candidate_id == treatment.candidate_id
+    assert report.resolution.expected_evaluator_ids == ("pick-control:v1", "pick-treatment:v1")
     assert any("judges disagree" in line for line in printed)
     records = report.archivist.store.query("resolution", task_id=report.task.id)
     assert [record["source"] for record in records] == ["unresolved", "human_pick"]
+    delivery = deliver(report, out_dir=tmp_path / "delivery")
+    assert delivery.asked_human and delivery.winner_name == "treatment"
+    replay = report.journal.replay()
+    assert replay.status == "delivered"
+    assert replay.latest_resolution.kind is ResolutionKind.HUMAN_PICK
+    assert replay.delivery["resolution_sequence"] == replay.resolution_sequences[-1]
