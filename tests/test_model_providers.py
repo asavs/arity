@@ -27,7 +27,7 @@ class TestModelProviders(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.read.return_value = (
             b'{"candidates": [{"content": {"parts": [{"text": "Hello user!"}]}, "finishReason": "STOP"}],'
-            b'"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}'
+            b'"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "cachedContentTokenCount": 4}}'
         )
         mock_resp.__enter__.return_value = mock_resp
 
@@ -36,6 +36,7 @@ class TestModelProviders(unittest.TestCase):
             self.assertIsInstance(res, ModelCompleted)
             self.assertEqual(res.content, "Hello user!")
             self.assertEqual(res.usage["prompt_tokens"], 10)
+            self.assertEqual(res.usage["cache_read_input_tokens"], 4)
             self.assertEqual(res.seat_id, "gemini:gemini-3.6-flash")
 
     def test_cli_provider_codex_execution(self):
@@ -54,6 +55,7 @@ class TestModelProviders(unittest.TestCase):
             self.assertIsInstance(res, ModelCompleted)
             self.assertIn("Hello from Codex!", res.content)
             self.assertEqual(res.seat_id, "codex:gpt-5.6-sol")
+            self.assertIs(res.usage["estimated"], True)
 
     def test_create_model_provider_factory(self):
         seat_gemini = Seat(id="s1", provider="gemini", endpoint="", model="gemini-3.6-flash", api_key="k1")
