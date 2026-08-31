@@ -5,7 +5,11 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from arity.cache_heat import CacheHeatView, project_cache_heat
+from arity.cache_heat import (
+    MAX_CACHE_USAGE_RECORDS,
+    CacheHeatView,
+    project_cache_heat,
+)
 from arity.telemetry import CachePolicyHint, TokenMeasurement, UsageEvidence
 
 
@@ -87,6 +91,7 @@ def test_cache_heat_view_is_immutable_bounded_and_has_a_stable_fingerprint() -> 
     assert first.stable_fingerprint == elapsed.stable_fingerprint
     assert first.to_dict() == {
         "state": "confirmed",
+        "activity_confidence": "confirmed",
         "deadline_at": 400.0,
         "seconds_remaining": 290,
     }
@@ -122,6 +127,22 @@ def test_non_provider_cache_counts_are_estimated_and_never_confirm(basis: str) -
     assert view.deadline_at == 400.0
 
 
+def test_same_deadline_certainty_change_is_a_distinct_stable_fingerprint() -> None:
+    estimated = project_cache_heat(
+        [_record(_evidence(cache_basis="estimated"))],
+        now=110.0,
+        mode="exact",
+    )
+    confirmed = project_cache_heat(
+        [_record(_evidence(cache_basis="provider_reported"))],
+        now=110.0,
+        mode="exact",
+    )
+
+    assert estimated.deadline_at == confirmed.deadline_at == 400.0
+    assert estimated.stable_fingerprint != confirmed.stable_fingerprint
+
+
 @pytest.mark.parametrize("cache_count", [None, 0])
 def test_context_or_ordinary_tokens_never_invent_confirmation(
     cache_count: int | None,
@@ -153,10 +174,16 @@ def test_elapsed_reports_only_that_the_recorded_window_passed() -> None:
 
     assert view == CacheHeatView(
         state="elapsed",
+        activity_confidence="confirmed",
         deadline_at=105.0,
         seconds_remaining=0,
     )
-    assert set(view.to_dict()) == {"state", "deadline_at", "seconds_remaining"}
+    assert set(view.to_dict()) == {
+        "state",
+        "activity_confidence",
+        "deadline_at",
+        "seconds_remaining",
+    }
 
 
 def test_unknown_policy_or_unusable_clock_yields_no_timing_claim() -> None:
@@ -347,6 +374,40 @@ def test_direct_usage_evidence_is_supported_without_replay_identity() -> None:
         deadline_at=130.0,
         seconds_remaining=20,
     )
+
+
+def test_direct_evidence_cannot_satisfy_an_arm_specific_projection() -> None:
+    evidence = _evidence(
+        observed_at=100.0,
+        window=30,
+        clock_basis="response_received",
+    )
+
+    view = project_cache_heat(
+        evidence,
+        now=110.0,
+        mode="exact",
+        arm_id="arm-a",
+    )
+
+    assert view == CacheHeatView(state="unknown")
+
+
+def test_projection_does_not_consume_past_its_public_record_cap() -> None:
+    evidence = _evidence(
+        observed_at=100.0,
+        window=30,
+        clock_basis="response_received",
+    )
+
+    def bounded_source():
+        for _ in range(MAX_CACHE_USAGE_RECORDS):
+            yield evidence
+        raise AssertionError("projection consumed beyond its record cap")
+
+    view = project_cache_heat(bounded_source(), now=110.0, mode="exact")
+
+    assert view.deadline_at == 130.0
 
 
 def test_malformed_current_data_and_future_anchors_make_no_claim() -> None:

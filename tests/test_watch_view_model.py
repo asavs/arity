@@ -304,6 +304,7 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
         cache_heat = detail["cache_heat"]
         assert cache_heat is None or set(cache_heat) == {
             "state",
+            "activity_confidence",
             "deadline_at",
             "seconds_remaining",
         }
@@ -468,6 +469,7 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
                     "arms": {"value": 1, "more_omitted": False},
                     "cache_heat": {
                         "state": "unknown",
+                        "activity_confidence": None,
                         "deadline_at": None,
                         "seconds_remaining": None,
                     },

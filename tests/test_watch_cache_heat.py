@@ -1,7 +1,9 @@
 """Integration contracts for blind-safe cache deadlines in the live watch view."""
 from __future__ import annotations
 
+import argparse
 import dataclasses
+import io
 
 import pytest
 
@@ -10,6 +12,8 @@ from arity.cache_heat import CacheHeatView
 from arity.inspection import TrialCatalog, TrialInspection
 from arity.telemetry import CachePolicyHint, TokenMeasurement, UsageEvidence
 from arity.trial_events import TrialEvent, replay_trial
+from arity.watch_follow import FollowController
+from arity.watch_cli import run_watch_command
 from arity.watch_terminal import (
     TerminalCapabilities,
     render_watch_follow_frame,
@@ -142,7 +146,10 @@ def test_follow_expansion_shows_stable_deadline_but_one_shot_stays_identical(
     )
     one_shot = render_watch_snapshot(model)
 
-    assert "cache window confirmed | respond by 12:34:56 | eligibility only" in expanded
+    assert (
+        "cache deadline | respond by 12:34:56 | activity confirmed | eligibility only"
+        in expanded
+    )
     assert "cache window" not in collapsed
     assert "cache window" not in one_shot
     for rendered in (expanded, collapsed, one_shot):
@@ -155,3 +162,122 @@ def test_projector_rejects_unrecognized_cache_policy_without_echoing_it() -> Non
     with pytest.raises(ValueError) as stopped:
         WatchProjector(cache_policy=PRIVATE_PROVIDER)
     assert PRIVATE_PROVIDER not in str(stopped.value)
+
+
+def test_forged_usage_projection_without_a_matching_event_fails_closed() -> None:
+    source = _catalog().trials[0]
+    assert source.replay is not None
+    forged_replay = dataclasses.replace(
+        source.replay,
+        request_usage=(_usage_payload(started_at=200.0, window=300),),
+    )
+    forged = TrialCatalog(
+        trials=(dataclasses.replace(source, replay=forged_replay),)
+    )
+
+    model = WatchProjector(cache_policy="exact").project(
+        forged,
+        backend="jsonl",
+        read_at=210.0,
+    )
+
+    assert model.catalog_integrity == "corrupt"
+    assert model.trials[0].detail is None
+    assert model.trials[0].issue is not None
+    assert model.trials[0].issue.code == "inspection_incomplete"
+
+
+class _UnavailableTerminal:
+    def stdin_isatty(self) -> bool:
+        return False
+
+
+def test_off_policy_survives_noninteractive_one_shot_fallback() -> None:
+    projected = []
+
+    def loader(
+        store_spec=None,
+        *,
+        selected_trial_id=None,
+        clock=None,
+        projector=None,
+    ):
+        del store_spec, clock
+        assert type(projector) is WatchProjector
+        model = projector.project(
+            _catalog(),
+            backend="jsonl",
+            read_at=110.0,
+            selected_trial_id=selected_trial_id,
+        )
+        projected.append(model)
+        return model
+
+    code = run_watch_command(
+        argparse.Namespace(
+            trial_id=PRIVATE_TRIAL,
+            follow=True,
+            ascii=True,
+            no_motion=True,
+            cache_policy="off",
+        ),
+        terminal=_UnavailableTerminal(),
+        model_loader=loader,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert len(projected) == 1
+    assert projected[0].trials[0].detail is not None
+    assert projected[0].trials[0].detail.cache_heat is None
+
+
+class _FollowTerminal:
+    capabilities = TerminalCapabilities(
+        width=100,
+        ascii=True,
+        motion=False,
+        color=False,
+    )
+
+    def __init__(self) -> None:
+        self.keys: list[str | None] = ["enter", None, "q"]
+        self.frames: list[str] = []
+
+    def draw(self, frame: str) -> None:
+        self.frames.append(frame)
+
+    def read_key(self, timeout: float) -> str | None:
+        assert timeout > 0
+        return self.keys.pop(0)
+
+
+def test_follow_frame_does_not_tick_or_reclassify_without_a_journal_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projector = WatchProjector(cache_policy="exact")
+    terminal = _FollowTerminal()
+    read_times = iter((110.0, 500.0))
+
+    def loader(selected_trial_id: str | None):
+        return projector.project(
+            _catalog(),
+            backend="jsonl",
+            read_at=next(read_times),
+            selected_trial_id=selected_trial_id,
+        )
+
+    monkeypatch.setattr(watch_terminal, "_default_read_time", lambda value: "12:34:56")
+    controller = FollowController(
+        terminal=terminal,
+        loader=loader,
+        projector=projector,
+        monotonic=lambda: 0.0,
+        refresh_interval=1.0,
+    )
+
+    assert controller.run(PRIVATE_TRIAL) == 0
+    assert len(terminal.frames) == 3
+    assert terminal.frames[1] == terminal.frames[2]
+    assert "journal update" not in terminal.frames[2]
