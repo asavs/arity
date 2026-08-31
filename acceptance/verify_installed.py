@@ -7,6 +7,8 @@ import sys
 import tempfile
 import venv
 import zipfile
+from configparser import ConfigParser
+from email.parser import Parser
 from pathlib import Path
 
 
@@ -21,6 +23,85 @@ def venv_python(root: Path) -> Path:
 
 def venv_arity(root: Path) -> Path:
     return root / ("Scripts/arity.exe" if sys.platform == "win32" else "bin/arity")
+
+
+def verify_wheel_contract(wheel: Path) -> None:
+    """Require one Arity package and command with no former public surface."""
+
+    former_name = "".join(("gork", "bot"))
+    former_bytes = former_name.encode("ascii")
+    with zipfile.ZipFile(wheel) as archive:
+        names = tuple(archive.namelist())
+        folded_names = {name.casefold() for name in names}
+        if any(former_name in name for name in folded_names):
+            raise RuntimeError("wheel retains a former package path")
+        if "arity/__init__.py" not in folded_names:
+            raise RuntimeError("wheel does not contain the arity package")
+        if "arity/__main__.py" not in folded_names:
+            raise RuntimeError("wheel does not contain the arity module entry point")
+
+        payload_roots = {
+            name.split("/", 1)[0]
+            for name in names
+            if "/" in name
+            and not name.split("/", 1)[0].endswith((".dist-info", ".data"))
+        }
+        if payload_roots != {"arity"}:
+            raise RuntimeError(
+                "wheel exposes package roots other than arity: "
+                + ", ".join(sorted(payload_roots))
+            )
+
+        metadata_files = [name for name in names if name.endswith(".dist-info/METADATA")]
+        entry_point_files = [
+            name for name in names if name.endswith(".dist-info/entry_points.txt")
+        ]
+        top_level_files = [
+            name for name in names if name.endswith(".dist-info/top_level.txt")
+        ]
+        if len(metadata_files) != 1 or len(entry_point_files) != 1 or len(top_level_files) != 1:
+            raise RuntimeError("wheel must contain one metadata, entry-point, and top-level file")
+
+        metadata = Parser().parsestr(archive.read(metadata_files[0]).decode("utf-8"))
+        if metadata.get("Name") != "arity":
+            raise RuntimeError("wheel distribution metadata is not named arity")
+
+        entry_points = ConfigParser(interpolation=None)
+        entry_points.optionxform = str
+        entry_points.read_string(archive.read(entry_point_files[0]).decode("utf-8"))
+        scripts = (
+            dict(entry_points.items("console_scripts"))
+            if entry_points.has_section("console_scripts")
+            else {}
+        )
+        if scripts != {"arity": "arity.cli:main"}:
+            raise RuntimeError(f"wheel console scripts are not Arity-only: {sorted(scripts)}")
+
+        top_levels = {
+            line.strip()
+            for line in archive.read(top_level_files[0]).decode("utf-8").splitlines()
+            if line.strip()
+        }
+        if top_levels != {"arity"}:
+            raise RuntimeError(f"wheel top-level packages are not Arity-only: {sorted(top_levels)}")
+
+        text_members = tuple(
+            name
+            for name in names
+            if name.casefold().endswith(
+                (".md", ".py", ".txt", ".toml", ".yaml", ".yml", "/metadata")
+            )
+        )
+        contaminated = [
+            name
+            for name in text_members
+            if former_bytes in archive.read(name).lower()
+        ]
+        if contaminated:
+            raise RuntimeError(
+                "wheel text retains the former product name: "
+                + ", ".join(sorted(contaminated))
+            )
 
 
 def verify_watch_command(environment: Path, *, cwd: Path) -> None:
@@ -120,6 +201,7 @@ def main() -> None:
         built = tuple(wheels.glob("arity-*.whl"))
         if len(built) != 1:
             raise RuntimeError(f"expected one Arity wheel, found {len(built)}")
+        verify_wheel_contract(built[0])
 
         venv.EnvBuilder(with_pip=True, clear=True).create(environment)
         python = venv_python(environment)
