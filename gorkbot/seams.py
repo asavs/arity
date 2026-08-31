@@ -45,17 +45,21 @@ class ToolRunner(Protocol):
 
 
 @runtime_checkable
-class RecordStore(Protocol):
-    """Graft point for persistence, transcripts, vector DBs, and audit ledgers."""
-
-    def append(self, effect: StoreRecord) -> None:
-        """Append a structured record."""
-        ...
+class RecordReader(Protocol):
+    """Query-only graft point for inspection, dashboards, and replay tooling."""
 
     def query(self, kind: str, **filters: Any) -> list[dict[str, Any]]:
         """Query records matching filter criteria."""
         ...
 
+
+@runtime_checkable
+class RecordStore(RecordReader, Protocol):
+    """Graft point for persistence, transcripts, vector DBs, and audit ledgers."""
+
+    def append(self, effect: StoreRecord) -> None:
+        """Append a structured record."""
+        ...
 
 @runtime_checkable
 class Transport(Protocol):
