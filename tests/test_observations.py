@@ -32,8 +32,11 @@ def test_mechanical_observation_round_trips_exact_json_and_is_immutable() -> Non
     )
 
     encoded = observation.to_dict()
+    assert len(observation.observation_id) == 64
+    assert set(observation.observation_id) <= set("0123456789abcdef")
     assert encoded == {
         "schema_version": 1,
+        "observation_id": observation.observation_id,
         "observer_kind": "mechanical",
         "observer_id": "arity.metrics",
         "observer_version": "1.0.0",
@@ -46,6 +49,11 @@ def test_mechanical_observation_round_trips_exact_json_and_is_immutable() -> Non
     assert Observation.from_dict(json.loads(json.dumps(encoded))) == observation
     with pytest.raises(Exception):
         observation.status = "failed"  # type: ignore[misc]
+
+    tampered = observation.to_dict()
+    tampered["observed_at"] = 99.0
+    with pytest.raises(ValueError, match="observation id"):
+        Observation.from_dict(tampered)
 
 
 def test_unknown_fields_and_future_schema_are_never_silently_dropped() -> None:
@@ -89,7 +97,12 @@ def test_observation_requires_finite_time_and_nonblank_attribution(bad_time: obj
 
 @pytest.mark.parametrize(
     ("attempt_status", "status", "evaluation_id"),
-    [("completed", "recorded", "evaluation-1"), ("failed", "failed", None), ("missing", "unavailable", None)],
+    [
+        ("completed", "recorded", "evaluation-1"),
+        ("failed", "failed", None),
+        ("invalid", "failed", None),
+        ("missing", "unavailable", None),
+    ],
 )
 def test_model_observations_preserve_completed_failed_and_missing_attempts(
     attempt_status: str, status: str, evaluation_id: str | None
