@@ -9,14 +9,20 @@ from .watch_view_model import BoundedCount, WatchIssue, WatchTrial, WatchViewMod
 
 
 ReadTimeFormatter = Callable[[float], str]
+UNKNOWN_READ_TIME = "??:??:??"
 
 
 def _default_read_time(read_at: float) -> str:
-    return time.strftime("%H:%M:%S", time.localtime(read_at))
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(read_at))
+    except (OverflowError, OSError, ValueError):
+        return UNKNOWN_READ_TIME
 
 
 def _validated_read_time(read_at: float, formatter: ReadTimeFormatter) -> str:
     rendered = formatter(read_at)
+    if rendered == UNKNOWN_READ_TIME:
+        return rendered
     if type(rendered) is not str or len(rendered) != 8:
         raise ValueError("read time must use HH:MM:SS")
     if rendered[2] != ":" or rendered[5] != ":":

@@ -31,29 +31,32 @@ EXIT_CORRUPT = 5
 
 Clock = Callable[[], float]
 ReaderOpener = Callable[[StoreSpec], AbstractContextManager[object]]
+CatalogInspector = Callable[[object], TrialCatalog]
 SnapshotRenderer = Callable[[WatchViewModel], str]
 
 
 def load_watch_model(
-    trial_id: str | None = None,
-    *,
     store_spec: StoreSpec | None = None,
+    *,
+    selected_trial_id: str | None = None,
     clock: Clock | None = None,
     reader_opener: ReaderOpener | None = None,
     projector: WatchProjector | None = None,
+    inspector: CatalogInspector | None = None,
 ) -> WatchViewModel:
     """Load the full catalog once, close the reader, then sample the read clock."""
 
-    if trial_id is not None and type(trial_id) is not str:
-        raise TypeError("trial_id must be a string or None")
+    if selected_trial_id is not None and type(selected_trial_id) is not str:
+        raise TypeError("selected_trial_id must be a string or None")
     if store_spec is not None and type(store_spec) is not StoreSpec:
         raise TypeError("store_spec must be an exact StoreSpec or None")
 
     spec = store_spec if store_spec is not None else configured_store_spec()
     open_reader = reader_opener if reader_opener is not None else open_record_reader
+    inspect_catalog = inspector if inspector is not None else inspect_trials
     try:
         with open_reader(spec) as reader:
-            catalog = inspect_trials(reader)  # type: ignore[arg-type]
+            catalog = inspect_catalog(reader)
     except RecordNotFound:
         catalog = TrialCatalog(trials=())
 
@@ -64,7 +67,7 @@ def load_watch_model(
         catalog,
         backend=spec.backend,
         read_at=read_at,
-        selected_trial_id=trial_id,
+        selected_trial_id=selected_trial_id,
     )
 
 
@@ -97,6 +100,7 @@ def run_watch_command(
     clock: Clock | None = None,
     reader_opener: ReaderOpener | None = None,
     projector: WatchProjector | None = None,
+    inspector: CatalogInspector | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     renderer: SnapshotRenderer | None = None,
@@ -115,11 +119,12 @@ def run_watch_command(
 
     try:
         model = load_watch_model(
-            trial_id,
-            store_spec=store_spec,
+            store_spec,
+            selected_trial_id=trial_id,
             clock=clock,
             reader_opener=reader_opener,
             projector=projector,
+            inspector=inspector,
         )
     except RecordReadError as error:
         exit_code, safe_code = _typed_read_failure(error)
