@@ -542,7 +542,7 @@ def main() -> int:
     trials_parser.add_argument("--json", action="store_true", help="Emit a versioned JSON catalog")
 
     watch_parser = subparsers.add_parser(
-        "watch", help="Show a blind-safe one-shot trial snapshot"
+        "watch", help="Show a blind-safe trial view"
     )
     watch_parser.add_argument(
         "trial_id",
@@ -553,12 +553,12 @@ def main() -> int:
     watch_parser.add_argument(
         "--ascii",
         action="store_true",
-        help="Use fixed ASCII output (currently always enabled)",
+        help="Use ASCII glyphs in follow mode",
     )
     watch_parser.add_argument(
         "--no-motion",
         action="store_true",
-        help="Disable motion (the current one-shot view has none)",
+        help="Disable follow-mode motion",
     )
     watch_parser.add_argument(
         "--follow",
@@ -569,7 +569,7 @@ def main() -> int:
         "--cache-policy",
         choices=("conservative", "exact", "off"),
         default="conservative",
-        help="Cache deadline display: shortest recorded, per-window, or off",
+        help="Cache deadline display: shortest recorded, recorded policies, or off",
     )
 
     trial_parser = subparsers.add_parser(
