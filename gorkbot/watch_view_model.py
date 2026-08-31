@@ -284,6 +284,34 @@ class WatchLabelRegistry:
         return "WatchLabelRegistry(<controller-private>)"
 
 
+class WatchProjector:
+    """Retain neutral labels while projecting successive snapshots in one session."""
+
+    __slots__ = ("_label_registry",)
+
+    def __init__(self) -> None:
+        self._label_registry = WatchLabelRegistry()
+
+    def project(
+        self,
+        catalog: TrialCatalog,
+        *,
+        backend: WatchBackend,
+        read_at: float,
+        selected_trial_id: Optional[str] = None,
+    ) -> WatchViewModel:
+        return build_watch_view_model(
+            catalog,
+            backend=backend,
+            read_at=read_at,
+            selected_trial_id=selected_trial_id,
+            label_registry=self._label_registry,
+        )
+
+    def __repr__(self) -> str:
+        return "WatchProjector(<controller-private labels>)"
+
+
 @dataclass(frozen=True)
 class _TrialSource:
     trial_id: str = field(repr=False)
@@ -320,24 +348,18 @@ def _agent_letters(position: int) -> str:
     return "".join(reversed(encoded))
 
 
-def _issue_sequence(issue: InspectionIssue) -> int:
-    sequence = issue.sequence
-    if type(sequence) is int and sequence >= 1:
-        return sequence
-    return 2**63 - 1
-
-
 def _trial_issue(
     inspection: TrialInspection, integrity: WatchIntegrity
 ) -> Optional[WatchIssue]:
     if integrity == "valid":
         return None
     allowed = _UNSUPPORTED_ISSUES if integrity == "partial" else _CORRUPT_ISSUES
-    candidates = [issue for issue in inspection.issues if issue.code in allowed]
-    if not candidates:
-        return WatchIssue("inspection_incomplete")
-    selected = min(candidates, key=lambda issue: (_issue_sequence(issue), issue.code))
-    return WatchIssue(selected.code)  # type: ignore[arg-type]
+    # Inspection emits issues in boundary order.  Keep the first safe boundary so
+    # appending later, post-boundary diagnostics cannot change the projection.
+    for issue in inspection.issues:
+        if issue.code in allowed:
+            return WatchIssue(issue.code)  # type: ignore[arg-type]
+    return WatchIssue("inspection_incomplete")
 
 
 def _catalog_issues(issues: Iterable[InspectionIssue]) -> tuple[WatchIssue, ...]:
@@ -602,6 +624,7 @@ __all__ = [
     "WatchIssueCode",
     "WatchLabelRegistry",
     "WatchLifecycle",
+    "WatchProjector",
     "WatchTrial",
     "WatchTrialDetail",
     "WatchViewModel",
