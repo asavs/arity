@@ -262,6 +262,16 @@ def test_replay_rejects_partial_or_late_arm_completion() -> None:
     with pytest.raises(ValueError, match="after.*frozen"):
         replay_trial((*lifecycle[:4], late_completion), "trial-1")
 
+    unknown_phase = TrialEvent.create(
+        trial_id="trial-1",
+        sequence=2,
+        event_type="arm.completed",
+        payload={**arm_completion(full_evidence.candidates[0]), "phase": "bogus"},
+        timestamp=2,
+    )
+    with pytest.raises(ValueError, match="unsupported trial phase"):
+        replay_trial((lifecycle[0], unknown_phase), "trial-1")
+
 
 def test_unknown_events_are_preserved_and_mark_replay_incomplete() -> None:
     events = (
@@ -308,3 +318,12 @@ def test_journal_instances_share_sequences_and_idempotent_retries(tmp_path: Path
     assert len(store.query("trial_event", trial_id="trial")) == 2
     with pytest.raises(ValueError, match="idempotency"):
         first.append("trial.started", {"brief": "changed"}, idempotency_key="start")
+
+
+def test_journal_lock_canonicalizes_relative_and_absolute_store_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    relative = TrialJournal(JsonlRecordStore(Path("records")), "trial")
+    absolute = TrialJournal(JsonlRecordStore(tmp_path / "records"), "trial")
+    assert relative.serialized() is absolute.serialized()
