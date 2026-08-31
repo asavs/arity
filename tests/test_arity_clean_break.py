@@ -88,6 +88,35 @@ def test_python_m_arity_is_the_module_entrypoint(tmp_path: Path) -> None:
     assert completed.stderr == ""
 
 
+def test_python_m_arity_without_arguments_is_a_finite_read_only_observer(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    run_root = tmp_path / "run"
+    home.mkdir()
+    run_root.mkdir()
+    environment = _isolated_environment(home)
+    environment["ARITY_STORE"] = "jsonl"
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "arity"],
+        cwd=run_root,
+        env=environment,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode(
+        errors="replace"
+    )
+    assert completed.stdout == b"No persisted trials.\n"
+    assert completed.stderr == b""
+    assert not (run_root / ".arity").exists()
+    assert not (run_root / ".demo_workspace").exists()
+    assert not (run_root / ".demo_records").exists()
+
+
 def test_former_namespace_and_root_script_are_absent() -> None:
     repository = _repository_root()
 

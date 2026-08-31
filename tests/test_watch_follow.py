@@ -353,7 +353,7 @@ def selected_label(frame: str) -> str | None:
     return None if selected is None else selected.group(1)
 
 
-def test_cli_requires_explicit_follow_and_preserves_ordinary_dispatch(
+def test_cli_default_enters_follow_and_explicit_watch_preserves_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -364,7 +364,14 @@ def test_cli_requires_explicit_follow_and_preserves_ordinary_dispatch(
         return 23
 
     monkeypatch.setattr(watch_cli, "run_watch_command", handler)
+    monkeypatch.setattr(
+        "arity.cli.run_demo",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("plain arity must not run the demo")
+        ),
+    )
     for arguments in (
+        (),
         ("watch",),
         ("watch", "--follow"),
         ("watch", "--follow", "--cache-policy", "exact"),
@@ -375,11 +382,33 @@ def test_cli_requires_explicit_follow_and_preserves_ordinary_dispatch(
         assert capsys.readouterr() == ("", "")
 
     assert seen == [
+        (True, False, False, "conservative"),
         (False, False, False, "conservative"),
         (True, False, False, "conservative"),
         (True, False, False, "exact"),
         (True, False, False, "off"),
     ]
+
+
+def test_explicit_demo_remains_isolated_from_default_watch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr("arity.cli.run_demo", lambda: calls.append("demo"))
+    monkeypatch.setattr(
+        watch_cli,
+        "run_watch_command",
+        lambda _args: (_ for _ in ()).throw(
+            AssertionError("explicit demo must not dispatch to watch")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["arity", "demo"])
+
+    assert cli_main() == 0
+    assert capsys.readouterr() == ("", "")
+    assert calls == ["demo"]
 
 
 def test_ordinary_watch_never_instantiates_or_inspects_terminal() -> None:

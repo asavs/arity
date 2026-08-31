@@ -2070,6 +2070,24 @@ def test_cli_main_real_one_shot_smoke_uses_default_handler_without_creating_stor
     assert not (tmp_path / ".arity").exists()
 
 
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_cli_main_without_arguments_is_finite_one_shot_outside_a_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    backend: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", backend)
+
+    result = invoke_cli(monkeypatch, capsys)
+
+    assert result == (0, "No persisted trials.\n", "")
+    assert not (tmp_path / ".arity").exists()
+    assert not (tmp_path / ".demo_workspace").exists()
+    assert not (tmp_path / ".demo_records").exists()
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [

@@ -106,8 +106,7 @@ def verify_wheel_contract(wheel: Path) -> None:
 
 def verify_watch_command(environment: Path, *, cwd: Path) -> None:
     executable = str(venv_arity(environment))
-    command = [executable, "watch", "--ascii", "--no-motion"]
-    print("+", " ".join(command), flush=True)
+    python = str(venv_python(environment))
     env = os.environ.copy()
     env["ARITY_STORE"] = "jsonl"
     env["PYTHONNOUSERSITE"] = "1"
@@ -117,6 +116,29 @@ def verify_watch_command(environment: Path, *, cwd: Path) -> None:
     if store_root.exists():
         raise RuntimeError("watch acceptance run root must start without a store")
 
+    default_results: list[subprocess.CompletedProcess[bytes]] = []
+    for default_command in ([executable], [python, "-m", "arity"]):
+        print("+", " ".join(default_command), flush=True)
+        default_result = subprocess.run(
+            default_command,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        default_results.append(default_result)
+        if default_result.returncode != 0:
+            raise RuntimeError(
+                f"installed default observer returned {default_result.returncode}"
+            )
+        if default_result.stdout != b"No persisted trials.\n":
+            raise RuntimeError("installed default observer changed its empty-state output")
+        if default_result.stderr:
+            raise RuntimeError("installed default observer wrote to stderr")
+
+    command = [executable, "watch", "--ascii", "--no-motion"]
+    print("+", " ".join(command), flush=True)
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -158,10 +180,23 @@ def verify_watch_command(environment: Path, *, cwd: Path) -> None:
         raise RuntimeError("installed arity watch missing selection wrote to stdout")
     if missing.stderr != b"arity: trial_not_found\n":
         raise RuntimeError("installed arity watch changed its missing-selection error")
-    if b"\r" in result.stdout + result.stderr + missing.stdout + missing.stderr:
+    default_output = b"".join(
+        completed.stdout + completed.stderr for completed in default_results
+    )
+    all_output = (
+        default_output
+        + result.stdout
+        + result.stderr
+        + missing.stdout
+        + missing.stderr
+    )
+    if b"\r" in all_output:
         raise RuntimeError("installed arity watch emitted translated CRLF output")
     if store_root.exists():
         raise RuntimeError("installed arity watch created a missing store")
+    for demo_root in (cwd / ".demo_workspace", cwd / ".demo_records"):
+        if demo_root.exists():
+            raise RuntimeError("installed default observer created demo state")
 
 
 def main() -> None:
