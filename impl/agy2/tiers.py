@@ -14,7 +14,7 @@ class BriefLeakError(Exception):
 
 BIOGRAPH_TIER_0 = (
     "Asa - building gorkbot. Values concise output, single point of contact, "
-    "clean seams over cleverness. Secret key path: /Users/asa/secret."
+    "clean seams over cleverness. Secret key path: /Users/example/secret."
 )
 
 PROJECT_TIER_1 = (

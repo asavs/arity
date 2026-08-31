@@ -1,6 +1,6 @@
 # Self-report — codex
 
-Command: `codex exec resume --last --skip-git-repo-check "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\gorkbot\impl\codex; session id 01a04671-285d-7082-bf0e-c9826db469a6, model gpt-5.6-sol)
+Command: `codex exec resume --last --skip-git-repo-check "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\codex; session id REDACTED-SESSION-ID, model gpt-5.6-sol)
 
 I was implementing a standard-library-only gorkbot v0 with real OpenAI-compatible model calls and the required S1/S3/S36/S7/S39 lifecycle stories. I built 10 small modules—storage/memory, roles/red phone, ledger/casting, harness/runtime, and demo—so the seams can be cherry-picked independently; the final demo used Gemini and NVIDIA NIM, made 11 model calls, consumed 6,683 reported tokens, and wrote `workspace/brokie/schema.sql`.
 

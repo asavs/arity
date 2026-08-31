@@ -33,10 +33,10 @@ from typing import Any, Optional
 
 # Google Antigravity / Cloud Code Assist (Gemini 3 Pro/Flash & Claude via Google Cloud)
 GOOGLE_ANTIGRAVITY_CLIENT_ID = (
-    "<redacted: Antigravity OAuth client>"
+    os.environ.get("ARITY_GOOGLE_ANTIGRAVITY_CLIENT_ID", "")
 )
 GOOGLE_ANTIGRAVITY_CLIENT_SECRET = (
-    base64.b64decode("<redacted: Antigravity OAuth client>").decode("utf-8")
+    os.environ.get("ARITY_GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "")
 )
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -52,14 +52,14 @@ GOOGLE_ANTIGRAVITY_SCOPES = [
 ]
 
 # OpenAI Codex / ChatGPT Plus/Team Subscription
-OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+OPENAI_CLIENT_ID = os.environ.get("ARITY_OPENAI_CLIENT_ID", "")
 OPENAI_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OPENAI_DEVICE_AUTH_URL = "https://auth.openai.com/api/v1/oauth/device/code"
 OPENAI_SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
 # xAI SuperGrok / Grok Subscription
-XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+XAI_CLIENT_ID = os.environ.get("ARITY_XAI_CLIENT_ID", "")
 XAI_DEVICE_AUTH_URL = "https://auth.x.ai/oauth2/device/code"
 XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 XAI_SCOPES = "openid profile email offline_access grok-cli:access api:access"
@@ -789,7 +789,7 @@ def login_openai_codex(
 # 6. Anthropic Claude Native Login Flow (PKCE Loopback)
 # -----------------------------------------------------------------------------
 
-ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+ANTHROPIC_CLIENT_ID = os.environ.get("ARITY_ANTHROPIC_CLIENT_ID", "")
 ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
 ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 ANTHROPIC_CALLBACK_PORT = 54545

@@ -19,7 +19,14 @@ impl/*/probe_*
 impl/*/hello.txt
 
 .pytest_cache/
+.coverage
+htmlcov/
 *.pyc
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
 *.sqlite
 *.sqlite3
 *.db

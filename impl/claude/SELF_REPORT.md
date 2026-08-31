@@ -1,6 +1,6 @@
 # Self-report — claude
 
-Command: `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p --continue --model claude-opus-5 "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\gorkbot\impl\claude)
+Command: `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p --continue --model claude-opus-5 "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\claude)
 
 I was asked to write the whole gorkbot system as a v0 in stdlib Python — one voice, a staff, casting, tiers, two accounts of every kernel, a pulse — and prove it with five stories against real seats.
 
