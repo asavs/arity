@@ -18,6 +18,12 @@ from typing import Any, Iterable, Mapping, Optional
 
 from .evidence import EvidenceBundle, Evaluation, Resolution, _freeze_json, _thaw_json
 from .seams import RecordStore
+from .observations import (
+    HumanDecisionReference,
+    MechanicalEvidenceReference,
+    ModelReviewReference,
+    Observation,
+)
 from .telemetry import UsageEvidence
 from .types import StoreRecord
 
@@ -30,6 +36,7 @@ KNOWN_EVENT_TYPES = {
     "arm.completed",
     "evidence.frozen",
     "review.recorded",
+    "observation.recorded",
     "resolution.recorded",
     "delivery.completed",
 }
@@ -292,6 +299,16 @@ def _validate_known_event_payload(event_type: str, payload: Mapping[str, Any]) -
             _payload_mapping(payload, "evaluation", "review evaluation")
         return
 
+    if event_type == "observation.recorded":
+        if set(payload) != {"observation"}:
+            raise ValueError("observation event fields differ from the versioned contract")
+        observation = _payload_mapping(
+            payload, "observation", "attributed observation", required=True
+        )
+        assert observation is not None
+        Observation.from_dict(observation)
+        return
+
     if event_type == "resolution.recorded":
         _payload_mapping(payload, "resolution", "recorded resolution", required=True)
         return
@@ -437,6 +454,7 @@ class TrialReplay:
     resolution_sequences: tuple[int, ...]
     delivery: Optional[Mapping[str, Any]]
     request_usage: tuple[Mapping[str, Any], ...] = ()
+    observations: tuple[Observation, ...] = ()
     unhandled_events: tuple[TrialEvent, ...] = ()
 
     @property
@@ -651,6 +669,9 @@ def replay_trial(
     bundles: list[EvidenceBundle] = []
     bundle_by_hash: dict[str, EvidenceBundle] = {}
     reviews: list[Mapping[str, Any]] = []
+    review_events_by_id: dict[str, Mapping[str, Any]] = {}
+    observations: list[Observation] = []
+    observation_ids: set[str] = set()
     evaluations: list[Evaluation] = []
     resolutions: list[Resolution] = []
     resolution_sequences: list[int] = []
@@ -827,6 +848,7 @@ def replay_trial(
             bundle_by_hash[bundle.evidence_hash] = bundle
         elif event.event_type == "review.recorded":
             reviews.append(payload)
+            review_events_by_id[f"event-{event.sequence}"] = payload
             encoded_evaluation = payload.get("evaluation")
             status = str(payload.get("status", ""))
             if status not in {"completed", "failed", "invalid", "missing"}:
@@ -845,6 +867,76 @@ def replay_trial(
                 if str(payload.get("evaluator_id", "")) != evaluation.evaluator_id:
                     raise ValueError("review envelope and evaluation identify different evaluators")
                 evaluations.append(evaluation)
+        elif event.event_type == "observation.recorded":
+            observation = Observation.from_dict(payload["observation"])
+            if observation.observation_id in observation_ids:
+                raise ValueError("an observation content id may be recorded only once")
+            if observation.observed_at != event.timestamp:
+                raise ValueError("observation time must match its journal event")
+            reference = observation.reference
+            if isinstance(reference, MechanicalEvidenceReference):
+                bundle = bundle_by_hash.get(reference.evidence_hash)
+                if bundle is None:
+                    raise ValueError("mechanical observation references unknown evidence")
+                phase = str(bundle.metadata.get("phase", "trial"))
+                if observation.phase != phase:
+                    raise ValueError("mechanical observation phase does not match evidence")
+                if reference.arm_id is None:
+                    if (
+                        observation.subject.kind != "evidence"
+                        or observation.subject.subject_id != reference.evidence_hash
+                    ):
+                        raise ValueError("mechanical observation subject does not match evidence")
+                else:
+                    if reference.arm_id not in {candidate.arm_id for candidate in bundle.candidates}:
+                        raise ValueError("mechanical observation references an unknown arm")
+                    if (
+                        observation.subject.kind != "arm"
+                        or observation.subject.subject_id != reference.arm_id
+                    ):
+                        raise ValueError("mechanical observation subject does not match its arm")
+            elif isinstance(reference, ModelReviewReference):
+                review = review_events_by_id.get(reference.review_id)
+                if review is None:
+                    raise ValueError("model observation references an unknown review attempt")
+                if reference.evidence_hash != str(review.get("evidence_hash", "")):
+                    raise ValueError("model observation evidence does not match its review")
+                review_status = str(review.get("status", ""))
+                if reference.attempt_status != review_status:
+                    raise ValueError("model observation status does not match its review")
+                encoded_evaluation = review.get("evaluation")
+                evaluation_id = (
+                    str(encoded_evaluation.get("evaluation_id", ""))
+                    if isinstance(encoded_evaluation, Mapping)
+                    else None
+                )
+                if reference.evaluation_id != evaluation_id:
+                    raise ValueError("model observation evaluation does not match its review")
+                if (
+                    observation.phase != "review"
+                    or observation.subject.kind != "review"
+                    or observation.subject.subject_id != reference.review_id
+                ):
+                    raise ValueError("model observation subject does not match its review")
+            elif isinstance(reference, HumanDecisionReference):
+                bundle = bundle_by_hash.get(reference.evidence_hash)
+                if bundle is None or not bundles or bundle is not bundles[-1]:
+                    raise ValueError("human observation must reference the latest evidence")
+                if reference.candidate_id is not None:
+                    try:
+                        bundle.candidate(reference.candidate_id)
+                    except KeyError as exc:
+                        raise ValueError("human observation selected an unknown candidate") from exc
+                if (
+                    observation.phase != "resolution"
+                    or observation.subject.kind != "evidence"
+                    or observation.subject.subject_id != reference.evidence_hash
+                ):
+                    raise ValueError("human observation subject does not match its evidence")
+            else:  # pragma: no cover - Observation rejects unknown reference types
+                raise TypeError("observation reference is unsupported")
+            observation_ids.add(observation.observation_id)
+            observations.append(observation)
         elif event.event_type == "resolution.recorded":
             if delivery is not None:
                 raise ValueError("a delivered trial cannot record another resolution")
@@ -917,5 +1009,6 @@ def replay_trial(
         resolution_sequences=tuple(resolution_sequences),
         delivery=delivery,
         request_usage=tuple(request_usage),
+        observations=tuple(observations),
         unhandled_events=tuple(unhandled),
     )

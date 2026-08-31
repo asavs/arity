@@ -121,6 +121,15 @@ from .telemetry import (
     UsageRecordingContext,
     normalize_usage_evidence,
 )
+from .observations import (
+    HumanDecisionReference,
+    MechanicalEvidenceReference,
+    ModelReviewReference,
+    Observation,
+    ObservationReference,
+    ObservationSubject,
+    UnsupportedObservationSchema,
+)
 from .inspection import (
     InspectionIssue,
     TrialCatalog,
@@ -270,6 +279,13 @@ __all__ = [
     "RequestOrdinalSource",
     "JournaledModelProvider",
     "normalize_usage_evidence",
+    "Observation",
+    "ObservationSubject",
+    "ObservationReference",
+    "MechanicalEvidenceReference",
+    "ModelReviewReference",
+    "HumanDecisionReference",
+    "UnsupportedObservationSchema",
     "InspectionIssue",
     "TrialCatalog",
     "TrialInspection",
