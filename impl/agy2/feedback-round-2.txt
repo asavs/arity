@@ -1,6 +1,7 @@
-Relay report, round 2. Syntax: syntax ok. Demo output (last 60 lines, verbatim):
+Relay report, round 2. Syntax: syntax ok. Demo output (last 60 lines, otherwise verbatim;
+project-name token canonicalized):
 ============================================================
-GORKBOT v0 DEMO - PLAYING 5 STORIES
+ARITY v0 DEMO - PLAYING 5 STORIES
 ============================================================
 
 --- STORY 1 (S1): Voice DM, Builder Handoff & Archivist Audit ---

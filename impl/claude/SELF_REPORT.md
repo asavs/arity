@@ -2,7 +2,7 @@
 
 Command: `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p --continue --model claude-opus-5 "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\claude)
 
-I was asked to write the whole gorkbot system as a v0 in stdlib Python — one voice, a staff, casting, tiers, two accounts of every kernel, a pulse — and prove it with five stories against real seats.
+I was asked to write the whole Arity system as a v0 in stdlib Python — one voice, a staff, casting, tiers, two accounts of every kernel, a pulse — and prove it with five stories against real seats.
 
 What I built: eleven modules where the load-bearing parts are the ones the wiki says are load-bearing. `redphone.post` enforces per-message-*kind* channel permission, so the builder can drop a handoff record into `proj:brokie` and be refused if it tries to chat there. `tiers.assemble` scans the rendered brief and raises rather than ship a leaf that knows too much. `kernel.die` reserves quota *before* the report turn, so a wall can't take the kernel and its account in one breath. `archivist.check` matches claims against the tool log and the filesystem in plain Python and only asks a model for the prose around the table — verification that a model can't flatter. I cut it the way I did because the wiki's own words justified each merge: store went into tiers ("where tiers and entries live"), scorecard into cast ("the improvement side of *decides* — same object, later in time"), cadence and pulse into `clock.py` ("keeps time").
 

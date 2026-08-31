@@ -1,4 +1,4 @@
-# gorkbot v0
+# Arity v0
 
 A modular multi-model kernel coordination system in standard library Python 3.13.
 
