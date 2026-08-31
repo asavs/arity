@@ -77,6 +77,7 @@ from .evidence import (
     ResolutionKind,
     TrialEvaluator,
     evaluate_bundle,
+    factual_eligibility,
     resolve_bundle,
 )
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
@@ -91,6 +92,7 @@ from .seams import (
     Transport,
 )
 from .transition import transition
+from .trial_events import TrialEvent, TrialJournal, TrialReplay, replay_trial
 from .types import (
     CallModel,
     Effect,
@@ -201,7 +203,13 @@ __all__ = [
     "Resolution",
     "ResolutionKind",
     "evaluate_bundle",
+    "factual_eligibility",
     "resolve_bundle",
+    # Trial event observation and replay
+    "TrialEvent",
+    "TrialJournal",
+    "TrialReplay",
+    "replay_trial",
     # Pulse & Keepalive
     "PulseEngine",
     "PulseAction",

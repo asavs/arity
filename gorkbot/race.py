@@ -29,7 +29,7 @@ import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .archivist import ArchivistEntry, ImpartialArchivist
 from .evidence import (
@@ -41,13 +41,16 @@ from .evidence import (
     ResolutionKind,
     TrialEvaluator,
     evaluate_bundle,
+    factual_eligibility,
     resolve_bundle,
 )
 from .handlers import JsonlRecordStore
 from .ledger import Seat, SeatLedger
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
+from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .terrarium import CONTEXT_MODES, CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .trial_events import TrialJournal
 from .tools import resolve_arity
 from .types import CallModel, ModelCompleted, StoreRecord
 
@@ -67,6 +70,7 @@ class RaceConfig:
     tester: bool = False
     teardown: Optional[bool] = None  # None -> mock tears down, live keeps
     store_root: Optional[Path] = None
+    record_store: Optional[RecordStore] = None
     workspace_root: Optional[Path] = None
     # Review phase: the reviewer role reads a blind bundle of the candidates and ranks them.
     judges: list[str] = field(default_factory=list)  # model names to seat as judges
@@ -105,6 +109,8 @@ class RaceReport:
     evidence_history: list[EvidenceBundle] = field(default_factory=list)
     evaluations: list[Evaluation] = field(default_factory=list)
     resolution: Optional[Resolution] = None
+    journal: Optional[TrialJournal] = field(default=None, repr=False, compare=False)
+    resolution_event_sequence: Optional[int] = None
 
     def entry_for(self, r: TerrariumCandidateResult) -> Optional[ArchivistEntry]:
         conference_result = any(candidate is r for candidate in self.conference_results)
@@ -135,6 +141,7 @@ class RaceReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "task": self.task.brief,
+            "trial_id": self.task.id,
             "task_name": self.race_task.name if self.race_task else None,
             "hidden_tests": sorted(self.task.hidden_tests),
             "ephemeral": self.ephemeral,
@@ -156,6 +163,7 @@ class RaceReport:
                 if self.resolved_candidate and self.resolved_candidate.spec
                 else None
             ),
+            "event_count": len(self.journal.events) if self.journal else 0,
             "notes": self.notes,
             "judgements": self.judgements,
             "conference": {
@@ -422,6 +430,56 @@ def _snapshot_artifacts(result: TerrariumCandidateResult) -> tuple[ArtifactEvide
     return tuple(artifacts)
 
 
+def _arm_declaration(candidate: CandidateSpec) -> dict[str, Any]:
+    return {
+        "arm_id": str(candidate.metadata["arm_id"]),
+        "arm_ordinal": int(candidate.metadata["arm_ordinal"]),
+        "name": candidate.name,
+        "signature": candidate.signature(default_role=candidate.role.name if candidate.role else "builder"),
+        "model": candidate.seat.model,
+        "provider": candidate.seat.provider,
+        "role": candidate.role.name if candidate.role else "builder",
+        "harness": candidate.harness_name,
+        "tool_runner": candidate.tool_runner_name,
+        "skills": candidate.skill_names,
+        "context": candidate.context,
+        "context_adapter": candidate.context_adapter_id,
+    }
+
+
+def _record_completed_arms(report: RaceReport, phase: str) -> None:
+    if report.journal is None:
+        return
+    results = report.conference_results if phase == "conference" else report.results
+    for result in results:
+        metadata = result.spec.metadata if result.spec else {}
+        spec = result.spec
+        report.journal.append(
+            "arm.completed",
+            {
+                "phase": phase,
+                "arm_id": str(metadata.get("arm_id", result.candidate_id)),
+                "arm_ordinal": int(metadata.get("arm_ordinal", 0)),
+                "candidate_id": result.candidate_id,
+                "name": spec.name if spec else result.candidate_id,
+                "status": result.status,
+                "signature": result.signature,
+                "model": result.seat.model,
+                "provider": result.seat.provider,
+                "role": result.role.name,
+                "harness": result.harness,
+                "tool_runner": result.tool_runner_name,
+                "skills": result.skills_used,
+                "context": spec.context if spec else "accounts",
+                "context_adapter": spec.context_adapter_id if spec else None,
+                "tokens_used": result.tokens_used,
+                "duration_seconds": result.duration_seconds,
+                "fallbacks": result.fallbacks,
+            },
+            idempotency_key=f"arm.completed:{phase}:{metadata.get('arm_id', result.candidate_id)}",
+        )
+
+
 def freeze_report_evidence(
     report: RaceReport,
     *,
@@ -491,29 +549,28 @@ def freeze_report_evidence(
     report.archivist.store.append(
         StoreRecord(kind="evidence_bundle", record=bundle.to_dict())
     )
+    if report.journal:
+        report.journal.append(
+            "evidence.frozen",
+            {"bundle": bundle.to_dict()},
+            idempotency_key=f"evidence.frozen:{bundle.evidence_hash}",
+        )
     return bundle
 
 
 def _facts_context(report: RaceReport) -> tuple[Optional[str], tuple[str, ...], bool]:
-    """Return provisional candidate, factual tie peers, and positive-evidence support."""
-    provisional = report.provisional_winner
-    if provisional is None or report.evidence is None:
+    """Return the evidence-derived factual leader, peers, and support."""
+    if report.evidence is None:
         return None, (), False
-    entry = next(
-        (item for item in report.active_entries if item.candidate_id == provisional.candidate_id),
-        None,
+    eligible, supported = factual_eligibility(report.evidence)
+    if not eligible:
+        return None, (), False
+    provisional = min(
+        (report.evidence.candidate(candidate_id) for candidate_id in eligible),
+        key=lambda candidate: (candidate.rank if candidate.rank > 0 else 10**9, candidate.arm_ordinal),
     )
-    candidate = report.evidence.candidate(provisional.candidate_id)
-    test_results = candidate.test_results
-    has_tests = bool(test_results.get("has_tests"))
-    if not has_tests:
-        has_tests = any(
-            bool(layer.get("has_tests"))
-            for layer in (test_results.get("own") or {}, test_results.get("hidden") or {})
-            if hasattr(layer, "get")
-        )
-    supported = bool(candidate.artifacts or has_tests) and bool(entry and entry.axes.get("tier", 0) > 0)
-    return provisional.candidate_id, tuple(entry.tied_with if entry else ()), supported
+    tied_with = tuple(candidate_id for candidate_id in eligible if candidate_id != provisional.candidate_id)
+    return provisional.candidate_id, tied_with, supported
 
 
 def _evaluation_from_judgement(bundle: EvidenceBundle, judgement: dict[str, Any]) -> Optional[Evaluation]:
@@ -537,6 +594,65 @@ def _evaluation_from_judgement(bundle: EvidenceBundle, judgement: dict[str, Any]
         return None
 
 
+def _record_review_attempt(
+    report: RaceReport,
+    *,
+    evaluator_id: str,
+    status: str,
+    evaluation: Optional[Evaluation] = None,
+    error: Optional[str] = None,
+    raw: Optional[dict[str, Any]] = None,
+) -> None:
+    if evaluation is not None:
+        report.evaluations.append(evaluation)
+        report.archivist.store.append(
+            StoreRecord(
+                kind="evaluation",
+                record={"task_id": report.task.id, **evaluation.to_dict()},
+            )
+        )
+    if report.journal:
+        review_key = (
+            f"review.recorded:{evaluation.evaluation_id}"
+            if evaluation is not None
+            else f"review.attempt:{report.evidence.evidence_hash if report.evidence else 'none'}:{evaluator_id}:{status}"
+        )
+        report.journal.append(
+            "review.recorded",
+            {
+                "evaluator_id": evaluator_id,
+                "evidence_hash": report.evidence.evidence_hash if report.evidence else None,
+                "status": status,
+                "error": error,
+                "evaluation": evaluation.to_dict() if evaluation else None,
+                "raw": raw,
+            },
+            idempotency_key=review_key,
+        )
+
+
+def evaluate_report(report: RaceReport, evaluator: TrialEvaluator) -> Evaluation:
+    """Evaluate and record an already-frozen report without rerunning its candidates."""
+    if report.evidence is None:
+        raise ValueError("report evidence must be frozen before evaluation")
+    evaluation = evaluate_bundle(report.evidence, evaluator)
+    return record_evaluation(report, evaluation)
+
+
+def record_evaluation(report: RaceReport, evaluation: Evaluation) -> Evaluation:
+    """Attach a precomputed evaluation of the report's frozen bundle to its journal."""
+    if report.evidence is None:
+        raise ValueError("report evidence must be frozen before recording an evaluation")
+    evaluation.validate(report.evidence)
+    _record_review_attempt(
+        report,
+        evaluator_id=evaluation.evaluator_id,
+        status="completed",
+        evaluation=evaluation,
+    )
+    return evaluation
+
+
 def resolve_report(
     report: RaceReport,
     *,
@@ -547,15 +663,19 @@ def resolve_report(
     if report.evidence is None:
         raise ValueError("report evidence must be frozen before resolution")
     facts_candidate_id, facts_tied_with, facts_supported = _facts_context(report)
+    expected_panel = tuple(expected_evaluator_ids)
+    if human_candidate_id is not None and not expected_panel and report.resolution is not None:
+        expected_panel = report.resolution.expected_evaluator_ids
     resolution = resolve_bundle(
         report.evidence,
         facts_candidate_id=facts_candidate_id,
         facts_tied_with=facts_tied_with,
         facts_supported=facts_supported,
         evaluations=report.evaluations,
-        expected_evaluator_ids=expected_evaluator_ids,
+        expected_evaluator_ids=expected_panel,
         human_candidate_id=human_candidate_id,
     )
+    resolution.validate(report.evidence, report.evaluations)
     report.resolution = resolution
     report.archivist.store.append(
         StoreRecord(
@@ -563,6 +683,13 @@ def resolve_report(
             record={"task_id": report.task.id, **resolution.to_dict()},
         )
     )
+    if report.journal:
+        event = report.journal.append(
+            "resolution.recorded",
+            {"resolution": resolution.to_dict()},
+            idempotency_key=f"resolution.recorded:{resolution.resolution_id}",
+        )
+        report.resolution_event_sequence = event.sequence
     return resolution
 
 
@@ -617,9 +744,13 @@ def run_race(cfg: RaceConfig) -> RaceReport:
 
     # Mock runs never write to the real scorecard; live runs are the scorecard's whole purpose.
     ephemeral = cfg.mock
-    needs_temp_root = ephemeral and (cfg.store_root is None or cfg.workspace_root is None)
+    needs_temp_root = ephemeral and (
+        (cfg.record_store is None and cfg.store_root is None) or cfg.workspace_root is None
+    )
     tmp_root = Path(tempfile.mkdtemp(prefix="arity_trial_")) if needs_temp_root else None
-    store = JsonlRecordStore(root=cfg.store_root or (tmp_root / "records" if tmp_root else None))
+    store = cfg.record_store or JsonlRecordStore(
+        root=cfg.store_root or (tmp_root / "records" if tmp_root else None)
+    )
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
     dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json or cfg.quiet)
@@ -631,6 +762,28 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         to_role=role.name,
         hidden_tests=dict(race_task.hidden_tests) if race_task else {},
         metadata={"module": race_task.module, "entrypoint": race_task.entrypoint} if race_task else {},
+    )
+    journal = TrialJournal(store, task.id)
+    journal.append(
+        "trial.started",
+        {
+            "task_id": task.id,
+            "task_name": race_task.name if race_task else None,
+            "brief": task.brief,
+            "role": task.to_role,
+            "hidden_test_hashes": {
+                name: hashlib.sha256(source.encode("utf-8")).hexdigest()
+                for name, source in sorted(task.hidden_tests.items())
+            },
+            "requested_arity": cfg.requested_arity,
+            "resolved_arity": len(candidates),
+            "arms": [_arm_declaration(candidate) for candidate in candidates],
+            "evaluator_ids": [
+                str(getattr(evaluator, "evaluator_id", evaluator.__class__.__name__))
+                for evaluator in cfg.evaluators
+            ] + [f"judge:{model}" for model in cfg.judges],
+        },
+        idempotency_key="trial.started",
     )
     tester_spec: Optional[CandidateSpec] = None
     if cfg.tester:
@@ -660,8 +813,10 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         ephemeral=ephemeral,
         requested_arity=cfg.requested_arity,
         notes=notes,
+        journal=journal,
     )
 
+    _record_completed_arms(report, "trial")
     initial_bundle = freeze_report_evidence(report)
 
     if cfg.conference > 0 and results:
@@ -669,6 +824,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
                                        max_workers=cfg.workers, test_command=cfg.test_command)
         c_winner, c_entries = archivist.evaluate_trial(phase2)
         report.conference_results, report.conference_entries, report.conference_winner = phase2, c_entries, c_winner
+        _record_completed_arms(report, "conference")
         bundle = freeze_report_evidence(report, parent_evidence_hash=initial_bundle.evidence_hash)
     else:
         bundle = initial_bundle
@@ -686,31 +842,39 @@ def run_race(cfg: RaceConfig) -> RaceReport:
             evaluator_id = str(getattr(evaluator, "evaluator_id", evaluator.__class__.__name__))
             expected_evaluator_ids.append(evaluator_id)
             try:
-                evaluation = evaluate_bundle(bundle, evaluator)
+                evaluate_report(report, evaluator)
             except Exception as exc:
                 notes.append(f"evaluator '{evaluator_id}' failed: {exc}")
-                continue
-            report.evaluations.append(evaluation)
-            store.append(
-                StoreRecord(
-                    kind="evaluation",
-                    record={"task_id": task.id, **evaluation.to_dict()},
+                _record_review_attempt(
+                    report,
+                    evaluator_id=evaluator_id,
+                    status="failed",
+                    error=str(exc),
                 )
-            )
+                continue
         if cfg.judges:
             expected_evaluator_ids.extend(f"judge:{model}" for model in cfg.judges)
             report.judgements = run_review(report, cfg, dispatcher, seats)
             for judgement in report.judgements:
                 evaluation = _evaluation_from_judgement(bundle, judgement)
-                if evaluation is None:
-                    continue
-                report.evaluations.append(evaluation)
-                store.append(
-                    StoreRecord(
-                        kind="evaluation",
-                        record={"task_id": task.id, **evaluation.to_dict()},
-                    )
+                _record_review_attempt(
+                    report,
+                    evaluator_id=str(judgement.get("evaluator_id", "unknown")),
+                    status="completed" if evaluation else "invalid",
+                    evaluation=evaluation,
+                    raw=judgement,
                 )
+            recorded_judges = {
+                str(judgement.get("evaluator_id")) for judgement in report.judgements
+            }
+            for evaluator_id in (f"judge:{model}" for model in cfg.judges):
+                if evaluator_id not in recorded_judges:
+                    _record_review_attempt(
+                        report,
+                        evaluator_id=evaluator_id,
+                        status="missing",
+                        error="no matching reviewer seat completed",
+                    )
     elif has_evaluators and not facts_tie:
         notes.append("review skipped: the facts already separated the candidates (use --review always to force)")
 
@@ -1003,6 +1167,20 @@ class Delivery:
     delivered: bool = True
     resolution_source: Optional[str] = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "out_dir": str(self.out_dir),
+            "files": list(self.files),
+            "answer": self.answer,
+            "winner_name": self.winner_name,
+            "signature": self.signature,
+            "receipt": self.receipt,
+            "asked_human": self.asked_human,
+            "delivered": self.delivered,
+            "resolution_source": self.resolution_source,
+        }
+
 
 def judges_split(rep: RaceReport) -> bool:
     """True when the parsed judgements do not share a first place."""
@@ -1040,7 +1218,10 @@ def human_pick(rep: RaceReport, ask: Callable[[str], str] = input, printer: Call
             "picked": pick.candidate_id if pick else None, "judges": {k: v for k, v in firsts.items()},
         }))
     if pick is not None:
-        resolve_report(rep, human_candidate_id=pick.candidate_id)
+        resolution = resolve_report(rep, human_candidate_id=pick.candidate_id)
+        if not resolution.resolved:
+            printer("Human preference recorded, but delivery remains unresolved without positive factual evidence.")
+            return None
     return pick
 
 
@@ -1051,8 +1232,8 @@ def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = _AUTO_
     """Copy the final candidate's work to out_dir (default deliveries/<task_id>/); if it wrote no files,
     write its closing report as answer.md. A present unresolved Resolution withholds delivery.
 
-    Explicit ``final=`` remains a compatibility override. Reports created before the resolution
-    contract (``resolution is None``) retain the historical provisional-winner fallback.
+    Explicit ``final=`` remains a compatibility override for legacy reports. Resolution-aware
+    reports only accept their resolved candidate and deliver bytes from the frozen evidence.
     """
     from .terrarium import ARTIFACT_IGNORE_PARTS
     out = Path(out_dir) if out_dir else Path("deliveries") / rep.task.id
@@ -1064,6 +1245,17 @@ def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = _AUTO_
         else:
             final = rep.provisional_winner
             resolution_source = "legacy_provisional"
+    elif rep.resolution is not None and final is not None:
+        if (
+            not rep.resolution.resolved
+            or rep.resolved_candidate is None
+            or getattr(final, "candidate_id", None) != rep.resolution.candidate_id
+        ):
+            raise ValueError("explicit delivery cannot override a recorded resolution")
+        final = rep.resolved_candidate
+        resolution_source = rep.resolution.kind.value
+    if rep.journal is not None and rep.resolution is None:
+        raise RuntimeError("a journaled trial cannot deliver without its recorded resolution")
     if final is None:
         source = rep.resolution.kind.value if rep.resolution else "no_winner"
         return Delivery(
@@ -1077,38 +1269,116 @@ def deliver(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = _AUTO_
             delivered=False,
             resolution_source=source,
         )
+    recorded_delivery = None
+    if rep.journal:
+        persisted_events = rep.journal.events
+        recorded_delivery = next(
+            (event for event in persisted_events if event.event_type == "delivery.completed"),
+            None,
+        )
+        if recorded_delivery is not None:
+            raise RuntimeError("this trial already has a completed delivery")
+        if rep.resolution is not None:
+            if rep.resolution_event_sequence is None:
+                raise RuntimeError("the delivery resolution was not persisted to the trial journal")
+            persisted_resolutions = tuple(
+                event for event in persisted_events if event.event_type == "resolution.recorded"
+            )
+            persisted_resolution = persisted_resolutions[-1] if persisted_resolutions else None
+            encoded_resolution = (
+                persisted_resolution.payload.get("resolution") if persisted_resolution else None
+            )
+            if (
+                persisted_resolution is None
+                or persisted_resolution.sequence != rep.resolution_event_sequence
+                or not isinstance(encoded_resolution, Mapping)
+                or encoded_resolution.get("resolution_id") != rep.resolution.resolution_id
+                or encoded_resolution.get("evidence_hash") != rep.resolution.evidence_hash
+            ):
+                raise RuntimeError("the latest persisted resolution does not match this delivery")
+    frozen_candidate = None
+    if rep.resolution is not None:
+        if rep.evidence is None:
+            raise ValueError("a recorded resolution requires frozen evidence for delivery")
+        if rep.evidence.evidence_hash != rep.resolution.evidence_hash:
+            raise ValueError("delivery evidence does not match the recorded resolution")
+        rep.resolution.validate(rep.evidence, rep.evaluations)
+        frozen_candidate = rep.evidence.candidate(final.candidate_id)
+        if out.exists():
+            raise FileExistsError("resolution-controlled delivery requires a new output directory")
     out.mkdir(parents=True, exist_ok=True)
     files: list[str] = []
-    ws = Path(final.workspace_path)
-    if ws.is_dir():
-        for p in sorted(ws.rglob("*")):
-            rel = p.relative_to(ws)
-            if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in rel.parts):
-                dst = out / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(p, dst)
-                files.append(rel.as_posix())
+    if frozen_candidate is not None:
+        for artifact in frozen_candidate.artifacts:
+            dst = out.joinpath(*artifact.path.split("/"))
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(artifact.content_bytes())
+            files.append(artifact.path)
+    else:
+        ws = Path(final.workspace_path)
+        if ws.is_dir():
+            for p in sorted(ws.rglob("*")):
+                rel = p.relative_to(ws)
+                if p.is_file() and not any(seg in ARTIFACT_IGNORE_PARTS for seg in rel.parts):
+                    dst = out / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(p, dst)
+                    files.append(rel.as_posix())
     answer = None
     if not files:
-        answer = (final.output or "").strip() or None
+        frozen_output = frozen_candidate.output if frozen_candidate is not None else final.output
+        answer = (frozen_output or "").strip() or None
         if answer:
             (out / "answer.md").write_text(answer + "\n", encoding="utf-8")
     e = rep.entry_for(final)
-    tr = final.test_results or {}
+    tr = frozen_candidate.test_results if frozen_candidate is not None else (final.test_results or {})
     hidden = tr.get("hidden") or {}
+    winner_name = frozen_candidate.name if frozen_candidate is not None else (
+        final.spec.name if final.spec else final.candidate_id
+    )
+    winner_signature = frozen_candidate.signature if frozen_candidate is not None else final.signature
+    verdict = frozen_candidate.verdict if frozen_candidate is not None else (e.verdict if e else "-")
+    duration_seconds = frozen_candidate.duration_seconds if frozen_candidate is not None else final.duration_seconds
+    tokens_used = frozen_candidate.tokens_used if frozen_candidate is not None else final.tokens_used
     parts = [
-        (final.spec.name if final.spec else final.candidate_id),
-        (e.verdict if e else "-"),
+        winner_name,
+        verdict,
         (f"hidden {hidden.get('passed', 0)}/{hidden.get('total', 0)}" if hidden.get("has_tests") else "no hidden tests"),
-        f"{final.duration_seconds:.0f}s",
-        f"{final.tokens_used:,} tok",
+        f"{duration_seconds:.0f}s",
+        f"{tokens_used:,} tok",
         f"resolved by {resolution_source or 'explicit override'}",
         f"-> {out}",
     ]
-    return Delivery(task_id=rep.task.id, out_dir=out, files=files, answer=answer,
-                    winner_name=parts[0], signature=final.signature,
-                    receipt=" · ".join(p for p in parts if p), delivered=True,
-                    resolution_source=resolution_source or "explicit_override")
+    delivery = Delivery(task_id=rep.task.id, out_dir=out, files=files, answer=answer,
+                        winner_name=winner_name, signature=winner_signature,
+                        receipt=" · ".join(p for p in parts if p), delivered=True,
+                        asked_human=bool(rep.resolution and rep.resolution.kind is ResolutionKind.HUMAN_PICK),
+                        resolution_source=resolution_source or "explicit_override")
+    if (
+        rep.journal
+        and rep.resolution
+        and rep.resolution.resolved
+        and rep.resolution.candidate_id == final.candidate_id
+        and rep.resolution_event_sequence is not None
+    ):
+        event_delivery = delivery.to_dict()
+        # The journal is portable trial state, so keep machine-local output paths
+        # in the user-facing receipt rather than in the persisted event payload.
+        event_delivery.pop("out_dir", None)
+        event_delivery["receipt"] = " · ".join(p for p in parts[:-1] if p)
+        if recorded_delivery is None:
+            rep.journal.append(
+                "delivery.completed",
+                {
+                    "candidate_id": final.candidate_id,
+                    "resolution_sequence": rep.resolution_event_sequence,
+                    "resolution_id": rep.resolution.resolution_id,
+                    "evidence_hash": rep.resolution.evidence_hash,
+                    "delivery": event_delivery,
+                },
+                idempotency_key=f"delivery.completed:{rep.resolution.resolution_id}",
+            )
+    return delivery
 
 
 def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "developer:python",
@@ -1157,7 +1427,8 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
             f"arity requested max {requested_arity}; resolved {actual_arity} unique candidates",
         )
     asked = False
-    if rep.resolution and not rep.resolution.resolved and rep.judgements and judges_split(rep) and interactive:
+    resolution = getattr(rep, "resolution", None)
+    if resolution and not resolution.resolved and rep.judgements and judges_split(rep) and interactive:
         human_pick(rep, ask=ask, printer=printer)
         asked = True
     delivery = deliver(rep, out_dir=out_dir)
@@ -1248,12 +1519,19 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
         if e and e.tied_with:
             p(f"{yellow}TIE{reset} between {len(e.tied_with) + 1} candidates (scores within judge epsilon); "
               f"broke on {e.tie_break}. Treat the winner as provisional.")
-        p(f"{green}winner:{reset} {bold}{rep.winner.spec.name}{reset}  {dim}{rep.winner.signature}{reset}")
+        p(f"{green}archivist order:{reset} {bold}{rep.winner.spec.name}{reset}  {dim}{rep.winner.signature}{reset}")
         if e:
             p(f"  artifacts: {', '.join(e.verified_artifacts) or 'none'}")
             p(f"  findings:  {e.entry_text.splitlines()[-1].replace('- **Findings**: ', '')}")
     else:
         p(f"{red}no winner:{reset} every candidate scored <= 0 (failed, lied, or produced nothing verifiable)")
+
+    if rep.resolution:
+        if rep.resolution.resolved and rep.resolved_candidate and rep.resolved_candidate.spec:
+            p(f"{green}resolved:{reset} {bold}{rep.resolved_candidate.spec.name}{reset}  "
+              f"{dim}{rep.resolution.kind.value}{reset}")
+        else:
+            p(f"{yellow}unresolved:{reset} delivery is withheld until the evidence has a decisive resolution")
 
     moved = [r for r in rep.results if r.fallbacks]
     for r in moved:

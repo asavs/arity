@@ -6,17 +6,19 @@ stable evidence bundle repeatedly without asking those harnesses to run again.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 
-EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2
 EVALUATION_SCHEMA_VERSION = 1
-RESOLUTION_SCHEMA_VERSION = 1
+RESOLUTION_SCHEMA_VERSION = 2
 
 
 def _freeze_json(value: Any) -> Any:
@@ -61,6 +63,25 @@ class ArtifactEvidence:
     sha256: str
     size: int
     text: Optional[str] = None
+    content_base64: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        path = self.path
+        parsed = PurePosixPath(path)
+        if (
+            not path
+            or path != path.replace("\\", "/")
+            or parsed.is_absolute()
+            or parsed.as_posix() != path
+            or any(part in {"", ".", ".."} for part in parsed.parts)
+            or (parsed.parts and ":" in parsed.parts[0])
+        ):
+            raise ValueError("artifact evidence paths must be safe relative POSIX paths")
+        if (self.text is None) == (self.content_base64 is None):
+            raise ValueError("artifact evidence must contain exactly one encoded representation")
+        content = self.content_bytes()
+        if len(content) != self.size or hashlib.sha256(content).hexdigest() != self.sha256:
+            raise ValueError("artifact evidence content does not match its size and hash")
 
     @classmethod
     def from_bytes(cls, path: str, content: bytes) -> "ArtifactEvidence":
@@ -73,7 +94,18 @@ class ArtifactEvidence:
             sha256=hashlib.sha256(content).hexdigest(),
             size=len(content),
             text=text,
+            content_base64=(
+                base64.b64encode(content).decode("ascii") if text is None else None
+            ),
         )
+
+    def content_bytes(self) -> bytes:
+        if self.text is not None:
+            return self.text.encode("utf-8")
+        try:
+            return base64.b64decode(self.content_base64 or "", validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("artifact evidence contains invalid base64") from exc
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +113,7 @@ class ArtifactEvidence:
             "sha256": self.sha256,
             "size": self.size,
             "text": self.text,
+            "content_base64": self.content_base64,
         }
 
     @classmethod
@@ -90,6 +123,9 @@ class ArtifactEvidence:
             sha256=str(value["sha256"]),
             size=int(value["size"]),
             text=None if value.get("text") is None else str(value["text"]),
+            content_base64=(
+                None if value.get("content_base64") is None else str(value["content_base64"])
+            ),
         )
 
 
@@ -329,7 +365,9 @@ class EvidenceBundle:
             metadata=value.get("metadata") or {},
         )
         claimed_hash = str(value.get("evidence_hash", ""))
-        if claimed_hash and claimed_hash != bundle.evidence_hash:
+        if not claimed_hash:
+            raise ValueError("evidence bundle is missing its content hash")
+        if claimed_hash != bundle.evidence_hash:
             raise ValueError("evidence hash does not match bundle contents")
         return bundle
 
@@ -405,6 +443,28 @@ class Evaluation:
             "metadata": _thaw_json(self.metadata),
         }
 
+    @classmethod
+    def from_dict(cls, bundle: EvidenceBundle, value: Mapping[str, Any]) -> "Evaluation":
+        schema_version = int(value.get("schema_version", 0))
+        if schema_version != EVALUATION_SCHEMA_VERSION:
+            raise ValueError(f"unsupported evaluation schema version {schema_version}")
+        evaluation = cls.create(
+            bundle,
+            evaluator_id=str(value["evaluator_id"]),
+            order=value.get("order") or (),
+            ties=value.get("ties") or (),
+            reason=str(value.get("reason", "")),
+            metadata=value.get("metadata") or {},
+        )
+        if str(value.get("evidence_hash", "")) != bundle.evidence_hash:
+            raise ValueError("evaluation was produced for a different evidence bundle")
+        claimed_id = str(value.get("evaluation_id", ""))
+        if not claimed_id:
+            raise ValueError("evaluation is missing its content id")
+        if claimed_id != evaluation.evaluation_id:
+            raise ValueError("evaluation id does not match evaluation contents")
+        return evaluation
+
 
 @runtime_checkable
 class TrialEvaluator(Protocol):
@@ -442,9 +502,37 @@ class Resolution:
     evidence_hash: str
     reason: str
     eligible_candidate_ids: tuple[str, ...] = ()
+    expected_evaluator_ids: tuple[str, ...] = ()
     evaluator_ids: tuple[str, ...] = ()
     evaluation_ids: tuple[str, ...] = ()
+    resolution_id: str = ""
     schema_version: int = RESOLUTION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.expected_evaluator_ids != tuple(sorted(set(self.expected_evaluator_ids))):
+            raise ValueError("expected evaluator ids must be unique and canonical")
+        if len(self.evaluator_ids) != len(self.evaluation_ids):
+            raise ValueError("each resolution evaluator must have one evaluation id")
+        pairs = tuple(zip(self.evaluator_ids, self.evaluation_ids))
+        if pairs != tuple(sorted(pairs)):
+            raise ValueError("resolution evaluation inputs must be canonical")
+        expected_id = _content_hash(self._identity_body())
+        if self.resolution_id and self.resolution_id != expected_id:
+            raise ValueError("resolution id does not match resolution contents")
+        object.__setattr__(self, "resolution_id", expected_id)
+
+    def _identity_body(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "source": self.kind.value,
+            "candidate_id": self.candidate_id,
+            "evidence_hash": self.evidence_hash,
+            "reason": self.reason,
+            "eligible_candidate_ids": list(self.eligible_candidate_ids),
+            "expected_evaluator_ids": list(self.expected_evaluator_ids),
+            "evaluator_ids": list(self.evaluator_ids),
+            "evaluation_ids": list(self.evaluation_ids),
+        }
 
     @property
     def resolved(self) -> bool:
@@ -454,14 +542,129 @@ class Resolution:
         return {
             "schema_version": self.schema_version,
             "status": "resolved" if self.resolved else "unresolved",
+            "resolution_id": self.resolution_id,
             "source": self.kind.value,
             "candidate_id": self.candidate_id,
             "evidence_hash": self.evidence_hash,
             "reason": self.reason,
             "eligible_candidate_ids": list(self.eligible_candidate_ids),
+            "expected_evaluator_ids": list(self.expected_evaluator_ids),
             "evaluator_ids": list(self.evaluator_ids),
             "evaluation_ids": list(self.evaluation_ids),
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "Resolution":
+        schema_version = int(value.get("schema_version", 0))
+        if schema_version != RESOLUTION_SCHEMA_VERSION:
+            raise ValueError(f"unsupported resolution schema version {schema_version}")
+        resolution = cls(
+            kind=ResolutionKind(str(value.get("source", "unresolved"))),
+            candidate_id=None if value.get("candidate_id") is None else str(value["candidate_id"]),
+            evidence_hash=str(value["evidence_hash"]),
+            reason=str(value.get("reason", "")),
+            eligible_candidate_ids=tuple(str(item) for item in value.get("eligible_candidate_ids") or ()),
+            expected_evaluator_ids=tuple(str(item) for item in value.get("expected_evaluator_ids") or ()),
+            evaluator_ids=tuple(str(item) for item in value.get("evaluator_ids") or ()),
+            evaluation_ids=tuple(str(item) for item in value.get("evaluation_ids") or ()),
+            resolution_id=str(value.get("resolution_id", "")),
+        )
+        if not value.get("resolution_id"):
+            raise ValueError("resolution is missing its content id")
+        claimed_status = str(value.get("status", ""))
+        if claimed_status and claimed_status != ("resolved" if resolution.resolved else "unresolved"):
+            raise ValueError("resolution status contradicts its source and candidate")
+        return resolution
+
+    def validate(
+        self,
+        bundle: EvidenceBundle,
+        evaluations: Sequence[Evaluation] = (),
+    ) -> None:
+        if self.evidence_hash != bundle.evidence_hash:
+            raise ValueError("resolution references a different evidence bundle")
+        candidate_ids = {candidate.candidate_id for candidate in bundle.candidates}
+        if self.kind is ResolutionKind.UNRESOLVED:
+            if self.candidate_id is not None:
+                raise ValueError("an unresolved resolution cannot select a candidate")
+        elif self.candidate_id is None:
+            raise ValueError("a resolved resolution must select a candidate")
+        eligible = set(self.eligible_candidate_ids)
+        if not eligible or len(eligible) != len(self.eligible_candidate_ids):
+            raise ValueError("resolution eligibility must contain distinct candidates")
+        if not eligible <= candidate_ids:
+            raise ValueError("resolution eligibility references an unknown candidate")
+        if self.candidate_id is not None and self.candidate_id not in eligible:
+            raise ValueError("resolved candidate is not factually eligible")
+        factual_eligible, facts_supported = factual_eligibility(bundle)
+        if self.eligible_candidate_ids != factual_eligible:
+            raise ValueError("resolution eligibility does not match the frozen factual evidence")
+        if self.resolved and not facts_supported:
+            raise ValueError("a resolution cannot select a candidate without positive factual evidence")
+        for evaluation in evaluations:
+            evaluation.validate(bundle)
+        known_evaluations = {evaluation.evaluation_id: evaluation for evaluation in evaluations}
+        if not set(self.evaluation_ids) <= set(known_evaluations):
+            raise ValueError("resolution references an unknown evaluation")
+        referenced = tuple(known_evaluations[evaluation_id] for evaluation_id in self.evaluation_ids)
+        if tuple(evaluation.evaluator_id for evaluation in referenced) != self.evaluator_ids:
+            raise ValueError("resolution evaluator identities do not match its evaluations")
+        if self.kind is ResolutionKind.JUDGE_CONSENSUS:
+            if (
+                not referenced
+                or len(set(self.evaluator_ids)) != len(self.evaluator_ids)
+                or set(self.evaluator_ids) != set(self.expected_evaluator_ids)
+            ):
+                raise ValueError("judge consensus requires a complete distinct evaluator panel")
+            for evaluation in referenced:
+                if not evaluation.order or evaluation.order[0] != self.candidate_id:
+                    raise ValueError("judge consensus does not match the recorded rankings")
+                if any(
+                    self.candidate_id in group and len(set(group) & eligible) > 1
+                    for group in evaluation.ties
+                ):
+                    raise ValueError("judge consensus cannot rely on an explicitly tied first choice")
+        elif self.kind is ResolutionKind.FACTS_WINNER and eligible != {self.candidate_id}:
+            raise ValueError("a facts winner must be the sole factually eligible candidate")
+
+
+def factual_eligibility(bundle: EvidenceBundle) -> tuple[tuple[str, ...], bool]:
+    """Derive the eligible factual tier from the immutable archivist axes."""
+    def fact_key(candidate: CandidateEvidence) -> tuple[int, float, float]:
+        return (
+            int(candidate.axes.get("tier", 0)),
+            float(candidate.axes.get("hidden_rate", 0.0)),
+            float(candidate.axes.get("own_rate", 0.0)),
+        )
+
+    def has_support(candidate: CandidateEvidence) -> bool:
+        test_results = candidate.test_results
+        has_tests = bool(test_results.get("has_tests")) or any(
+            bool(layer.get("has_tests"))
+            for layer in (test_results.get("own") or {}, test_results.get("hidden") or {})
+            if hasattr(layer, "get")
+        )
+        return bool(candidate.artifacts or has_tests)
+
+    best_key = max(fact_key(candidate) for candidate in bundle.candidates)
+    best = tuple(candidate for candidate in bundle.candidates if fact_key(candidate) == best_key)
+    supported = tuple(candidate for candidate in best if best_key[0] > 0 and has_support(candidate))
+    eligible = supported or best
+    return tuple(candidate.candidate_id for candidate in eligible), bool(supported)
+
+
+def _canonical_panel(
+    evaluations: Sequence[Evaluation],
+    expected_evaluator_ids: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    pairs = tuple(sorted((evaluation.evaluator_id, evaluation.evaluation_id) for evaluation in evaluations))
+    raw_expected = tuple(str(item) for item in expected_evaluator_ids)
+    if len(raw_expected) != len(set(raw_expected)):
+        raise ValueError("expected evaluator ids must be unique")
+    expected = tuple(sorted(raw_expected))
+    if not expected:
+        expected = tuple(sorted({evaluator_id for evaluator_id, _ in pairs}))
+    return expected, tuple(item[0] for item in pairs), tuple(item[1] for item in pairs)
 
 
 def resolve_bundle(
@@ -481,6 +684,9 @@ def resolve_bundle(
     checked_evaluations = tuple(evaluations)
     for evaluation in checked_evaluations:
         evaluation.validate(bundle)
+    panel_expected, panel_evaluators, panel_evaluations = _canonical_panel(
+        checked_evaluations, expected_evaluator_ids,
+    )
 
     tied = (
         {facts_candidate_id, *(str(candidate_id) for candidate_id in facts_tied_with)}
@@ -490,15 +696,34 @@ def resolve_bundle(
     if not tied <= candidate_ids:
         raise ValueError("facts tie references a candidate outside the evidence bundle")
     eligible = tuple(candidate.candidate_id for candidate in bundle.candidates if candidate.candidate_id in tied)
+    frozen_eligible, frozen_supported = factual_eligibility(bundle)
+    if eligible != frozen_eligible:
+        raise ValueError("reported factual eligibility does not match the frozen evidence")
+    if (facts_candidate_id is not None and facts_supported) != frozen_supported:
+        raise ValueError("reported factual support does not match the frozen evidence")
     if human_candidate_id is not None:
         if human_candidate_id not in tied:
             raise ValueError("human-picked candidate is not eligible under the factual evidence")
+        if not frozen_supported:
+            return Resolution(
+                kind=ResolutionKind.UNRESOLVED,
+                candidate_id=None,
+                evidence_hash=bundle.evidence_hash,
+                reason="human preference was recorded but no candidate had positive factual evidence",
+                eligible_candidate_ids=eligible,
+                expected_evaluator_ids=panel_expected,
+                evaluator_ids=panel_evaluators,
+                evaluation_ids=panel_evaluations,
+            )
         return Resolution(
             kind=ResolutionKind.HUMAN_PICK,
             candidate_id=human_candidate_id,
             evidence_hash=bundle.evidence_hash,
             reason="human selected a candidate after reviewing the recorded evidence",
             eligible_candidate_ids=eligible,
+            expected_evaluator_ids=panel_expected,
+            evaluator_ids=panel_evaluators,
+            evaluation_ids=panel_evaluations,
         )
 
     if facts_candidate_id is None or not facts_supported:
@@ -508,8 +733,9 @@ def resolve_bundle(
             evidence_hash=bundle.evidence_hash,
             reason="no candidate had sufficient factual evidence for resolution",
             eligible_candidate_ids=eligible,
-            evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
-            evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
+            expected_evaluator_ids=panel_expected,
+            evaluator_ids=panel_evaluators,
+            evaluation_ids=panel_evaluations,
         )
 
     if len(tied) == 1:
@@ -521,8 +747,8 @@ def resolve_bundle(
             eligible_candidate_ids=eligible,
         )
 
-    expected = tuple(str(evaluator_id) for evaluator_id in expected_evaluator_ids)
-    actual = tuple(evaluation.evaluator_id for evaluation in checked_evaluations)
+    expected = panel_expected
+    actual = panel_evaluators
     complete_panel = (
         len(actual) == len(set(actual))
         and (not expected or len(expected) == len(set(expected)) and set(actual) == set(expected))
@@ -549,8 +775,9 @@ def resolve_bundle(
             evidence_hash=bundle.evidence_hash,
             reason="all recorded evaluators selected the same candidate within the factual tie",
             eligible_candidate_ids=eligible,
-            evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
-            evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
+            expected_evaluator_ids=panel_expected,
+            evaluator_ids=panel_evaluators,
+            evaluation_ids=panel_evaluations,
         )
 
     return Resolution(
@@ -569,6 +796,7 @@ def resolve_bundle(
             else "verified facts tied and no valid evaluator decision was recorded"
         ),
         eligible_candidate_ids=eligible,
-        evaluator_ids=tuple(evaluation.evaluator_id for evaluation in checked_evaluations),
-        evaluation_ids=tuple(evaluation.evaluation_id for evaluation in checked_evaluations),
+        expected_evaluator_ids=panel_expected,
+        evaluator_ids=panel_evaluators,
+        evaluation_ids=panel_evaluations,
     )

@@ -465,7 +465,7 @@ def handle_run_command(args: argparse.Namespace) -> None:
         printer=safe_print, interactive=interactive, quiet=not args.verbose,
     )
     if args.json:
-        safe_print(json.dumps({"delivery": {**delivery.__dict__, "out_dir": str(delivery.out_dir)}, "report": rep.to_dict()}, indent=2, default=str))
+        safe_print(json.dumps({"delivery": delivery.to_dict(), "report": rep.to_dict()}, indent=2))
         return
     if args.verbose:
         render_report(rep, printer=safe_print)
