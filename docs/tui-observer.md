@@ -77,14 +77,18 @@ context, raw completion/review status, output, artifact or delivery file paths, 
 issue messages, or credentials. There is no identity-reveal toggle in the first
 release.
 
-Trials receive in-memory neutral labels (`Trial 1`, `Trial 2`, ...). Raw trial IDs are
-kept only in controller selection state so an exact requested ID can be found; they do
-not enter the view model. Arms from the verified declaration are sorted by ordinal,
-then labeled by their bounded list position (`Agent A`, `Agent B`, ...), not by the
-numeric ordinal itself. A negative or enormous ordinal can affect only its sorted
-position: it never controls allocation, indentation, label width, or character count.
-Legacy scalar arms retain declaration order. Rendering is capped at 256 trials and 256
-arms per trial with only a structural `more omitted` flag.
+Trials receive in-memory neutral labels (`Trial 1`, `Trial 2`, ...). The controller owns
+a session-scoped map from full trial ID to neutral label: it assigns the first snapshot
+in display order, gives each newly observed ID the next monotonically increasing label,
+and never recycles or reassigns a label during that watch session. Re-sorting moves the
+existing label with its trial. Raw trial IDs are kept only as map keys and controller
+selection state so an exact requested ID can be found; they do not enter the view
+model. Arms from the verified declaration are sorted by ordinal, then labeled by their
+bounded list position (`Agent A`, `Agent B`, ...), not by the numeric ordinal itself. A
+negative or enormous ordinal can affect only its sorted position: it never controls
+allocation, indentation, label width, or character count. Legacy scalar arms retain
+declaration order. Rendering is capped at 256 trials and 256 arms per trial with only a
+structural `more omitted` flag.
 
 All fixed labels are supplied by the renderer, not persisted text. If a future
 allowlisted field permits persisted text, it must pass the current control-character
@@ -252,6 +256,10 @@ non-interactive fallbacks remain complete.
 - Negative and enormous arm ordinals produce bounded position-based labels without
   large allocation, padding, Unicode lookup, or a renderer error. The 256-item caps
   report only `more omitted`, never an unbounded source count.
+- A refresh fixture changes trusted timestamps and lifecycle values, reorders existing
+  rows, and inserts a new trial. Every previously observed full ID and the selected
+  trial retain their original neutral label; the new ID receives the next label and no
+  retired label is reused during the session.
 - Control characters and bidirectional markers cannot control the terminal. Very long
   and very narrow content truncates predictably without changing semantic labels.
 - Reduced-motion tests produce no timer-driven frame change. ASCII golden snapshots
