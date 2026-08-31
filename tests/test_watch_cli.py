@@ -21,9 +21,18 @@ renderer.  The public source seam is::
 It opens exactly one query-only reader, obtains one complete catalog snapshot, closes
 the reader, samples the clock once, and then passes that catalog/read time to the
 supplied projector.
-``run_watch_command(args, *, clock, stdout, stderr) -> int`` takes an
+``run_watch_command(args, *, clock=time.time, stdout=None, stderr=None) -> int`` takes an
 ``argparse.Namespace`` with ``trial_id``, ``ascii``, and ``no_motion`` fields, uses
 that source seam, renders one snapshot, and returns the documented semantic exit code.
+``None`` selects the current process stream dynamically; an explicitly supplied
+text stream remains supported for embedding and tests.
+
+The projected ``WatchViewModel`` carries two additional closed structural fields.
+``catalog_integrity`` is ``valid``, ``partial``, or ``corrupt`` across the complete
+catalog before its 256-row display cap; it determines semantic exit severity.
+``selected_trial_omitted`` is a boolean used when an exact selected ID exists outside
+that cap.  In that state ``selected_trial_number`` remains ``None`` so an unbounded
+source rank can never enter the blind-safe model or terminal output.
 
 Stage 2 deliberately has no interactive or terminal-capability mode.  The two flags
 are accepted compatibility promises and cannot alter this already-ASCII snapshot.
@@ -201,17 +210,29 @@ def model(
     backend: str = "jsonl",
     more_trials: bool = False,
     catalog_issues: tuple[WatchIssue, ...] = (),
+    catalog_integrity: str | None = None,
     selected_number: int | None = None,
+    selected_omitted: bool = False,
     requested_missing: bool = False,
     read_at: float = READ_AT,
 ) -> WatchViewModel:
+    resolved_integrity = catalog_integrity
+    if resolved_integrity is None:
+        if catalog_issues or any(trial.integrity == "corrupt" for trial in trials):
+            resolved_integrity = "corrupt"
+        elif any(trial.integrity == "partial" for trial in trials):
+            resolved_integrity = "partial"
+        else:
+            resolved_integrity = "valid"
     return WatchViewModel(
         backend=cast(Any, backend),
         read_at=float(read_at),
         trials=trials,
         more_trials_omitted=more_trials,
         catalog_issues=catalog_issues,
+        catalog_integrity=cast(Any, resolved_integrity),
         selected_trial_number=selected_number,
+        selected_trial_omitted=selected_omitted,
         requested_trial_missing=requested_missing,
     )
 
@@ -315,9 +336,14 @@ def valid_inspection(trial_id: str, *, timestamp: float = 1.0) -> TrialInspectio
     )
 
 
-def partial_inspection(trial_id: str) -> TrialInspection:
+def partial_inspection(
+    trial_id: str,
+    *,
+    timestamp: float = 1.0,
+) -> TrialInspection:
     replay = started_replay(
         trial_id,
+        timestamp=timestamp,
         arms=({"arm_id": f"{trial_id}:arm", "arm_ordinal": 0},),
     )
     return TrialInspection(
@@ -353,6 +379,47 @@ def corrupt_inspection(trial_id: str) -> TrialInspection:
             ),
         ),
     )
+
+
+def capped_catalog_scenario(scenario: str) -> tuple[TrialCatalog, str]:
+    prefix = f"raw-{BLIND_LEAK_SENTINEL}-{scenario}"
+    offscreen_id = f"{prefix}-offscreen"
+    if scenario == "all_valid":
+        special = valid_inspection(offscreen_id, timestamp=0.0)
+        visible = tuple(
+            valid_inspection(f"{prefix}-{index:03d}", timestamp=float(index))
+            for index in range(1, 257)
+        )
+        return TrialCatalog(trials=(special, *visible)), offscreen_id
+    if scenario == "offscreen_partial":
+        special = partial_inspection(offscreen_id, timestamp=0.0)
+        visible = tuple(
+            valid_inspection(f"{prefix}-{index:03d}", timestamp=float(index))
+            for index in range(1, 257)
+        )
+        return TrialCatalog(trials=(special, *visible)), offscreen_id
+    if scenario == "offscreen_corrupt":
+        visible = tuple(
+            valid_inspection(f"{prefix}-{index:03d}", timestamp=float(index))
+            for index in range(1, 257)
+        )
+        return (
+            TrialCatalog(trials=(*visible, corrupt_inspection(offscreen_id))),
+            offscreen_id,
+        )
+    if scenario == "visible_partial_offscreen_corrupt":
+        partial = partial_inspection(f"{prefix}-partial", timestamp=1000.0)
+        visible = tuple(
+            valid_inspection(f"{prefix}-{index:03d}", timestamp=float(index))
+            for index in range(1, 256)
+        )
+        return (
+            TrialCatalog(
+                trials=(partial, *visible, corrupt_inspection(offscreen_id)),
+            ),
+            offscreen_id,
+        )
+    raise AssertionError(f"unknown capped catalog scenario: {scenario}")
 
 
 class ReaderContext(AbstractContextManager[object]):
@@ -746,7 +813,7 @@ def test_renderer_reports_offscreen_selection_without_exposing_identity() -> Non
         model(
             valid_trial(1, trial_detail=detail((False,))),
             more_trials=True,
-            selected_number=257,
+            selected_omitted=True,
         )
     )
 
@@ -754,8 +821,9 @@ def test_renderer_reports_offscreen_selection_without_exposing_identity() -> Non
         f"arity watch | jsonl | 1 trial | read {READ_TIME}\n"
         "  Trial 1 | started | valid | completions 0/1\n"
         "  more trials omitted\n"
-        "selected: Trial 257 | details unavailable\n"
+        "selected: omitted trial | details unavailable\n"
     )
+    assert "257" not in rendered
     assert_blind_output(rendered)
 
 
@@ -766,6 +834,38 @@ class UnsafeRendererInput:
 
 class ForgedWatchViewModel(WatchViewModel):
     pass
+
+
+class LeakyIntegrity(str):
+    def __repr__(self) -> str:
+        return BLIND_LEAK_SENTINEL
+
+
+@pytest.mark.parametrize(
+    "unsafe_integrity",
+    ["", "unsupported", "VALID", LeakyIntegrity("valid")],
+)
+def test_catalog_integrity_is_a_closed_plain_string(
+    unsafe_integrity: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)) as captured:
+        model(catalog_integrity=unsafe_integrity)
+    assert BLIND_LEAK_SENTINEL not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"selected_number": 1, "selected_omitted": True},
+        {"selected_omitted": True, "requested_missing": True},
+        {"selected_omitted": cast(Any, 1)},
+    ],
+)
+def test_selected_trial_omitted_is_a_closed_exclusive_boolean(
+    overrides: Mapping[str, Any],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        model(**overrides)
 
 
 @pytest.mark.parametrize(
@@ -779,6 +879,8 @@ class ForgedWatchViewModel(WatchViewModel):
             read_at=READ_AT,
             trials=(),
             more_trials_omitted=False,
+            catalog_integrity="valid",
+            selected_trial_omitted=False,
         ),
     ],
 )
@@ -845,7 +947,9 @@ def test_load_watch_model_is_one_injected_reader_and_samples_clock_after_close()
     assert type(loaded) is WatchViewModel
     assert loaded.backend == "sqlite"
     assert loaded.read_at == READ_AT
+    assert loaded.catalog_integrity == "valid"
     assert loaded.selected_trial_number == 1
+    assert loaded.selected_trial_omitted is False
     assert loaded.requested_trial_missing is False
     assert events == [
         "reader_open",
@@ -897,6 +1001,58 @@ def test_load_watch_model_closes_and_propagates_typed_failure_before_clock() -> 
         "inspect_trials",
         "reader_close",
     ]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_integrity"),
+    [
+        ("all_valid", "valid"),
+        ("offscreen_partial", "partial"),
+        ("offscreen_corrupt", "corrupt"),
+        ("visible_partial_offscreen_corrupt", "corrupt"),
+    ],
+)
+def test_load_watch_model_keeps_full_catalog_integrity_before_capping(
+    scenario: str,
+    expected_integrity: str,
+) -> None:
+    catalog, offscreen_id = capped_catalog_scenario(scenario)
+    events: list[str] = []
+    reader = object()
+    spec = StoreSpec("jsonl", Path(BLIND_LEAK_SENTINEL) / "records")
+
+    def reader_opener(actual: StoreSpec | None = None) -> ReaderContext:
+        assert actual is spec
+        events.append("reader_open")
+        return ReaderContext(events, reader)
+
+    def inspector(actual: object) -> TrialCatalog:
+        assert actual is reader
+        events.append("inspect_trials")
+        return catalog
+
+    loaded = load_watch_model(
+        spec,
+        selected_trial_id=(offscreen_id if scenario == "all_valid" else None),
+        projector=WatchProjector(),
+        clock=lambda: READ_AT,
+        reader_opener=reader_opener,
+        inspector=inspector,
+    )
+
+    assert loaded.catalog_integrity == expected_integrity
+    assert len(loaded.trials) == 256
+    assert loaded.more_trials_omitted is True
+    if scenario == "all_valid":
+        assert loaded.selected_trial_number is None
+        assert loaded.selected_trial_omitted is True
+        assert loaded.requested_trial_missing is False
+        assert "257" not in repr(loaded)
+    else:
+        assert loaded.selected_trial_omitted is False
+    assert events.count("inspect_trials") == 1
+    assert events.count("reader_close") == 1
+    assert BLIND_LEAK_SENTINEL not in repr(loaded)
 
 
 def test_source_takes_one_full_catalog_snapshot_closes_then_reads_clock(
@@ -970,9 +1126,43 @@ def test_explicit_selection_still_uses_the_one_full_capped_catalog(
     assert events.count("inspect_trials") == 1
     assert events.count("reader_close") == 1
     assert "  more trials omitted\n" in stdout
-    assert "selected: Trial 257 | details unavailable\n" in stdout
-    assert stdout.count("Trial ") == 257
+    assert "selected: omitted trial | details unavailable\n" in stdout
+    assert stdout.count("Trial ") == 256
+    assert "257" not in stdout
     assert_blind_output(stdout, selected_id)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_code", "visible_partial"),
+    [
+        ("all_valid", 0, False),
+        ("offscreen_partial", 4, False),
+        ("offscreen_corrupt", 5, False),
+        ("visible_partial_offscreen_corrupt", 5, True),
+    ],
+)
+def test_full_catalog_integrity_survives_the_256_row_display_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    expected_code: int,
+    visible_partial: bool,
+) -> None:
+    catalog, offscreen_id = capped_catalog_scenario(scenario)
+    install_catalog_source(monkeypatch, catalog)
+
+    code, stdout, stderr = run_direct(watch_args())
+
+    assert code == expected_code
+    assert stderr == ""
+    assert stdout.startswith(
+        f"arity watch | jsonl | 256 trials | read {READ_TIME}\n"
+    )
+    assert "  more trials omitted\n" in stdout
+    assert stdout.count("Trial ") == 256
+    assert ("| partial |" in stdout) is visible_partial
+    assert "| corrupt |" not in stdout
+    assert "257" not in stdout
+    assert_blind_output(stdout, offscreen_id)
 
 
 @pytest.mark.parametrize(
@@ -1417,6 +1607,76 @@ class GuardedOutput(io.StringIO):
         raise AssertionError("one-shot watch attempted output TTY access")
 
 
+class BinaryCapture:
+    def __init__(
+        self,
+        *,
+        fail_write: bool = False,
+        fail_flush: bool = False,
+    ) -> None:
+        self.fail_write = fail_write
+        self.fail_flush = fail_flush
+        self.flush_calls = 0
+        self._value = bytearray()
+
+    def write(self, value: bytes | bytearray) -> int:
+        if self.fail_write:
+            raise OSError(f"write failed {BLIND_LEAK_SENTINEL}")
+        encoded = bytes(value)
+        self._value.extend(encoded)
+        return len(encoded)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        if self.fail_flush:
+            raise OSError(f"flush failed {BLIND_LEAK_SENTINEL}")
+
+    def getvalue(self) -> bytes:
+        return bytes(self._value)
+
+
+class NewlineTranslatingDefaultStream:
+    """A Windows-like text wrapper whose text path changes LF to CRLF."""
+
+    encoding = "utf-8"
+    errors = "strict"
+
+    def __init__(self, buffer: BinaryCapture | None = None) -> None:
+        self.buffer = BinaryCapture() if buffer is None else buffer
+        self.text_writes: list[str] = []
+
+    def write(self, value: str) -> int:
+        self.text_writes.append(value)
+        translated = value.replace("\n", "\r\n").encode("utf-8")
+        self.buffer.write(translated)
+        return len(value)
+
+    def flush(self) -> None:
+        self.buffer.flush()
+
+    def isatty(self) -> bool:
+        raise AssertionError("one-shot watch attempted default-stream TTY access")
+
+    def fileno(self) -> int:
+        raise AssertionError("one-shot watch attempted default-stream fileno access")
+
+
+class FailingTextStream(io.StringIO):
+    def __init__(self, failure: str) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def write(self, value: str) -> int:
+        if self.failure == "write":
+            raise OSError(f"text write failed {BLIND_LEAK_SENTINEL}")
+        return super().write(value)
+
+    def flush(self) -> None:
+        if self.failure == "flush":
+            raise OSError(f"text flush failed {BLIND_LEAK_SENTINEL}")
+        super().flush()
+
+
 def test_one_shot_watch_invokes_no_terminal_runtime_provider_tool_auth_or_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1502,6 +1762,155 @@ def invoke_cli(
     code = cli_main()
     captured = capsys.readouterr()
     return code, captured.out, captured.err
+
+
+def invoke_cli_with_default_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    *arguments: str,
+    stdout_buffer: BinaryCapture | None = None,
+    stderr_buffer: BinaryCapture | None = None,
+) -> tuple[int, NewlineTranslatingDefaultStream, NewlineTranslatingDefaultStream]:
+    stdout = NewlineTranslatingDefaultStream(stdout_buffer)
+    stderr = NewlineTranslatingDefaultStream(stderr_buffer)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr(sys, "argv", ["arity", *arguments])
+    code = cli_main()
+    return code, stdout, stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_code", "expected_stdout", "expected_stderr"),
+    [
+        (
+            ("watch", "--ascii", "--no-motion"),
+            0,
+            b"No persisted trials.\n",
+            b"",
+        ),
+        (
+            ("watch", ADVERSARIAL_IDENTITY, "--ascii", "--no-motion"),
+            3,
+            b"",
+            b"arity: trial_not_found\n",
+        ),
+    ],
+)
+def test_default_windows_like_streams_receive_exact_lf_ascii_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+    expected_code: int,
+    expected_stdout: bytes,
+    expected_stderr: bytes,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", "jsonl")
+
+    code, stdout, stderr = invoke_cli_with_default_streams(
+        monkeypatch,
+        *arguments,
+    )
+
+    assert code == expected_code
+    assert stdout.buffer.getvalue() == expected_stdout
+    assert stderr.buffer.getvalue() == expected_stderr
+    assert stdout.text_writes == []
+    assert stderr.text_writes == []
+    assert b"\r" not in expected_stdout + expected_stderr
+    emitted = stdout.buffer if expected_stdout else stderr.buffer
+    assert emitted.flush_calls >= 1
+    assert not (tmp_path / ".gorkbot").exists()
+
+
+def test_explicit_text_streams_bypass_newline_translating_process_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_catalog_source(monkeypatch, TrialCatalog(trials=()))
+    default_stdout = NewlineTranslatingDefaultStream()
+    default_stderr = NewlineTranslatingDefaultStream()
+    monkeypatch.setattr(sys, "stdout", default_stdout)
+    monkeypatch.setattr(sys, "stderr", default_stderr)
+
+    assert run_direct(watch_args(ascii=True, no_motion=True)) == (
+        0,
+        "No persisted trials.\n",
+        "",
+    )
+    assert default_stdout.buffer.getvalue() == b""
+    assert default_stderr.buffer.getvalue() == b""
+    assert default_stdout.text_writes == []
+    assert default_stderr.text_writes == []
+
+
+@pytest.mark.parametrize(
+    ("target", "failure"),
+    [
+        ("stdout", "write"),
+        ("stdout", "flush"),
+        ("stderr", "write"),
+        ("stderr", "flush"),
+    ],
+)
+def test_default_output_write_and_flush_failures_return_operational_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    failure: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", "jsonl")
+    stdout_buffer = BinaryCapture(
+        fail_write=target == "stdout" and failure == "write",
+        fail_flush=target == "stdout" and failure == "flush",
+    )
+    stderr_buffer = BinaryCapture(
+        fail_write=target == "stderr" and failure == "write",
+        fail_flush=target == "stderr" and failure == "flush",
+    )
+    arguments = (
+        ("watch", "--ascii", "--no-motion")
+        if target == "stdout"
+        else ("watch", ADVERSARIAL_IDENTITY, "--ascii", "--no-motion")
+    )
+
+    code, stdout, stderr = invoke_cli_with_default_streams(
+        monkeypatch,
+        *arguments,
+        stdout_buffer=stdout_buffer,
+        stderr_buffer=stderr_buffer,
+    )
+
+    assert code == 1
+    combined = stdout.buffer.getvalue() + stderr.buffer.getvalue()
+    assert b"Traceback" not in combined
+    assert BLIND_LEAK_SENTINEL.encode("ascii") not in combined
+    assert b"\x1b" not in combined
+    assert b"\r" not in combined
+    assert stdout.text_writes == []
+    assert stderr.text_writes == []
+    assert not (tmp_path / ".gorkbot").exists()
+
+
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_explicit_text_output_failures_also_return_operational_one(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    install_catalog_source(monkeypatch, TrialCatalog(trials=()))
+    stdout = FailingTextStream(failure)
+    stderr = io.StringIO()
+
+    code = run_watch_command(
+        watch_args(),
+        clock=lambda: READ_AT,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 1
+    assert "Traceback" not in stderr.getvalue()
+    assert BLIND_LEAK_SENTINEL not in stderr.getvalue()
 
 
 @pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
