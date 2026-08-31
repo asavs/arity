@@ -15,7 +15,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Optional, TextIO
 
-from .record_readers import RecordChanged, RecordCorruption, RecordReadError
+from .record_readers import (
+    RecordChanged,
+    RecordCorruption,
+    RecordLimitExceeded,
+    RecordReadError,
+)
 from .watch_terminal import TerminalCapabilities, render_watch_follow_frame
 from .watch_view_model import WatchProjector, WatchTrial, WatchViewModel
 
@@ -588,6 +593,8 @@ def _read_failure(error: RecordReadError) -> tuple[int, str]:
         return EXIT_CORRUPT, RecordCorruption.code
     if isinstance(error, RecordChanged):
         return EXIT_OPERATIONAL, RecordChanged.code
+    if isinstance(error, RecordLimitExceeded):
+        return EXIT_OPERATIONAL, RecordLimitExceeded.code
     return EXIT_OPERATIONAL, RecordReadError.code
 
 

@@ -13,8 +13,10 @@ from .inspection import TrialCatalog, inspect_trials
 from .record_readers import (
     RecordChanged,
     RecordCorruption,
+    RecordLimitExceeded,
     RecordNotFound,
     RecordReadError,
+    RecordReadLimits,
     StoreSpec,
     configured_store_spec,
     open_record_reader,
@@ -29,6 +31,13 @@ EXIT_NOT_FOUND = 3
 EXIT_PARTIAL = 4
 EXIT_CORRUPT = 5
 EXIT_INTERRUPT = 130
+
+# Follow mode reopens this reader every second. Keep each physical snapshot and
+# query bounded before the 256-row presentation cap is applied.
+WATCH_RECORD_READ_LIMITS = RecordReadLimits(
+    max_snapshot_bytes=64 * 1024 * 1024,
+    max_query_records=65_536,
+)
 
 Clock = Callable[[], float]
 ReaderOpener = Callable[[StoreSpec], AbstractContextManager[object]]
@@ -87,11 +96,15 @@ def _load_watch_model_state(
         raise TypeError("missing_store_is_changed must be a boolean")
 
     spec = store_spec if store_spec is not None else configured_store_spec()
-    open_reader = reader_opener if reader_opener is not None else open_record_reader
     inspect_catalog = inspector if inspector is not None else inspect_trials
     store_missing = False
     try:
-        with open_reader(spec) as reader:
+        reader_context = (
+            reader_opener(spec)
+            if reader_opener is not None
+            else open_record_reader(spec, limits=WATCH_RECORD_READ_LIMITS)
+        )
+        with reader_context as reader:
             catalog = inspect_catalog(reader)
     except RecordNotFound as error:
         if missing_store_is_changed:
@@ -132,6 +145,8 @@ def _typed_read_failure(error: RecordReadError) -> tuple[int, str]:
         return EXIT_CORRUPT, RecordCorruption.code
     if isinstance(error, RecordChanged):
         return EXIT_OPERATIONAL, RecordChanged.code
+    if isinstance(error, RecordLimitExceeded):
+        return EXIT_OPERATIONAL, RecordLimitExceeded.code
     return EXIT_OPERATIONAL, RecordReadError.code
 
 
