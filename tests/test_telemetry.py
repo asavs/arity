@@ -332,7 +332,7 @@ def test_request_usage_is_a_known_strict_replay_event(tmp_path, backend: str) ->
         ("request_ordinal", 0, "ordinal"),
         ("request_ordinal", True, "ordinal"),
         ("outcome", "maybe", "outcome"),
-        ("request_started_at", float("nan"), "finite"),
+        ("request_started_at", float("nan"), "finite|JSON compliant"),
     ],
 )
 def test_request_usage_replay_rejects_ambiguous_or_lossy_fields(

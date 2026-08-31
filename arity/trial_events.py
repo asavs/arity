@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from .evidence import EvidenceBundle, Evaluation, Resolution, _freeze_json, _thaw_json
 from .seams import RecordStore
+from .telemetry import UsageEvidence
 from .types import StoreRecord
 
 
@@ -25,6 +26,7 @@ TRIAL_EVENT_SCHEMA_VERSION = 1
 TRIAL_REPLAY_SCHEMA_VERSION = 1
 KNOWN_EVENT_TYPES = {
     "trial.started",
+    "request.usage_recorded",
     "arm.completed",
     "evidence.frozen",
     "review.recorded",
@@ -215,6 +217,38 @@ def _validate_known_event_payload(event_type: str, payload: Mapping[str, Any]) -
             raise TypeError("trial hidden test hashes must map strings to strings")
         return
 
+    if event_type == "request.usage_recorded":
+        expected = {
+            "phase",
+            "arm_id",
+            "actor_kind",
+            "actor_ref",
+            "request_ordinal",
+            "outcome",
+            "request_started_at",
+            "evidence",
+        }
+        if set(payload) != expected:
+            raise ValueError("request usage fields differ from the versioned contract")
+        for key, label in (
+            ("phase", "request usage phase"),
+            ("arm_id", "request usage arm id"),
+            ("actor_kind", "request usage actor kind"),
+            ("actor_ref", "request usage actor reference"),
+            ("outcome", "request usage outcome"),
+        ):
+            _payload_string(payload, key, label, required=True)
+        _payload_integer(
+            payload, "request_ordinal", "request usage ordinal", required=True
+        )
+        _payload_number(payload, "request_started_at", "request start time")
+        evidence = _payload_mapping(
+            payload, "evidence", "request usage evidence", required=True
+        )
+        assert evidence is not None
+        UsageEvidence.from_dict(evidence)
+        return
+
     if event_type == "arm.completed":
         _payload_string(payload, "phase", "completed arm phase")
         _payload_string(payload, "arm_id", "completed arm id", required=True)
@@ -402,6 +436,7 @@ class TrialReplay:
     resolutions: tuple[Resolution, ...]
     resolution_sequences: tuple[int, ...]
     delivery: Optional[Mapping[str, Any]]
+    request_usage: tuple[Mapping[str, Any], ...] = ()
     unhandled_events: tuple[TrialEvent, ...] = ()
 
     @property
@@ -611,6 +646,8 @@ def replay_trial(
     completions_by_arm: dict[tuple[str, str], Mapping[str, Any]] = {}
     frozen_phases: set[str] = set()
     completed_arms: list[Mapping[str, Any]] = []
+    request_ordinals: dict[tuple[str, str, str], set[int]] = {}
+    request_usage: list[Mapping[str, Any]] = []
     bundles: list[EvidenceBundle] = []
     bundle_by_hash: dict[str, EvidenceBundle] = {}
     reviews: list[Mapping[str, Any]] = []
@@ -624,7 +661,52 @@ def replay_trial(
     for event in ordered[1:]:
         payload = event.payload
         _validate_known_event_payload(event.event_type, payload)
-        if event.event_type == "arm.completed":
+        if event.event_type == "request.usage_recorded":
+            phase = str(payload["phase"])
+            if phase not in TRIAL_PHASES:
+                raise ValueError(f"unsupported request usage phase {phase!r}")
+            if phase in frozen_phases:
+                raise ValueError("request usage cannot be recorded after phase evidence was frozen")
+            arm_id = str(payload["arm_id"])
+            if arm_id not in declared_arm_ids:
+                raise ValueError("request usage arm was not declared when the trial started")
+            if (phase, arm_id) in completed_arm_keys:
+                raise ValueError("request usage cannot be recorded after its arm completed")
+            actor_kind = str(payload["actor_kind"])
+            if actor_kind != "candidate":
+                raise ValueError("request usage actor kind is unsupported")
+            actor_ref = str(payload["actor_ref"])
+            if actor_ref != arm_id:
+                raise ValueError("request usage actor reference must match its arm")
+            ordinal = payload["request_ordinal"]
+            if type(ordinal) is not int or ordinal < 1:
+                raise ValueError("request usage ordinal must be a positive integer")
+            ordinal_key = (phase, actor_kind, actor_ref)
+            seen_ordinals = request_ordinals.setdefault(ordinal_key, set())
+            if ordinal != len(seen_ordinals) + 1 or ordinal in seen_ordinals:
+                raise ValueError("request usage ordinal must be unique and contiguous per actor")
+            seen_ordinals.add(ordinal)
+            outcome = str(payload["outcome"])
+            if outcome not in {"completed", "failed"}:
+                raise ValueError("request usage outcome is unsupported")
+            started_at = payload["request_started_at"]
+            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+                raise TypeError("request start time must be a number")
+            if not math.isfinite(float(started_at)):
+                raise ValueError("request start time must be finite")
+            evidence = UsageEvidence.from_dict(payload["evidence"])
+            if outcome == "failed" and any(
+                measurement.value is not None
+                for measurement in (
+                    evidence.input_tokens,
+                    evidence.output_tokens,
+                    evidence.cache_read_tokens,
+                    evidence.cache_write_tokens,
+                )
+            ):
+                raise ValueError("failed request usage cannot claim token measurements")
+            request_usage.append(payload)
+        elif event.event_type == "arm.completed":
             phase = str(payload.get("phase", "trial"))
             if phase not in TRIAL_PHASES:
                 raise ValueError(f"unsupported trial phase {phase!r}")
@@ -834,5 +916,6 @@ def replay_trial(
         resolutions=tuple(resolutions),
         resolution_sequences=tuple(resolution_sequences),
         delivery=delivery,
+        request_usage=tuple(request_usage),
         unhandled_events=tuple(unhandled),
     )
