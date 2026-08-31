@@ -629,6 +629,7 @@ def replay_trial(
         raise ValueError("a trial replay requires exactly one trial.started event")
 
     started = ordered[0].payload
+    trial_started_at = ordered[0].timestamp
     _validate_known_event_payload("trial.started", started)
     declared_arms = started.get("arms") or ()
     if not isinstance(declared_arms, (list, tuple)):
@@ -679,6 +680,9 @@ def replay_trial(
     delivery: Optional[Mapping[str, Any]] = None
     unhandled: list[TrialEvent] = []
 
+    # Concurrent actors sample completion time before contending for the journal
+    # lock, so sequence order does not imply globally monotonic wall-clock time.
+    # Enforce only the causal bounds that each usage record can prove itself.
     for event in ordered[1:]:
         payload = event.payload
         _validate_known_event_payload(event.event_type, payload)
@@ -716,6 +720,16 @@ def replay_trial(
             if not math.isfinite(float(started_at)):
                 raise ValueError("request start time must be finite")
             evidence = UsageEvidence.from_dict(payload["evidence"])
+            if evidence.evidence_observed_at != event.timestamp:
+                raise ValueError(
+                    "usage evidence observed time must match its event timestamp"
+                )
+            if float(started_at) > evidence.evidence_observed_at:
+                raise ValueError(
+                    "request start time cannot be after evidence observation"
+                )
+            if float(started_at) < trial_started_at:
+                raise ValueError("request start time cannot predate the trial start")
             if outcome == "failed" and any(
                 measurement.value is not None
                 for measurement in (

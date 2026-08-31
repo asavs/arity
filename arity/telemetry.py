@@ -409,9 +409,12 @@ class JournaledModelProvider:
                     evidence_observed_at=observed_at,
                     cache_policy=self.context.cache_policy,
                 )
-                result = replace(result, usage_evidence=evidence)
             else:
-                evidence = result.usage_evidence
+                evidence = replace(
+                    result.usage_evidence,
+                    evidence_observed_at=observed_at,
+                )
+            result = replace(result, usage_evidence=evidence)
             outcome = "completed"
         elif isinstance(result, ModelFailed):
             evidence = UsageEvidence.unknown(
@@ -433,6 +436,10 @@ class JournaledModelProvider:
         outcome: str,
         evidence: UsageEvidence,
     ) -> None:
+        if started_at > observed_at:
+            raise ValueError("request start time cannot be after evidence observation")
+        if evidence.evidence_observed_at != observed_at:
+            raise ValueError("usage evidence observed time must match journal event time")
         payload = {
             "phase": self.context.phase,
             "arm_id": self.context.arm_id,
