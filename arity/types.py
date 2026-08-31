@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+if TYPE_CHECKING:
+    from .telemetry import UsageEvidence
 
 
 class Status(str, Enum):
@@ -39,6 +42,7 @@ class ModelCompleted:
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = "stop"
     seat_id: Optional[str] = None
+    usage_evidence: Optional["UsageEvidence"] = None
 
 
 @dataclass(frozen=True)
