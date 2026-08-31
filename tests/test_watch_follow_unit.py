@@ -10,7 +10,7 @@ import pytest
 
 from arity.record_readers import RecordChanged
 from arity.watch_cli import run_watch_command
-from arity.watch_follow import TerminalSession
+from arity.watch_follow import TerminalSession, TerminalUnavailable
 from arity.watch_terminal import TerminalCapabilities, render_watch_follow_frame
 from arity.watch_view_model import (
     WatchIssue,
@@ -292,6 +292,7 @@ def test_unchanged_fingerprint_redraw_has_no_update_cue() -> None:
     assert len(calls) == 2
     assert calls[0][1] is calls[1][1]
     assert len(terminal.frames) == 2
+    assert terminal.frames[0] == terminal.frames[1]
     assert all("journal update" not in frame for frame in terminal.frames)
 
 
@@ -442,6 +443,19 @@ class _Backend:
         return "q"
 
 
+class _FailingControlText(_TTYText):
+    def __init__(self, *failed_writes: int) -> None:
+        super().__init__()
+        self._failed_writes = set(failed_writes)
+        self._write_calls = 0
+
+    def write(self, value: str) -> int:
+        self._write_calls += 1
+        if self._write_calls in self._failed_writes:
+            raise RuntimeError("injected terminal write failure")
+        return super().write(value)
+
+
 def test_real_session_restores_backend_cursor_and_alt_screen_once() -> None:
     backend = _Backend()
     output = _TTYText()
@@ -455,10 +469,31 @@ def test_real_session_restores_backend_cursor_and_alt_screen_once() -> None:
 
     with session:
         session.draw("frame\n")
+        session.draw("frame\n")
     session.close()
 
     transport = output.getvalue()
     assert backend.events == ["enter", "restore"]
     assert transport.count("\x1b[?25h") == 1
     assert transport.count("\x1b[?1049l") == 1
+    assert transport.count("\x1b[H\x1b[2J") == 1
     assert transport.index("\x1b[?25h") < transport.index("\x1b[?1049l")
+
+
+def test_real_session_setup_failure_continues_every_registered_restore() -> None:
+    backend = _Backend()
+    output = _FailingControlText(2, 3)
+    session = TerminalSession(
+        _TTYText(),
+        output,
+        backend=backend,
+        width_getter=lambda: 40,
+        environ={"NO_COLOR": "1"},
+    )
+
+    with pytest.raises(TerminalUnavailable):
+        session.__enter__()
+    session.close()
+
+    assert backend.events == ["enter", "restore"]
+    assert "\x1b[?1049l" in output.getvalue()

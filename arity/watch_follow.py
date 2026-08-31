@@ -136,8 +136,10 @@ class _PosixTerminalBackend:
         self._entered = False
 
     def enter(self) -> None:
-        self._tty.setcbreak(self._fd, self._termios.TCSANOW)
+        # Register restoration before the mutating call.  Restoring the captured
+        # mode is safe even when the call failed before changing anything.
         self._entered = True
+        self._tty.setcbreak(self._fd, self._termios.TCSANOW)
 
     def restore(self) -> None:
         if not self._entered:
@@ -164,7 +166,7 @@ class _PosixTerminalBackend:
         encoded = first
         if first == b"\x1b":
             for _ in range(2):
-                continuation, _, _ = select.select((self._fd,), (), (), 0.001)
+                continuation, _, _ = select.select((self._fd,), (), (), 0.02)
                 if not continuation:
                     break
                 value = os.read(self._fd, 1)
@@ -178,8 +180,6 @@ class _WindowsTerminalBackend:  # pragma: no cover - exercised on Windows consol
     ENABLE_LINE_INPUT = 0x0002
     ENABLE_ECHO_INPUT = 0x0004
     ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-    WAIT_OBJECT_0 = 0x00000000
-    WAIT_TIMEOUT = 0x00000102
 
     def __init__(self, stdin: TextIO, stdout: TextIO) -> None:
         try:
@@ -200,9 +200,6 @@ class _WindowsTerminalBackend:  # pragma: no cover - exercised on Windows consol
         self._kernel32.GetConsoleMode.restype = wintypes.BOOL
         self._kernel32.SetConsoleMode.argtypes = (wintypes.HANDLE, wintypes.DWORD)
         self._kernel32.SetConsoleMode.restype = wintypes.BOOL
-        self._kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
-
         self._input_handle = self._handle_for(stdin)
         self._output_handle = self._handle_for(stdout)
         self._original_input_mode = self._get_mode(self._input_handle)
@@ -233,13 +230,13 @@ class _WindowsTerminalBackend:  # pragma: no cover - exercised on Windows consol
         input_mode = self._original_input_mode & ~(
             self.ENABLE_LINE_INPUT | self.ENABLE_ECHO_INPUT
         )
-        self._set_mode(self._input_handle, input_mode)
         self._input_changed = True
+        self._set_mode(self._input_handle, input_mode)
         output_mode = (
             self._original_output_mode | self.ENABLE_VIRTUAL_TERMINAL_PROCESSING
         )
-        self._set_mode(self._output_handle, output_mode)
         self._output_changed = True
+        self._set_mode(self._output_handle, output_mode)
 
     def restore(self) -> None:
         if self._output_changed:
@@ -256,12 +253,15 @@ class _WindowsTerminalBackend:  # pragma: no cover - exercised on Windows consol
                 pass
 
     def read_key(self, timeout: float) -> Optional[str]:
-        milliseconds = min(0xFFFFFFFE, max(0, math.ceil(timeout * 1000.0)))
-        status = self._kernel32.WaitForSingleObject(self._input_handle, milliseconds)
-        if status == self.WAIT_TIMEOUT:
-            return None
-        if status != self.WAIT_OBJECT_0:
-            raise OSError("Windows console input wait failed")
+        # A console handle is signaled by unread mouse/resize/key-up records too.
+        # Poll the CRT's character predicate against a bounded deadline so those
+        # records cannot create an immediate refresh/query loop or block getwch.
+        deadline = time.monotonic() + timeout
+        while not self._msvcrt.kbhit():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(0.01, remaining))
         character = self._msvcrt.getwch()
         if character in {"\x00", "\xe0"}:
             extended = self._msvcrt.getwch()
@@ -314,6 +314,7 @@ class TerminalSession:
         self._alt_screen = False
         self._cursor_hidden = False
         self._active = False
+        self._last_frame: str | None = None
 
     @property
     def capabilities(self) -> TerminalCapabilities:
@@ -335,8 +336,10 @@ class TerminalSession:
         )
 
     def _control(self, value: str, mutation: str) -> None:
-        _write_all(self._stdout, value, flush=False)
+        # An inverse control is harmless if the write failed before taking effect;
+        # registering first closes the interruption gap after bytes reach the TTY.
         setattr(self, mutation, True)
+        _write_all(self._stdout, value, flush=False)
         self._stdout.flush()
 
     def __enter__(self) -> "TerminalSession":
@@ -350,6 +353,7 @@ class TerminalSession:
             enter()
             self._control(_ENTER_ALT_SCREEN, "_alt_screen")
             self._control(_HIDE_CURSOR, "_cursor_hidden")
+            self._last_frame = None
             self._active = True
             return self
         except KeyboardInterrupt:
@@ -367,13 +371,13 @@ class TerminalSession:
             self._cursor_hidden = False
             try:
                 _write_all(self._stdout, _SHOW_CURSOR)
-            except (OSError, UnicodeError, ValueError):
+            except BaseException:
                 pass
         if self._alt_screen:
             self._alt_screen = False
             try:
                 _write_all(self._stdout, _LEAVE_ALT_SCREEN)
-            except (OSError, UnicodeError, ValueError):
+            except BaseException:
                 pass
         if self._backend_entered:
             self._backend_entered = False
@@ -392,8 +396,11 @@ class TerminalSession:
             raise OSError("terminal session is not active")
         if type(frame) is not str or not frame.endswith("\n"):
             raise ValueError("terminal frame must be a newline-terminated string")
+        if frame == self._last_frame:
+            return
         transport_frame = frame.replace("\n", "\r\n")
         _write_all(self._stdout, _HOME_AND_CLEAR + transport_frame)
+        self._last_frame = frame
 
     def read_key(self, timeout: float) -> Optional[str]:
         if not self._active:
@@ -524,19 +531,24 @@ class _SignalGuard:
         try:
             for candidate in candidates:
                 previous = signal.getsignal(candidate)
-                signal.signal(candidate, self._interrupt)
                 self._previous.append((candidate, previous))
+                signal.signal(candidate, self._interrupt)
         except (OSError, RuntimeError, ValueError):
             self.close()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def close(self) -> None:
         while self._previous:
-            candidate, previous = self._previous.pop()
+            candidate, previous = self._previous[-1]
             try:
                 signal.signal(candidate, previous)
-            except (OSError, RuntimeError, ValueError):
+            except BaseException:
                 pass
+            finally:
+                self._previous.pop()
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
         self.close()
@@ -682,14 +694,19 @@ class FollowController:
         requested_missing = model.requested_trial_missing
         fingerprint = model.fingerprint
         changed = self._fingerprint is not None and fingerprint != self._fingerprint
-        self._model = model
+        if self._model is None or changed or force:
+            self._model = model
+        else:
+            # Preserve only the displayed read clock on an unchanged journal.
+            # Selection/request state is presentation state and may still change.
+            self._model = replace(model, read_at=self._model.read_at)
         self._fingerprint = fingerprint
         self._failure_exit = None
         self._error_code = "trial_not_found" if requested_missing else None
 
         if changed:
             self._pulse_phase = 0
-        else:
+        elif self._pulse_phase is not None and self._capabilities().motion:
             self._pulse_phase = None
 
         # Each query-only snapshot is a frame boundary.  The fingerprint controls
