@@ -32,12 +32,8 @@ from typing import Any, Optional
 # -----------------------------------------------------------------------------
 
 # Google Antigravity / Cloud Code Assist (Gemini 3 Pro/Flash & Claude via Google Cloud)
-GOOGLE_ANTIGRAVITY_CLIENT_ID = (
-    os.environ.get("ARITY_GOOGLE_ANTIGRAVITY_CLIENT_ID", "")
-)
-GOOGLE_ANTIGRAVITY_CLIENT_SECRET = (
-    os.environ.get("ARITY_GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "")
-)
+GOOGLE_ANTIGRAVITY_CLIENT_ID_ENV = "ARITY_GOOGLE_ANTIGRAVITY_CLIENT_ID"
+GOOGLE_ANTIGRAVITY_CLIENT_SECRET_ENV = "ARITY_GOOGLE_ANTIGRAVITY_CLIENT_SECRET"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
@@ -52,17 +48,61 @@ GOOGLE_ANTIGRAVITY_SCOPES = [
 ]
 
 # OpenAI Codex / ChatGPT Plus/Team Subscription
-OPENAI_CLIENT_ID = os.environ.get("ARITY_OPENAI_CLIENT_ID", "")
+OPENAI_CLIENT_ID_ENV = "ARITY_OPENAI_CLIENT_ID"
 OPENAI_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OPENAI_DEVICE_AUTH_URL = "https://auth.openai.com/api/v1/oauth/device/code"
 OPENAI_SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
 # xAI SuperGrok / Grok Subscription
-XAI_CLIENT_ID = os.environ.get("ARITY_XAI_CLIENT_ID", "")
+XAI_CLIENT_ID_ENV = "ARITY_XAI_CLIENT_ID"
 XAI_DEVICE_AUTH_URL = "https://auth.x.ai/oauth2/device/code"
 XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 XAI_SCOPES = "openid profile email offline_access grok-cli:access api:access"
+
+
+class AuthConfigurationError(RuntimeError):
+    """Raised before OAuth side effects when required client configuration is absent."""
+
+
+def _configured_value(explicit: Optional[str], env_name: str) -> str:
+    """Resolve an explicit credential before consulting the current process environment."""
+    value = explicit if explicit is not None else os.environ.get(env_name, "")
+    return value.strip()
+
+
+def _require_client_id(provider: str, env_name: str, explicit: Optional[str] = None) -> str:
+    client_id = _configured_value(explicit, env_name)
+    if client_id:
+        return client_id
+    raise AuthConfigurationError(
+        f"{provider} OAuth requires {env_name}. "
+        "Set it explicitly or import credentials with `arity auth import`."
+    )
+
+
+def _require_google_oauth_client(
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
+) -> tuple[str, str]:
+    """Resolve Google client configuration without retaining a bundled client identity."""
+    resolved_id = _configured_value(client_id, GOOGLE_ANTIGRAVITY_CLIENT_ID_ENV)
+    resolved_secret = _configured_value(client_secret, GOOGLE_ANTIGRAVITY_CLIENT_SECRET_ENV)
+    missing = [
+        name
+        for name, value in (
+            (GOOGLE_ANTIGRAVITY_CLIENT_ID_ENV, resolved_id),
+            (GOOGLE_ANTIGRAVITY_CLIENT_SECRET_ENV, resolved_secret),
+        )
+        if not value
+    ]
+    if missing:
+        raise AuthConfigurationError(
+            "Google Antigravity OAuth requires "
+            + " and ".join(missing)
+            + ". Set them explicitly or import credentials with `arity auth import`."
+        )
+    return resolved_id, resolved_secret
 
 
 # -----------------------------------------------------------------------------
@@ -223,17 +263,25 @@ class TokenStore:
                 refreshed = refresh_google_antigravity_token(
                     refresh_token=refresh_token,
                     project_id=cred.get("projectId") or cred.get("project_id", ""),
+                    client_id=cred.get("clientId") or cred.get("client_id"),
+                    client_secret=cred.get("clientSecret") or cred.get("client_secret"),
                 )
                 merged = {**cred, **refreshed}
                 self.save_credential(key, merged)
                 return merged
             elif provider == "openai-codex":
-                refreshed = refresh_openai_token(refresh_token=refresh_token)
+                refreshed = refresh_openai_token(
+                    refresh_token=refresh_token,
+                    client_id=cred.get("clientId") or cred.get("client_id"),
+                )
                 merged = {**cred, **refreshed}
                 self.save_credential(key, merged)
                 return merged
             elif provider == "xai-oauth":
-                refreshed = refresh_xai_token(refresh_token=refresh_token)
+                refreshed = refresh_xai_token(
+                    refresh_token=refresh_token,
+                    client_id=cred.get("clientId") or cred.get("client_id"),
+                )
                 merged = {**cred, **refreshed}
                 self.save_credential(key, merged)
                 return merged
@@ -248,11 +296,21 @@ class TokenStore:
 # 2. Token Refreshing Implementations
 # -----------------------------------------------------------------------------
 
-def refresh_google_antigravity_token(refresh_token: str, project_id: str) -> dict[str, Any]:
+def refresh_google_antigravity_token(
+    refresh_token: str,
+    project_id: str,
+    *,
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
+) -> dict[str, Any]:
     """Refresh Google OAuth access token using Antigravity client credentials."""
+    oauth_client_id, oauth_client_secret = _require_google_oauth_client(
+        client_id,
+        client_secret,
+    )
     payload = {
-        "client_id": GOOGLE_ANTIGRAVITY_CLIENT_ID,
-        "client_secret": GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+        "client_id": oauth_client_id,
+        "client_secret": oauth_client_secret,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
@@ -275,10 +333,15 @@ def refresh_google_antigravity_token(refresh_token: str, project_id: str) -> dic
     }
 
 
-def refresh_openai_token(refresh_token: str) -> dict[str, Any]:
+def refresh_openai_token(
+    refresh_token: str,
+    *,
+    client_id: Optional[str] = None,
+) -> dict[str, Any]:
     """Refresh OpenAI OAuth access token."""
+    oauth_client_id = _require_client_id("OpenAI Codex", OPENAI_CLIENT_ID_ENV, client_id)
     payload = {
-        "client_id": OPENAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
@@ -300,10 +363,15 @@ def refresh_openai_token(refresh_token: str) -> dict[str, Any]:
     }
 
 
-def refresh_xai_token(refresh_token: str) -> dict[str, Any]:
+def refresh_xai_token(
+    refresh_token: str,
+    *,
+    client_id: Optional[str] = None,
+) -> dict[str, Any]:
     """Refresh xAI OAuth access token."""
+    oauth_client_id = _require_client_id("xAI Grok", XAI_CLIENT_ID_ENV, client_id)
     payload = {
-        "client_id": XAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
@@ -341,14 +409,21 @@ def login_google_antigravity(
     port: int = GOOGLE_ANTIGRAVITY_CALLBACK_PORT,
     open_browser: bool = True,
     timeout: float = 120.0,
+    *,
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute native PKCE loopback authentication with Google Antigravity."""
+    oauth_client_id, oauth_client_secret = _require_google_oauth_client(
+        client_id,
+        client_secret,
+    )
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(32)
     redirect_uri = f"http://localhost:{port}/oauth-callback"
 
     auth_params = {
-        "client_id": GOOGLE_ANTIGRAVITY_CLIENT_ID,
+        "client_id": oauth_client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": " ".join(GOOGLE_ANTIGRAVITY_SCOPES),
@@ -427,8 +502,8 @@ def login_google_antigravity(
     # Exchange authorization code for tokens
     print("\033[1;33m[Google Antigravity Auth]\033[0m Exchanging authorization code for tokens...")
     token_params = {
-        "client_id": GOOGLE_ANTIGRAVITY_CLIENT_ID,
-        "client_secret": GOOGLE_ANTIGRAVITY_CLIENT_SECRET,
+        "client_id": oauth_client_id,
+        "client_secret": oauth_client_secret,
         "code": auth_code,
         "code_verifier": verifier,
         "grant_type": "authorization_code",
@@ -565,10 +640,16 @@ def fetch_antigravity_quota(access_token: str, project_id: str) -> dict[str, Any
 # 4. xAI Grok Native Login Flow (RFC 8628 Device Authorization)
 # -----------------------------------------------------------------------------
 
-def login_xai_grok(open_browser: bool = True, timeout: float = 120.0) -> dict[str, Any]:
+def login_xai_grok(
+    open_browser: bool = True,
+    timeout: float = 120.0,
+    *,
+    client_id: Optional[str] = None,
+) -> dict[str, Any]:
     """Execute RFC 8628 Device Authorization flow for xAI SuperGrok."""
+    oauth_client_id = _require_client_id("xAI Grok", XAI_CLIENT_ID_ENV, client_id)
     payload = {
-        "client_id": XAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "scope": XAI_SCOPES,
     }
     data = urllib.parse.urlencode(payload).encode("utf-8")
@@ -598,7 +679,7 @@ def login_xai_grok(open_browser: bool = True, timeout: float = 120.0) -> dict[st
 
     start_time = time.time()
     poll_payload = {
-        "client_id": XAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "device_code": device_code,
         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
     }
@@ -658,14 +739,17 @@ def login_openai_codex(
     port: int = 14555,
     open_browser: bool = True,
     timeout: float = 120.0,
+    *,
+    client_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute native PKCE loopback authentication with OpenAI Codex."""
+    oauth_client_id = _require_client_id("OpenAI Codex", OPENAI_CLIENT_ID_ENV, client_id)
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(32)
     redirect_uri = f"http://localhost:{port}/callback"
 
     auth_params = {
-        "client_id": OPENAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": OPENAI_SCOPES,
@@ -739,7 +823,7 @@ def login_openai_codex(
 
     print("\033[1;33m[OpenAI Codex Auth]\033[0m Exchanging code for tokens...")
     token_params = {
-        "client_id": OPENAI_CLIENT_ID,
+        "client_id": oauth_client_id,
         "code": auth_code,
         "code_verifier": verifier,
         "grant_type": "authorization_code",
@@ -789,7 +873,7 @@ def login_openai_codex(
 # 6. Anthropic Claude Native Login Flow (PKCE Loopback)
 # -----------------------------------------------------------------------------
 
-ANTHROPIC_CLIENT_ID = os.environ.get("ARITY_ANTHROPIC_CLIENT_ID", "")
+ANTHROPIC_CLIENT_ID_ENV = "ARITY_ANTHROPIC_CLIENT_ID"
 ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
 ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 ANTHROPIC_CALLBACK_PORT = 54545
@@ -800,14 +884,21 @@ def login_anthropic(
     port: int = ANTHROPIC_CALLBACK_PORT,
     open_browser: bool = True,
     timeout: float = 120.0,
+    *,
+    client_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute native PKCE loopback authentication with Anthropic Claude."""
+    oauth_client_id = _require_client_id(
+        "Anthropic Claude",
+        ANTHROPIC_CLIENT_ID_ENV,
+        client_id,
+    )
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(32)
     redirect_uri = f"http://localhost:{port}/callback"
 
     auth_params = {
-        "client_id": ANROPIC_CLIENT_ID if "ANROPIC_CLIENT_ID" in locals() else ANTHROPIC_CLIENT_ID,
+        "client_id": oauth_client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": ANTHROPIC_SCOPES,
@@ -881,7 +972,7 @@ def login_anthropic(
 
     print("\033[1;33m[Anthropic Claude Auth]\033[0m Exchanging code for tokens...")
     token_payload = {
-        "client_id": ANTHROPIC_CLIENT_ID,
+        "client_id": oauth_client_id,
         "code": auth_code,
         "code_verifier": verifier,
         "grant_type": "authorization_code",
