@@ -189,6 +189,10 @@ class TrialJournal:
             self._next_sequence = max((event.sequence for event in self._events), default=0) + 1
             return tuple(sorted(self._events, key=lambda event: event.sequence))
 
+    def serialized(self) -> threading.RLock:
+        """Return the shared in-process lock for one atomic orchestration operation."""
+        return self._lock
+
     def append(
         self,
         event_type: str,

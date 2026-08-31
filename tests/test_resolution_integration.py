@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -194,12 +196,29 @@ def test_evaluator_over_frozen_evidence_controls_delivery_and_can_be_replaced(tm
     report.resolved_candidate.spec.name = "mutated live name"
     report.resolved_candidate.signature = "mutated-live-signature"
     stale_journal = TrialJournal(store, report.task.id)
-    delivery = deliver(report, out_dir=tmp_path / "delivery")
+    delivery_barrier = threading.Barrier(2)
+    concurrent_reports = (report, replace(report, journal=stale_journal))
+    concurrent_roots = (tmp_path / "delivery-a", tmp_path / "delivery-b")
+
+    def attempt_delivery(index: int):
+        delivery_barrier.wait()
+        try:
+            return deliver(concurrent_reports[index], out_dir=concurrent_roots[index])
+        except RuntimeError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(attempt_delivery, range(2)))
+    delivered = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
+    rejected = [outcome for outcome in outcomes if isinstance(outcome, RuntimeError)]
+    assert len(delivered) == len(rejected) == 1
+    delivery = delivered[0]
+    delivery_root = next(root for root in concurrent_roots if root.exists())
     assert delivery.delivered
     assert delivery.winner_name == "treatment"
     assert delivery.resolution_source == "judge_consensus"
     assert delivery.signature == approved_evidence.candidate(report.resolution.candidate_id).signature
-    assert (tmp_path / "delivery" / "artifact.txt").read_text(encoding="utf-8") == "treatment\n"
+    assert (delivery_root / "artifact.txt").read_text(encoding="utf-8") == "treatment\n"
     report.resolved_candidate.spec.name = live_name
     report.resolved_candidate.signature = live_signature
     event_count = len(report.journal.events)
