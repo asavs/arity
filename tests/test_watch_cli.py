@@ -1166,6 +1166,32 @@ def test_full_catalog_integrity_survives_the_256_row_display_cap(
 
 
 @pytest.mark.parametrize(
+    ("scenario", "expected_code"),
+    [
+        ("offscreen_partial", 4),
+        ("offscreen_corrupt", 5),
+    ],
+)
+def test_selected_offscreen_failure_keeps_aggregate_exit_and_bounded_label(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    expected_code: int,
+) -> None:
+    catalog, offscreen_id = capped_catalog_scenario(scenario)
+    install_catalog_source(monkeypatch, catalog)
+
+    code, stdout, stderr = run_direct(watch_args(offscreen_id))
+
+    assert code == expected_code
+    assert stderr == ""
+    assert "selected: omitted trial | details unavailable\n" in stdout
+    assert "| partial |" not in stdout
+    assert "| corrupt |" not in stdout
+    assert "257" not in stdout
+    assert_blind_output(stdout, offscreen_id)
+
+
+@pytest.mark.parametrize(
     ("catalog", "expected_code"),
     [
         (TrialCatalog(trials=(partial_inspection("raw-partial"),)), 4),
