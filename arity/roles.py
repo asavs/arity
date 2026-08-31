@@ -224,12 +224,12 @@ class RoleRegistry:
     def _definition_dirs(self, kind: str) -> list[Path]:
         return [
             Path(__file__).parent / "definitions" / kind,
-            Path(f".gorkbot/{kind}"),
-            Path.home() / ".gorkbot" / kind,
+            Path(f".arity/{kind}"),
+            Path.home() / ".arity" / kind,
         ]
 
     def _discover_from_definitions(self) -> None:
-        """Discover packaged definitions plus active ``.gorkbot`` overrides."""
+        """Discover packaged definitions plus active ``.arity`` overrides."""
         for rdir in self._definition_dirs("roles"):
             if not rdir.exists():
                 continue

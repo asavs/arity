@@ -388,7 +388,7 @@ def handle_auth_command(args: argparse.Namespace) -> int:
     elif action == "import":
         print("\n\033[1;36m[Arity Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
         imported = store.import_all()
-        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into Arity state file ~/.gorkbot/auth.json:")
+        print(f"\033[1;32m[Arity Auth]\033[0m Imported {len(imported)} credentials into Arity state file ~/.arity/auth.json:")
         for p in imported:
             print(f"  - {p}")
         print()
@@ -467,7 +467,7 @@ def handle_run_command(args: argparse.Namespace) -> None:
     from .race import render_report, run_front_door
     judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
     # A background/piped run must never block on the secretary's question.
-    noninteractive = os.environ.get("ARITY_NONINTERACTIVE", os.environ.get("GORKBOT_NONINTERACTIVE")) == "1"
+    noninteractive = os.environ.get("ARITY_NONINTERACTIVE") == "1"
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and not noninteractive
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
@@ -622,7 +622,7 @@ def main() -> int:
         "--arity", "-a", "--candidates", "-n", dest="candidates", type=_positive_arity_arg, default=None,
         help=(
             "Positive maximum candidate count; may resolve fewer unique seats "
-            "(precedence: this flag, ARITY, compatibility GORKBOT_CONCURRENCY, then 3)"
+            "(precedence: this flag, ARITY, then 3)"
         ),
     )
     run_parser.add_argument(

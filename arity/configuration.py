@@ -8,12 +8,12 @@ from pathlib import Path
 
 
 def get_config_value(key: str) -> str | None:
-    """Resolve an environment or active ``.gorkbot/config.json`` setting."""
+    """Resolve an environment or active ``.arity/config.json`` setting."""
 
     value = os.environ.get(key)
     if value:
         return value
-    for path in (Path(".gorkbot/config.json"), Path.home() / ".gorkbot" / "config.json"):
+    for path in (Path(".arity/config.json"), Path.home() / ".arity" / "config.json"):
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))

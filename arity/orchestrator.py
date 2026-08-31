@@ -106,7 +106,7 @@ class ArityOrchestrator:
         curr_time = now if now is not None else time.time()
         self._last_turn_time = curr_time
 
-        # API argument > ARITY > legacy GORKBOT_CONCURRENCY > unary chat.
+        # API argument > ARITY > unary chat.
         effective_arity = resolve_arity(candidates_per_task, default=1)
 
         # 1. Post to red phone public address (Axiom 10)

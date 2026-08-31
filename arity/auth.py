@@ -121,7 +121,7 @@ class TokenStore:
     """
 
     def __init__(self, auth_path: Optional[Path] = None):
-        self.auth_path = auth_path or (Path.home() / ".gorkbot" / "auth.json")
+        self.auth_path = auth_path or (Path.home() / ".arity" / "auth.json")
 
     def _ensure_dir(self) -> None:
         self.auth_path.parent.mkdir(parents=True, exist_ok=True)

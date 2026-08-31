@@ -67,7 +67,7 @@ class RecordChanged(RecordReadError):
 
 @dataclass(frozen=True)
 class StoreSpec:
-    """The configured built-in backend and its active compatibility path."""
+    """The configured built-in backend and its active Arity path."""
 
     backend: RecordBackend
     path: Path
@@ -80,16 +80,12 @@ class StoreSpec:
 
 def configured_store_spec() -> StoreSpec:
     """Resolve the same backend and path used by ``default_record_store``."""
-    configured = (
-        get_config_value("ARITY_STORE")
-        or get_config_value("GORKBOT_STORE")
-        or "jsonl"
-    )
+    configured = get_config_value("ARITY_STORE") or "jsonl"
     if configured.lower() == "sqlite":
-        return StoreSpec("sqlite", Path(".gorkbot/records.db"))
-    # Preserve the writable store's historical behavior: only ``sqlite`` opts
-    # away from JSONL, including for an unrecognized compatibility value.
-    return StoreSpec("jsonl", Path(".gorkbot/records"))
+        return StoreSpec("sqlite", Path(".arity/records.db"))
+    # Only ``sqlite`` opts away from JSONL; unrecognized values keep the safe
+    # default rather than silently selecting another writable backend.
+    return StoreSpec("jsonl", Path(".arity/records"))
 
 
 def _validate_kind(kind: str) -> str:
