@@ -81,6 +81,27 @@ These commands are read-only: they do not run agents, consult providers, repair 
 
 Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `GORKBOT_STORE` compatibility fallback and `.gorkbot/` paths.
 
+### Authenticate provider harnesses
+
+Prefer credentials managed by an official installed harness when one is available. Arity can
+discover supported local sessions with `arity auth import` and report what it found with
+`arity auth status`.
+
+The direct OAuth adapters are experimental and are not endorsed by their providers. Arity does
+not bundle another application's OAuth identity. Native login therefore requires caller-supplied
+configuration at invocation time:
+
+- Google Antigravity: `ARITY_GOOGLE_ANTIGRAVITY_CLIENT_ID` and
+  `ARITY_GOOGLE_ANTIGRAVITY_CLIENT_SECRET`.
+- OpenAI Codex: `ARITY_OPENAI_CLIENT_ID`.
+- xAI Grok: `ARITY_XAI_CLIENT_ID`.
+- Anthropic Claude: `ARITY_ANTHROPIC_CLIENT_ID`.
+
+A successful native login stores the resolved client configuration with the resulting tokens so
+later refreshes can reuse it. That makes `~/.gorkbot/auth.json` especially sensitive: it is
+plaintext, owner-only (`0600`) on POSIX when Arity writes it, and protected only by the destination
+directory's ACLs on Windows. See [SECURITY.md](SECURITY.md) before using these adapters.
+
 ### Python API (`gorkbot` namespace)
 ```python
 from gorkbot import Runtime, LocalToolRunner, OpenAIModelProvider
