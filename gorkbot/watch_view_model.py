@@ -221,8 +221,10 @@ class WatchViewModel:
     read_at: float
     trials: tuple[WatchTrial, ...]
     more_trials_omitted: bool
+    catalog_integrity: WatchIntegrity
     catalog_issues: tuple[WatchIssue, ...] = ()
     selected_trial_number: Optional[int] = None
+    selected_trial_omitted: bool = False
     requested_trial_missing: bool = False
 
     def __post_init__(self) -> None:
@@ -236,6 +238,12 @@ class WatchViewModel:
             raise TypeError("trials must contain only WatchTrial values")
         if type(self.more_trials_omitted) is not bool:
             raise TypeError("more_trials_omitted must be a boolean")
+        if type(self.catalog_integrity) is not str or self.catalog_integrity not in {
+            "valid",
+            "partial",
+            "corrupt",
+        }:
+            raise ValueError("unsupported catalog integrity")
         if type(self.catalog_issues) is not tuple or any(
             type(issue) is not WatchIssue for issue in self.catalog_issues
         ):
@@ -248,15 +256,40 @@ class WatchViewModel:
             or self.selected_trial_number < 1
         ):
             raise ValueError("selected_trial_number must be positive or None")
+        if type(self.selected_trial_omitted) is not bool:
+            raise TypeError("selected_trial_omitted must be a boolean")
         if type(self.requested_trial_missing) is not bool:
             raise TypeError("requested_trial_missing must be a boolean")
-        if self.requested_trial_missing and self.selected_trial_number is not None:
+        if self.requested_trial_missing and (
+            self.selected_trial_number is not None or self.selected_trial_omitted
+        ):
             raise ValueError("a missing requested trial cannot be selected")
+        if self.selected_trial_omitted and (
+            self.selected_trial_number is not None or not self.more_trials_omitted
+        ):
+            raise ValueError("an omitted selection requires only omitted trials")
         selected = tuple(trial for trial in self.trials if trial.selected)
         if len(selected) > 1:
             raise ValueError("at most one visible trial may be selected")
         if selected and selected[0].trial_number != self.selected_trial_number:
             raise ValueError("visible selection must match selected_trial_number")
+        if not selected and self.selected_trial_number is not None:
+            raise ValueError("selected_trial_number requires a visible selection")
+        if selected and self.selected_trial_omitted:
+            raise ValueError("a visible selection cannot also be omitted")
+
+        visible_integrity: WatchIntegrity = "valid"
+        if self.catalog_issues or any(
+            trial.integrity == "corrupt" for trial in self.trials
+        ):
+            visible_integrity = "corrupt"
+        elif any(trial.integrity == "partial" for trial in self.trials):
+            visible_integrity = "partial"
+        rank = {"valid": 0, "partial": 1, "corrupt": 2}
+        if rank[self.catalog_integrity] < rank[visible_integrity]:
+            raise ValueError("catalog integrity cannot understate visible integrity")
+        if not self.more_trials_omitted and self.catalog_integrity != visible_integrity:
+            raise ValueError("catalog integrity must match a complete visible catalog")
 
     @property
     def fingerprint(self) -> tuple[object, ...]:
@@ -627,6 +660,21 @@ def _collapse_duplicate_trials(
     return tuple(by_id[trial_id] for trial_id in order)
 
 
+def _catalog_integrity(
+    sources: Iterable[_TrialSource],
+    catalog_issues: tuple[WatchIssue, ...],
+) -> WatchIntegrity:
+    if catalog_issues:
+        return "corrupt"
+    integrity: WatchIntegrity = "valid"
+    for source in sources:
+        if source.integrity == "corrupt":
+            return "corrupt"
+        if source.integrity == "partial":
+            integrity = "partial"
+    return integrity
+
+
 def build_watch_view_model(
     catalog: TrialCatalog,
     *,
@@ -662,6 +710,8 @@ def build_watch_view_model(
     )
     registry.assign(source.trial_id for source in projected)
     visible = projected[:MAX_WATCH_TRIALS]
+    safe_catalog_issues = _catalog_issues(catalog.issues)
+    catalog_integrity = _catalog_integrity(projected, safe_catalog_issues)
 
     rows = tuple(
         WatchTrial(
@@ -678,19 +728,27 @@ def build_watch_view_model(
         (source for source in projected if source.trial_id == selected_trial_id),
         None,
     )
+    visible_selected_source = next(
+        (source for source in visible if source.trial_id == selected_trial_id),
+        None,
+    )
     requested_missing = selected_trial_id is not None and selected_source is None
     selected_number = (
         None
-        if selected_source is None
-        else registry.number_for(selected_source.trial_id)
+        if visible_selected_source is None
+        else registry.number_for(visible_selected_source.trial_id)
     )
     return WatchViewModel(
         backend=backend,
         read_at=float(read_at),
         trials=rows,
         more_trials_omitted=len(projected) > MAX_WATCH_TRIALS,
-        catalog_issues=_catalog_issues(catalog.issues),
+        catalog_integrity=catalog_integrity,
+        catalog_issues=safe_catalog_issues,
         selected_trial_number=selected_number,
+        selected_trial_omitted=(
+            selected_source is not None and visible_selected_source is None
+        ),
         requested_trial_missing=requested_missing,
     )
 
@@ -711,6 +769,7 @@ def watch_fingerprint(model: WatchViewModel) -> tuple[object, ...]:
     )
     return (
         model.backend,
+        model.catalog_integrity,
         model.more_trials_omitted,
         tuple(issue.code for issue in model.catalog_issues),
         trials,
