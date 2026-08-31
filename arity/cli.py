@@ -657,6 +657,16 @@ def main() -> int:
     logout_cmd.add_argument("provider", type=str, help="Provider to remove")
 
     args = parser.parse_args()
+    if args.command is None:
+        args = argparse.Namespace(
+            command="watch",
+            trial_id=None,
+            ascii=False,
+            no_motion=False,
+            follow=True,
+            cache_policy="conservative",
+            lobby=True,
+        )
 
     try:
         if args.command == "run":
