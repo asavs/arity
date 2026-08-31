@@ -78,9 +78,9 @@ def watch_exit_code(model: WatchViewModel) -> int:
         raise TypeError("model must be an exact WatchViewModel")
     if model.requested_trial_missing:
         return EXIT_NOT_FOUND
-    if model.catalog_issues or any(trial.integrity == "corrupt" for trial in model.trials):
+    if model.catalog_integrity == "corrupt":
         return EXIT_CORRUPT
-    if any(trial.integrity == "partial" for trial in model.trials):
+    if model.catalog_integrity == "partial":
         return EXIT_PARTIAL
     return EXIT_OK
 

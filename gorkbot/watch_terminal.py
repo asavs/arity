@@ -128,11 +128,11 @@ def render_watch_snapshot(model: WatchViewModel) -> str:
     for issue in model.catalog_issues:
         lines.extend(_issue_lines("  ", issue))
 
-    if model.selected_trial_number is not None:
+    if model.selected_trial_omitted:
+        lines.append("selected: omitted trial | details unavailable")
+    elif model.selected_trial_number is not None:
         if selected_trial is None:
-            lines.append(
-                f"selected: Trial {model.selected_trial_number} | details unavailable"
-            )
+            raise RuntimeError("visible selection is missing its trial row")
         else:
             lines.extend(_selected_lines(selected_trial))
 
