@@ -263,6 +263,60 @@ def test_journaled_provider_records_safe_failure_without_error_or_identity_text(
     )
 
 
+def test_journaled_provider_records_an_unsupported_result_before_rejecting_it() -> None:
+    timeline: list[str] = []
+    marker = "PRIVATE_UNSUPPORTED_PROVIDER_RESULT"
+    journal = _Journal(timeline)
+    wrapped = JournaledModelProvider(
+        _Provider({"private": marker}, timeline),  # type: ignore[arg-type]
+        _context(journal),
+        clock=iter((1.0, 2.0)).__next__,
+    )
+
+    with pytest.raises(TypeError, match="unsupported result"):
+        wrapped.call(CallModel(messages=[]))
+
+    assert timeline == ["provider", "journal"]
+    assert len(journal.calls) == 1
+    payload = journal.calls[0][1]
+    assert payload["outcome"] == "failed"
+    assert marker not in json.dumps(payload)
+    assert all(
+        measurement["value"] is None
+        for measurement in payload["evidence"]["measurements"].values()
+    )
+
+
+def test_journaled_provider_records_invalid_completed_usage_before_rejecting_it() -> None:
+    timeline: list[str] = []
+    marker = "PRIVATE_INVALID_USAGE"
+    journal = _Journal(timeline)
+    wrapped = JournaledModelProvider(
+        _Provider(
+            ModelCompleted(
+                content=marker,
+                usage={"prompt_tokens": True, "private": marker},
+            ),
+            timeline,
+        ),
+        _context(journal),
+        clock=iter((1.0, 2.0)).__next__,
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        wrapped.call(CallModel(messages=[]))
+
+    assert timeline == ["provider", "journal"]
+    assert len(journal.calls) == 1
+    payload = journal.calls[0][1]
+    assert payload["outcome"] == "failed"
+    assert marker not in json.dumps(payload)
+    assert all(
+        measurement["value"] is None
+        for measurement in payload["evidence"]["measurements"].values()
+    )
+
+
 def test_journal_failure_is_fail_closed_instead_of_publishing_unrecorded_usage() -> None:
     timeline: list[str] = []
     wrapped = JournaledModelProvider(
