@@ -36,7 +36,7 @@ class RoleRegistry:
             },
             deny={
                 "tools": ["rm_rf", "eval"],
-                "paths": ["/private/keys", "/Users/asa/.ssh"],
+                "paths": ["/private/keys", "/Users/example/.ssh"],
                 "names": [],
             },
             aptitude_wanted=["conversation", "synthesis", "briefing"],
@@ -53,7 +53,7 @@ class RoleRegistry:
             },
             deny={
                 "channels": ["dm_asa"],
-                "paths": ["/Users/asa/secret", "/root", "/private"],
+                "paths": ["/Users/example/secret", "/root", "/private"],
                 "names": ["AsaPrivateBiograph"],
                 "hosts": ["external-payment.com"],
             },

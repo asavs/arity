@@ -1,6 +1,6 @@
 # Self-report — agy2
 
-Command: `agy --conversation 70d4f56f-f831-40ef-b6ac-2b8e648755f8 --model gemini-3.7-flash --effort high --output-format json --print-timeout 5m --print "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\gorkbot\impl\agy2)
+Command: `agy --conversation REDACTED-CONVERSATION-ID --model gemini-3.7-flash --effort high --output-format json --print-timeout 5m --print "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\agy2)
 
 I was trying to build the v0 multi-kernel gorkbot core in pure Python 3.13 standard library under 1,500 lines, implementing the five spine methods (`post`, `cast`, `spawn`, `die`, `assemble`) across real OpenAI-compatible seats with denial-enforcing roles and impartial archivist auditing.
 

@@ -1,6 +1,6 @@
 # Self-report — agy
 
-Command: `agy --conversation b0a1d86b-9777-4812-bd0e-5e4e8335ea81 --model gemini-3.7-flash --effort high --output-format json --print-timeout 5m --print "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\gorkbot\impl\agy)
+Command: `agy --conversation REDACTED-CONVERSATION-ID --model gemini-3.7-flash --effort high --output-format json --print-timeout 5m --print "<REPORT_PROMPT>"` (run from C:\Users\example\Projects\arity\impl\agy)
 
 Here is my honest debrief on the v0 build:
 

@@ -32,10 +32,10 @@ Keep the schema lightweight, but add indexes on `vendor` or `name` if you plan t
 [Presence Update]: Marked seat seat_92209 (gemini-3.6-flash) presence=True (Asa typing)
 [Fresh Cast]: Selected seat=seat_92209 (gemini-3.5-flash-lite), presence=False
 Traceback (most recent call last):
-  File "C:\Users\example\Projects\gorkbot\impl\agy2\demo.py", line 150, in <module>
+  File "C:\Users\example\Projects\arity\impl\agy2\demo.py", line 150, in <module>
     run_demo()
     ~~~~~~~~^^
-  File "C:\Users\example\Projects\gorkbot\impl\agy2\demo.py", line 92, in run_demo
+  File "C:\Users\example\Projects\arity\impl\agy2\demo.py", line 92, in run_demo
     assert fresh_builder_k.seat.id != seat_to_block.id or not seat_to_block.presence
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError

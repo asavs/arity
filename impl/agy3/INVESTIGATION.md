@@ -1,7 +1,7 @@
 # Antigravity CLI (agy) headless tool-permission investigation
 
 Binary: `C:\Users\example\AppData\Local\agy\bin\agy.exe`
-Working dir: `C:\Users\example\Projects\gorkbot\impl\agy3`
+Working dir: `C:\Users\example\Projects\arity\impl\agy3`
 
 ## 1. CLI surface (`--help`, `help <sub>`, `agent`, `models`, `plugin list`, `mcp list`)
 
@@ -31,7 +31,7 @@ Everything lives under the user's home config; there is **no per-workspace/proje
   ```
 - `~/.gemini/config/config.json` — a *shared* config (used by the Antigravity IDE too) with `userSettings.globalPermissionGrants.allow` containing 13 entries (`command(npm run)`, `command(git log)`, `command(git show)`, `command(git diff)`, `command(git grep)`, `command(git status)`, `command(Get-ChildItem)`, `command(Test-Path)`, `command(Get-Process)`, `command(Copy-Item)`, `execute_url(localhost)`, `mcp(chrome_devtools/evaluate_script)`). **Empirically these are NOT applied to the standalone CLI's own permission check** — see probe D below; only the one entry duplicated into `antigravity-cli/settings.json` (`command(git diff)`) actually worked.
 - `~/.gemini/config/projects/*.json` — one file per registered project, `{id, name, projectResources.resources[].folderUri}`. `--new-project` writes a **new** file here every time it's invoked (agy's own side effect, not a hand-edit by us). No permission/allow data is stored per-project here; project registration only marks a folder as a known workspace.
-- `~/.gemini/trustedFolders.json` and `~/.gemini/projects.json` — belong to a *different*, older/adjacent tool (paths reference `C:\Users\18312\...`, not this machine's active user paths) — irrelevant leftover, not touched.
+- `~/.gemini/trustedFolders.json` and `~/.gemini/projects.json` — belong to a *different*, older/adjacent tool (paths reference `C:\Users\example\...`, not this machine's active user paths) — irrelevant leftover, not touched.
 
 None of these were written to. Only `agy` itself wrote a new `~/.gemini/config/projects/<uuid>.json` as the documented side effect of `--new-project`.
 
