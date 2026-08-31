@@ -52,6 +52,8 @@ ALLOWED_ISSUE_CODES = {
     "unsupported_event",
     "unsupported_event_schema",
     "unsupported_evidence_schema",
+    "unsupported_usage_evidence_schema",
+    "unsupported_observation_schema",
     "unsupported_evaluation_schema",
     "unsupported_resolution_schema",
     "invalid_record",
@@ -293,6 +295,9 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
             "reviews",
             "resolutions",
             "delivery_recorded",
+            "mechanical_observations",
+            "model_observations",
+            "human_observations",
         }
         assert type(detail["delivery_recorded"]) is bool
         for count_name in (
@@ -301,6 +306,9 @@ def assert_strict_allowlist(value: dict[str, Any]) -> None:
             "evidence",
             "reviews",
             "resolutions",
+            "mechanical_observations",
+            "model_observations",
+            "human_observations",
         ):
             assert set(detail[count_name]) == {"value", "more_omitted"}
             assert type(detail[count_name]["value"]) is int
@@ -442,6 +450,9 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
                     "reviews": {"value": 1, "more_omitted": False},
                     "resolutions": {"value": 1, "more_omitted": False},
                     "delivery_recorded": True,
+                    "mechanical_observations": {"value": 0, "more_omitted": False},
+                    "model_observations": {"value": 0, "more_omitted": False},
+                    "human_observations": {"value": 0, "more_omitted": False},
                 },
                 "issue": None,
                 "selected": True,

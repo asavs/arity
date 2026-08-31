@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from .inspection import InspectionIssue, TrialCatalog, TrialInspection
+from .observations import Observation
 from .trial_events import (
     KNOWN_EVENT_TYPES,
     TRIAL_EVENT_SCHEMA_VERSION,
@@ -158,6 +159,15 @@ class WatchTrialDetail:
     reviews: BoundedCount
     resolutions: BoundedCount
     delivery_recorded: bool
+    mechanical_observations: BoundedCount = field(
+        default_factory=lambda: BoundedCount(0)
+    )
+    model_observations: BoundedCount = field(
+        default_factory=lambda: BoundedCount(0)
+    )
+    human_observations: BoundedCount = field(
+        default_factory=lambda: BoundedCount(0)
+    )
 
     def __post_init__(self) -> None:
         if type(self.agents) is not tuple or len(self.agents) > MAX_WATCH_AGENTS:
@@ -170,6 +180,9 @@ class WatchTrialDetail:
             self.evidence,
             self.reviews,
             self.resolutions,
+            self.mechanical_observations,
+            self.model_observations,
+            self.human_observations,
         ):
             if type(value) is not BoundedCount:
                 raise TypeError("watch detail counts must be bounded")
@@ -537,6 +550,13 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
         WatchAgent(position, arm_id in completed_ids)
         for position, arm_id in enumerate(arm_ids[:MAX_WATCH_AGENTS])
     )
+    observation_kinds = tuple(
+        observation.observer_kind
+        for observation in replay.observations
+        if type(observation) is Observation
+    )
+    if len(observation_kinds) != len(replay.observations):
+        raise TypeError("verified replay observations are invalid")
     return WatchTrialDetail(
         agents=agents,
         arms=_bounded_count(len(arm_ids)),
@@ -545,6 +565,11 @@ def _trial_detail(replay: TrialReplay) -> WatchTrialDetail:
         reviews=_bounded_count(len(replay.reviews)),
         resolutions=_bounded_count(len(replay.resolutions)),
         delivery_recorded=replay.delivery is not None,
+        mechanical_observations=_bounded_count(
+            observation_kinds.count("mechanical")
+        ),
+        model_observations=_bounded_count(observation_kinds.count("model")),
+        human_observations=_bounded_count(observation_kinds.count("human")),
     )
 
 
