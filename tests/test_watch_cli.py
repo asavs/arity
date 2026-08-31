@@ -683,8 +683,10 @@ def test_renderer_does_not_query_terminal_capabilities(
 
     monkeypatch.setattr(os, "get_terminal_size", forbidden)
     monkeypatch.setattr(shutil, "get_terminal_size", forbidden)
-    monkeypatch.setattr(sys.stdout, "isatty", forbidden)
-    monkeypatch.setattr(sys.stderr, "isatty", forbidden)
+    # Replace the streams instead of mutating TextIOWrapper methods, which are
+    # read-only on CPython and differ under pytest's capture implementation.
+    monkeypatch.setattr(sys, "stdout", GuardedOutput())
+    monkeypatch.setattr(sys, "stderr", GuardedOutput())
     for name in ("get_terminal_size", "isatty", "fileno"):
         if hasattr(watch_cli, name):
             monkeypatch.setattr(watch_cli, name, forbidden)
