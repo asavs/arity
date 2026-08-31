@@ -1661,6 +1661,19 @@ class BinaryCapture:
         return bytes(self._value)
 
 
+class ShortWriteBinaryCapture(BinaryCapture):
+    """A raw stream that accepts only a bounded prefix of each write."""
+
+    def __init__(self, max_write: int = 3) -> None:
+        super().__init__()
+        self.max_write = max_write
+        self.write_calls = 0
+
+    def write(self, value: bytes | bytearray | memoryview) -> int:
+        self.write_calls += 1
+        return super().write(bytes(value)[: self.max_write])
+
+
 class NewlineTranslatingDefaultStream:
     """A Windows-like text wrapper whose text path changes LF to CRLF."""
 
@@ -1846,6 +1859,74 @@ def test_default_windows_like_streams_receive_exact_lf_ascii_bytes(
     assert b"\r" not in expected_stdout + expected_stderr
     emitted = stdout.buffer if expected_stdout else stderr.buffer
     assert emitted.flush_calls >= 1
+    assert not (tmp_path / ".gorkbot").exists()
+
+
+def test_default_raw_output_completes_short_writes_without_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ARITY_STORE", "jsonl")
+    short_stdout = ShortWriteBinaryCapture(max_write=3)
+
+    code, stdout, stderr = invoke_cli_with_default_streams(
+        monkeypatch,
+        "watch",
+        "--ascii",
+        "--no-motion",
+        stdout_buffer=short_stdout,
+    )
+
+    assert code == 0
+    assert short_stdout.getvalue() == b"No persisted trials.\n"
+    assert short_stdout.write_calls > 1
+    assert short_stdout.flush_calls >= 1
+    assert stdout.text_writes == []
+    assert stderr.buffer.getvalue() == b""
+    assert stderr.text_writes == []
+    assert not (tmp_path / ".gorkbot").exists()
+
+
+def test_real_closed_stdout_pipe_exits_one_without_shutdown_traceback(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment["ARITY_STORE"] = "jsonl"
+    environment["PYTHONPATH"] = str(repository)
+    child = (
+        "import sys; "
+        "from gorkbot.cli import main; "
+        "sys.stdin.buffer.read(1); "
+        "sys.argv=['arity','watch','--ascii','--no-motion']; "
+        "raise SystemExit(main())"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        assert process.stdout is not None
+        assert process.stdin is not None
+        process.stdout.close()
+        process.stdin.write(b"x")
+        process.stdin.close()
+        return_code = process.wait(timeout=15)
+        assert process.stderr is not None
+        errors = process.stderr.read()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert return_code == 1
+    assert errors == b""
     assert not (tmp_path / ".gorkbot").exists()
 
 
