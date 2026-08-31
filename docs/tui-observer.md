@@ -8,6 +8,32 @@ prove. It is an observer, never a participant: opening it must not run an agent,
 contact a provider, execute a tool, attach to a runtime, repair a record, or create a
 missing store.
 
+Here "observer" describes the user interface. It does not mean the live runtime
+`Observer` hook, and it does not mean `TrialEvaluator`. Runtime observers may collect
+telemetry while work executes; evaluators may form decisions from frozen evidence;
+`watch` only projects records that have already been persisted.
+
+## Approved Stage 3 decisions (2026-08-31)
+
+- Ordinary `arity watch` remains the deterministic one-shot command. Live terminal
+  behavior is entered explicitly with `arity watch --follow`.
+- The live view remains a presentation client, not a control plane. It may select,
+  expand, retry a read, or quit, but it cannot start, stop, steer, repair, evaluate,
+  or pre-warm work.
+- Arity will define an attributed observation envelope for three independent lenses:
+  mechanical checks, optional LLM interpretations, and human judgments. They may
+  examine equivalent blinded evidence and later be compared for analytics, but none
+  silently overwrites another. `watch` may display their persisted, blind-safe
+  projections; it does not run them.
+- Cache telemetry follows one direction: provider response -> normalized versioned
+  usage event -> trial journal -> inspection projection -> watch. It does not flow
+  from an in-process metrics hook directly into the UI.
+- Cache heat is user-facing and supports `exact`, `conservative`, and `off` policies.
+  `exact` uses the recorded provider policy; `conservative` uses the shortest
+  configured response window; `off` avoids turning a provider-specific timer into an
+  A/B identity fingerprint. The display reports a documented reuse window and its
+  certainty, never direct knowledge of provider cache residency.
+
 ## Current Stage 2 slice
 
 The current command has one useful center: a nested list of trials and their neutral
@@ -171,11 +197,16 @@ contract such as arm/model-turn start and finish events. Until that exists, Arit
 show only the short pulse caused by journal changes, including the start event that
 precedes inference.
 
-There is no fire, warmth, hit-rate, or cache bar in this release. `MetricsObserver`
-has in-process aggregate cache counters, but they are neither a per-arm durable journal
-contract nor part of the inspection projection. A future meter requires persisted,
-provider-attributed cache-read and prompt-token measurements with explicit unknown and
-unsupported states. Estimates based on time or context mode do not qualify.
+There is no fire, warmth, hit-rate, or cache bar in Stage 2. `MetricsObserver` has
+in-process aggregate cache counters, but they are neither a per-arm durable journal
+contract nor part of the inspection projection. Stage 3 first persists normalized
+per-request request-start time, prompt/cache-read/cache-write token counts, retention
+policy, and context-reset events. A time-derived flame may then visualize the recorded
+reuse window with explicit `confirmed`, `estimated`, `elapsed`, `unknown`, and
+`unsupported` states. Elapsed means the documented window passed; it does not prove
+that a provider evicted the entry. A cache read or write on a later request refreshes
+the recorded window. Compaction, a model switch, or another prefix-reset boundary
+starts a new comparison epoch.
 
 ## Data and snapshot path
 
@@ -393,6 +424,10 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
   restoration of console/raw mode and cursor state.
 - A journal-change pulse occurs only after the safe snapshot fingerprint changes; an
   unchanged `started` trial becomes and remains visually still.
+- Cache-heat tests cover confirmed reads and writes, unknown telemetry, elapsed
+  documented windows, context-reset boundaries, and all three display policies. The
+  `off` policy exposes no provider-specific duration; `watch` never sends a provider
+  request to affect the result it displays.
 - These Stage 3 behaviors will receive their own terminal/controller tests. They are
   not requirements of `tests/test_watch_cli.py`.
 
@@ -403,13 +438,13 @@ The implemented contract lives in `tests/test_watch_view_model.py` and
    blindness tests.
 2. **Implemented on this branch:** add a fixed printable-ASCII, ANSI-free,
    non-interactive `arity watch` snapshot that performs no terminal capability work.
-3. **Deferred:** add polling, stable selection, keyboard control, retries,
+3. **Approved next:** add polling, stable selection, keyboard control, retries,
    last-good-snapshot errors, optional Unicode/color with `NO_COLOR`,
    terminal-width-aware layout and cleanup, and the bounded journal-change spiral
-   pulse.
+   pulse. Add cache heat only through the durable normalized usage path and the
+   explicit display policies above.
 4. Only after a separately reviewed journal schema records truthful arm activity may
-   the TUI show active inference. Only after durable cache measurements may it show
-   cache heat.
+   the TUI show active inference.
 
 ## Non-goals
 
