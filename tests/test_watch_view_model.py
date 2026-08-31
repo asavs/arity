@@ -239,17 +239,21 @@ def document(model: WatchViewModel) -> dict[str, Any]:
 def assert_strict_allowlist(value: dict[str, Any]) -> None:
     assert set(value) == {
         "backend",
+        "catalog_integrity",
         "catalog_issues",
         "more_trials_omitted",
         "read_at",
         "requested_trial_missing",
+        "selected_trial_omitted",
         "selected_trial_number",
         "trials",
     }
     assert value["backend"] in {"jsonl", "sqlite"}
+    assert value["catalog_integrity"] in ALLOWED_INTEGRITY
     assert type(value["read_at"]) is float and math.isfinite(value["read_at"])
     assert type(value["more_trials_omitted"]) is bool
     assert type(value["requested_trial_missing"]) is bool
+    assert type(value["selected_trial_omitted"]) is bool
     assert value["selected_trial_number"] is None or (
         type(value["selected_trial_number"]) is int
         and value["selected_trial_number"] >= 1
@@ -411,6 +415,7 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
     assert marker not in repr(watch_fingerprint(model))
     assert value == {
         "backend": "jsonl",
+        "catalog_integrity": "corrupt",
         "catalog_issues": [
             {
                 "code": "inspection_incomplete",
@@ -420,6 +425,7 @@ def test_view_model_is_a_strict_positive_allowlist_and_recursively_blind() -> No
         "more_trials_omitted": False,
         "read_at": 123.0,
         "requested_trial_missing": False,
+        "selected_trial_omitted": False,
         "selected_trial_number": 1,
         "trials": [
             {
@@ -874,6 +880,7 @@ def test_duplicate_trial_id_collapses_to_one_failure_closed_row() -> None:
     assert model.trials[0].detail is None
     assert model.trials[0].selected is True
     assert model.selected_trial_number == model.trials[0].trial_number
+    assert model.selected_trial_omitted is False
     assert model.requested_trial_missing is False
 
 
@@ -888,6 +895,7 @@ def test_missing_and_offscreen_selection_are_safe_structural_state() -> None:
 
     assert missing.requested_trial_missing is True
     assert missing.selected_trial_number is None
+    assert missing.selected_trial_omitted is False
     assert all(not trial.selected for trial in missing.trials)
     assert watch_fingerprint(missing) == watch_fingerprint(
         WatchProjector().project(
@@ -907,7 +915,8 @@ def test_missing_and_offscreen_selection_are_safe_structural_state() -> None:
 
     assert offscreen.more_trials_omitted is True
     assert offscreen.requested_trial_missing is False
-    assert offscreen.selected_trial_number is not None
+    assert offscreen.selected_trial_number is None
+    assert offscreen.selected_trial_omitted is True
     assert all(not trial.selected for trial in offscreen.trials)
 
 
@@ -930,6 +939,7 @@ def test_catalog_issues_are_deduplicated_and_never_echo_raw_messages() -> None:
         "inspection_incomplete",
         "orphan_event",
     ]
+    assert model.catalog_integrity == "corrupt"
     assert BLIND_LEAK_SENTINEL not in repr(model)
 
 
