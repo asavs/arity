@@ -772,6 +772,63 @@ def test_disabled_wire_fallback_returns_a_canned_nonretryable_failure() -> None:
     fallback.call.assert_not_called()
 
 
+def test_closed_authority_rejects_known_intrinsic_primary_inside_wire_wrapper(tmp_path) -> None:
+    seat = Seat(id="designer-seat", provider="test", model="design-model")
+    primary = CLIModelProvider(harness="codex", model="design-model")
+    primary.call = MagicMock(return_value=ModelCompleted(content="unsafe primary", usage={}))
+    provider = FallbackModelProvider(primary=primary, fallback=MagicMock())
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: provider,
+        quiet=True,
+    )
+
+    with pytest.raises(PermissionError, match="closed tool authority.*intrinsic-tool harness"):
+        dispatcher.dispatch_single(
+            TaskRecord(brief="Specify the terminal lobby."),
+            CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness="wire", skills=[]),
+            run_verification=False,
+        )
+
+    primary.call.assert_not_called()
+
+
+def test_closed_authority_removes_known_intrinsic_wire_alternates(tmp_path) -> None:
+    seat = Seat(id="designer-seat", provider="test", model="design-model")
+    primary = MagicMock()
+    primary.call.return_value = ModelFailed(error="429 quota", retryable=True)
+    alternate = OMPModelProvider(model="design-model")
+    alternate.call = MagicMock(return_value=ModelCompleted(content="unsafe alternate", usage={}))
+    fallback = CLIModelProvider(harness="codex", model="design-model")
+    fallback.call = MagicMock(return_value=ModelCompleted(content="unsafe fallback", usage={}))
+    provider = FallbackModelProvider(
+        primary=primary,
+        fallback=fallback,
+        alternates=[alternate],
+    )
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: provider,
+        quiet=True,
+    )
+
+    result = dispatcher.dispatch_single(
+        TaskRecord(brief="Specify the terminal lobby."),
+        CandidateSpec(seat=seat, role=DESIGNER_ROLE, harness="wire", skills=[]),
+        run_verification=False,
+    )
+
+    assert result.status == "halted"
+    assert result.fallbacks == 0
+    primary.call.assert_called_once()
+    alternate.call.assert_not_called()
+    fallback.call.assert_not_called()
+
+
 def test_developer_wire_fallback_behavior_is_preserved(tmp_path) -> None:
     seat = Seat(id="developer-seat", provider="test", model="dev-model")
     primary = MagicMock()
