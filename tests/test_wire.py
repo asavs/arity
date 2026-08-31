@@ -43,7 +43,7 @@ class TestWireProviders(unittest.TestCase):
             b'data: {"type": "response.created", "response": {}}\n',
             b'data: {"type": "response.output_text.delta", "delta": "Hello "}\n',
             b'data: {"type": "response.output_text.delta", "delta": "world!"}\n',
-            b'data: {"type": "response.done", "response": {"usage": {"input_tokens": 10, "output_tokens": 5}}}\n',
+            b'data: {"type": "response.done", "response": {"usage": {"input_tokens": 10, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 7}}}}\n',
             b'data: [DONE]\n',
         ]
 
@@ -57,6 +57,7 @@ class TestWireProviders(unittest.TestCase):
             self.assertEqual(res.content, "Hello world!")
             self.assertEqual(res.usage["prompt_tokens"], 10)
             self.assertEqual(res.usage["completion_tokens"], 5)
+            self.assertEqual(res.usage["cached_tokens"], 7)
 
 
     def test_antigravity_wire_provider_gemini(self):
@@ -70,7 +71,7 @@ class TestWireProviders(unittest.TestCase):
         )
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Gemini via AGY!"}]}}], "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 6, "totalTokenCount": 14}}}'
+        mock_resp.read.return_value = b'{"response": {"candidates": [{"content": {"parts": [{"text": "Hello from Gemini via AGY!"}]}}], "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 6, "cachedContentTokenCount": 5, "totalTokenCount": 14}}}'
         mock_resp.__enter__.return_value = mock_resp
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
@@ -79,6 +80,7 @@ class TestWireProviders(unittest.TestCase):
             self.assertEqual(res.content, "Hello from Gemini via AGY!")
             self.assertEqual(res.seat_id, "wire:antigravity:gemini-3-flash-agent")
             self.assertEqual(res.usage["total_tokens"], 14)
+            self.assertEqual(res.usage["cache_read_input_tokens"], 5)
 
     def test_antigravity_wire_provider_gemini_pro(self):
         provider = AntigravityWireProvider(
