@@ -70,7 +70,9 @@ arity watch [trial-id] --follow [--ascii] [--no-motion]
 
 When stdin and stdout support the terminal contract, follow mode opens one managed
 terminal session and obtains successive query-only snapshots. It reuses only the
-in-memory neutral-label registry; every refresh opens and closes a reader. `j`/`k`
+in-memory neutral-label registry; every refresh opens and closes a reader. Default
+watch readers fail closed above a 64 MiB physical snapshot or 65,536 queried journal
+records, before the 256-row display cap. `j`/`k`
 and the arrow keys select a trial, Enter expands or collapses it, `r` requests a
 refresh, `?` toggles help, and `q` exits. If capability or setup checks fail cleanly,
 the command emits the exact deterministic one-shot result instead.
@@ -222,8 +224,10 @@ show only the short pulse caused by journal changes, including the start event t
 precedes inference.
 
 There is no fire, warmth, hit-rate, or ticking cache bar. Arity persists normalized
-per-request start/observation times, outcome, prompt/output/cache-read/cache-write
-measurements with their bases, and a recorded retention-policy hint. The pure cache
+candidate-provider request start/observation times, outcome,
+prompt/output/cache-read/cache-write measurements with their bases, and a recorded
+retention-policy hint. Invalid provider results retain a safe failed attempt. Tester
+and judge model calls do not yet cross this recording boundary. The pure cache
 projector exposes closed `confirmed`, `estimated`, `elapsed`, `unknown`, and
 `unsupported` states. The terminal deliberately renders timed values as a stable
 `respond by HH:MM:SS | prior activity confirmed|estimated | eligibility only` line;
@@ -240,8 +244,8 @@ Each Stage 2 invocation uses the existing read-only seams exactly once:
 
 ```text
 configured_store_spec
-  -> open_record_reader (one query-only reader)
-  -> inspect_trials (one complete catalog)
+  -> open_record_reader (one bounded query-only reader)
+  -> inspect_trials (one complete in-budget catalog, or a typed limit failure)
   -> close reader
   -> injected clock
   -> WatchProjector
@@ -334,7 +338,7 @@ catalog issues.
 The retained one-shot path has three small layers:
 
 1. **Snapshot source/controller:** `load_watch_model` resolves one `StoreSpec`, opens
-   one query-only reader, inspects one complete `TrialCatalog`, closes the reader,
+   one bounded query-only reader, inspects one complete in-budget `TrialCatalog`, closes the reader,
    reads its injected clock once, and projects the result. `run_watch_command` maps
    typed and logical outcomes to fixed stdout/stderr text and semantic exit codes.
    Neither function owns runtime/provider/tool objects.
@@ -412,8 +416,9 @@ the fixed one-shot fallback complete.
   exactly `??:??:??`.
 - Output write, incomplete-write, and flush fixtures return `1` without a traceback
   or exception-text leak for both default process streams and injected text streams.
-- Exactly one complete catalog is read through one query-only reader; the reader
-  closes before the clock is read. No trial is selected implicitly.
+- Exactly one complete in-budget catalog is read through one query-only reader; the
+  reader closes before the clock is read. A physical or record limit is a typed,
+  canned operational failure, never a truncated catalog. No trial is selected implicitly.
 - Missing selection and typed physical failures emit only fixed safe stderr codes.
   Logical partial and corrupt catalogs remain visible on stdout, while the pre-cap
   aggregate drives semantic exit codes `4` and `5`.

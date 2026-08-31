@@ -46,10 +46,13 @@ external reports; this file remains the maintainer's near-term roadmap.
       distinct from model hypotheses and human decisions.
 - [ ] Build the analytics consumer that compares those independent observations;
       `watch` currently shows only bounded counts and never invokes a new reviewer.
-- [x] Persist per-request cache telemetry at the runtime boundary: request-start
-      time, cache-read/write and prompt-token counts, and documented retention
-      policy. `watch` only consumes these records; it never probes or prewarms a
+- [x] Persist every candidate-provider attempt crossing `JournaledModelProvider` at
+      the runtime boundary: request-start time, outcome, cache-read/write and token
+      counts, and documented retention policy. Invalid results retain a safe failed
+      attempt. `watch` only consumes these records; it never probes or prewarms a
       provider.
+- [ ] Extend normalized request telemetry to tester and judge model calls; those
+      call sites do not yet cross the candidate-provider recording boundary.
 - [ ] Add explicit context-reset events for compaction, model switches, and other
       prefix changes so later cache analytics can separate comparison epochs.
 - [x] Add user-facing cache heat with `exact`, `conservative`, and `off` policies.
