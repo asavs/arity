@@ -571,15 +571,25 @@ class TerrariumDispatcher:
                 f"Role '{actual_role.name}' has closed tool authority and cannot use "
                 f"intrinsic-tool harness '{intrinsic_name}'"
             )
-        if (
-            closed_tool_authority
-            and isinstance(model_provider, FallbackModelProvider)
-            and isinstance(model_provider.fallback, intrinsic_provider_types)
-        ):
+        if closed_tool_authority and isinstance(model_provider, FallbackModelProvider):
+            if isinstance(model_provider.primary, intrinsic_provider_types):
+                intrinsic_name = getattr(model_provider.primary, "harness", "omp")
+                raise PermissionError(
+                    f"Role '{actual_role.name}' has closed tool authority and cannot use "
+                    f"intrinsic-tool harness '{intrinsic_name}' as a wire primary"
+                )
+            safe_alternates = [
+                alternate
+                for alternate in model_provider.alternates
+                if not isinstance(alternate, intrinsic_provider_types)
+            ]
             model_provider = replace(
                 model_provider,
-                fallback_enabled=False,
-                alternates=list(model_provider.alternates),
+                fallback_enabled=(
+                    model_provider.fallback_enabled
+                    and not isinstance(model_provider.fallback, intrinsic_provider_types)
+                ),
+                alternates=safe_alternates,
             )
 
         # Open-authority roles may use CLI harnesses; confine Arity-known CLI providers to the
