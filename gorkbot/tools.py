@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ._version import USER_AGENT
 from .roles import Role
 from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
@@ -512,7 +513,7 @@ def stdlib_github_search(query: str, limit: int = 5) -> str:
     """Stdlib GitHub repository & skill search (zero dependencies)."""
     import urllib.request, urllib.parse, json
     url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
-    req = urllib.request.Request(url, headers={"User-Agent": "arity/0.3.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -539,7 +540,7 @@ def tinyfish_search(query: str, limit: int = 5, api_key: Optional[str] = None) -
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "arity/0.3.0",
+            "User-Agent": USER_AGENT,
             "X-API-Key": key,
         },
     )
