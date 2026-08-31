@@ -1,6 +1,7 @@
 """Unit tests for gorkbot auth module (TokenStore, PKCE, token refresh, and auto-import)."""
 import json
 import os
+import stat
 import tempfile
 import unittest
 import urllib.parse
@@ -48,6 +49,34 @@ class TestGorkbotAuth(unittest.TestCase):
         got = self.store.get_credential("google-antigravity")
         self.assertIsNotNone(got)
         self.assertEqual(got["access"], "test_access_token")
+
+    def test_save_atomically_replaces_file_and_cleans_temporary_file(self):
+        real_replace = os.replace
+        with patch("gorkbot.auth.os.replace", wraps=real_replace) as mocked_replace:
+            self.store.save_credential("mock-provider", {"access": "test-access"})
+
+        mocked_replace.assert_called_once()
+        self.assertEqual(self.store.load_all()["mock-provider"]["access"], "test-access")
+        self.assertEqual(list(self.auth_file.parent.glob(".auth.json.*.tmp")), [])
+
+    def test_failed_atomic_replace_preserves_existing_credentials(self):
+        self.store.save_credential("first-provider", {"access": "first-test-access"})
+        original = self.auth_file.read_bytes()
+
+        with patch("gorkbot.auth.os.replace", side_effect=OSError("test replace failure")):
+            with self.assertRaises(OSError):
+                self.store.save_credential(
+                    "second-provider",
+                    {"access": "second-test-access"},
+                )
+
+        self.assertEqual(self.auth_file.read_bytes(), original)
+        self.assertEqual(list(self.auth_file.parent.glob(".auth.json.*.tmp")), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file mode semantics")
+    def test_saved_credentials_are_owner_only_on_posix(self):
+        self.store.save_credential("mock-provider", {"access": "test-access"})
+        self.assertEqual(stat.S_IMODE(self.auth_file.stat().st_mode), 0o600)
 
     def test_delete_credential(self):
         self.store.save_credential("mock-prov", {"access": "abc"})

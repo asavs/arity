@@ -16,6 +16,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 import urllib.error
@@ -110,13 +111,45 @@ def _require_google_oauth_client(
 # -----------------------------------------------------------------------------
 
 class TokenStore:
-    """Manage credentials in Arity's active ``~/.gorkbot/auth.json`` state file."""
+    """Manage Arity's plaintext credential file.
+
+    Writes replace the file atomically and use mode ``0600`` on POSIX. Windows
+    confidentiality relies on the user's profile ACLs; this store is not encrypted.
+    """
 
     def __init__(self, auth_path: Optional[Path] = None):
         self.auth_path = auth_path or (Path.home() / ".gorkbot" / "auth.json")
 
-    def _ensure_dir() -> None:
+    def _ensure_dir(self) -> None:
         self.auth_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _write_all(self, credentials: dict[str, dict[str, Any]]) -> None:
+        """Durably replace the credential file without exposing a partial JSON write."""
+        self._ensure_dir()
+        serialized = json.dumps(credentials, indent=2)
+        descriptor: Optional[int] = None
+        temp_path: Optional[Path] = None
+        try:
+            descriptor, raw_temp_path = tempfile.mkstemp(
+                prefix=f".{self.auth_path.name}.",
+                suffix=".tmp",
+                dir=self.auth_path.parent,
+            )
+            temp_path = Path(raw_temp_path)
+            if os.name == "posix":
+                os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                descriptor = None
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.auth_path)
+            temp_path = None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     def load_all(self) -> dict[str, dict[str, Any]]:
         """Load all saved credentials."""
@@ -129,10 +162,9 @@ class TokenStore:
 
     def save_credential(self, key: str, data: dict[str, Any]) -> None:
         """Save or update credential for a given key / account."""
-        self.auth_path.parent.mkdir(parents=True, exist_ok=True)
         creds = self.load_all()
         creds[key] = data
-        self.auth_path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+        self._write_all(creds)
 
     def delete_credential(self, key: str) -> bool:
         """Delete credential for a provider or account key."""
@@ -149,8 +181,7 @@ class TokenStore:
             deleted = True
 
         if deleted:
-            self.auth_path.parent.mkdir(parents=True, exist_ok=True)
-            self.auth_path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+            self._write_all(creds)
         return deleted
 
     def get_credential(self, key: str) -> Optional[dict[str, Any]]:
@@ -229,8 +260,7 @@ class TokenStore:
         discovered = self.discover_external_credentials()
         existing = self.load_all()
         merged = {**discovered, **existing}
-        self.auth_path.parent.mkdir(parents=True, exist_ok=True)
-        self.auth_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        self._write_all(merged)
         return merged
 
     def refresh_if_needed(self, key: str) -> Optional[dict[str, Any]]:
