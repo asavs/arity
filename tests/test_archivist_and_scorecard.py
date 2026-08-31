@@ -1,17 +1,17 @@
-"""Tests for gorkbot archivist, evidence auditing, and scorecard."""
+"""Tests for the Arity archivist, evidence auditing, and scorecard."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.archivist import ArchivistEntry, ImpartialArchivist
-from gorkbot.ledger import Seat
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.scorecard import Scorecard
-from gorkbot.terrarium import TerrariumCandidateResult
-from gorkbot.types import State, Status
+from arity.handlers import JsonlRecordStore
+from arity.archivist import ArchivistEntry, ImpartialArchivist
+from arity.ledger import Seat
+from arity.roles import BUILDER_ROLE
+from arity.scorecard import Scorecard
+from arity.terrarium import TerrariumCandidateResult
+from arity.types import State, Status
 
 
 class TestArchivistAndScorecard(unittest.TestCase):

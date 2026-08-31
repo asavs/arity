@@ -1,16 +1,16 @@
-"""Unit tests for gorkbot ModelProvider implementations."""
+"""Unit tests for Arity ModelProvider implementations."""
 import unittest
 from unittest.mock import MagicMock, patch
 
-from gorkbot.handlers import (
+from arity.handlers import (
     CLIModelProvider,
     GeminiModelProvider,
     OpenAIModelProvider,
     create_default_model_provider,
     create_model_provider,
 )
-from gorkbot.ledger import Seat
-from gorkbot.types import CallModel, ModelCompleted, ModelFailed
+from arity.ledger import Seat
+from arity.types import CallModel, ModelCompleted, ModelFailed
 
 
 class TestModelProviders(unittest.TestCase):

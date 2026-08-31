@@ -7,14 +7,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.archivist import ImpartialArchivist
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import SeatLedger
-from gorkbot.race import GOOD_LRU, OWN_TEST, RaceConfig, ScriptedProvider, placeholder_seats, run_race
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.tasks import TaskBank
-from gorkbot.terrarium import PEERS_DIR, CandidateSpec, TaskRecord, TerrariumDispatcher
-from gorkbot.types import CallModel, ModelCompleted
+from arity.archivist import ImpartialArchivist
+from arity.handlers import JsonlRecordStore
+from arity.ledger import SeatLedger
+from arity.race import GOOD_LRU, OWN_TEST, RaceConfig, ScriptedProvider, placeholder_seats, run_race
+from arity.roles import BUILDER_ROLE
+from arity.tasks import TaskBank
+from arity.terrarium import PEERS_DIR, CandidateSpec, TaskRecord, TerrariumDispatcher
+from arity.types import CallModel, ModelCompleted
 
 
 class ConferenceMock:

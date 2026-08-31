@@ -33,9 +33,9 @@ from typing import Any, Mapping, cast
 
 import pytest
 
-from gorkbot.inspection import InspectionIssue, TrialCatalog, TrialInspection
-from gorkbot.trial_events import TrialEvent, TrialReplay
-from gorkbot.watch_view_model import WatchProjector, WatchViewModel, watch_fingerprint
+from arity.inspection import InspectionIssue, TrialCatalog, TrialInspection
+from arity.trial_events import TrialEvent, TrialReplay
+from arity.watch_view_model import WatchProjector, WatchViewModel, watch_fingerprint
 
 
 BLIND_LEAK_SENTINEL = "BLIND_LEAK_SENTINEL"
@@ -1206,10 +1206,10 @@ def test_projection_rejects_non_finite_or_boolean_read_times(read_at: object) ->
 def test_projection_and_fingerprint_have_no_runtime_or_external_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import gorkbot.auth as auth
-    import gorkbot.handlers as handlers
-    import gorkbot.runtime as runtime
-    import gorkbot.tools as tools
+    import arity.auth as auth
+    import arity.handlers as handlers
+    import arity.runtime as runtime
+    import arity.tools as tools
 
     def forbidden(*args: object, **kwargs: object) -> Any:
         raise AssertionError("observer projection attempted an external side effect")

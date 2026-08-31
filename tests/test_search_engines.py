@@ -1,14 +1,14 @@
-"""Unit tests for gorkbot pluggable search engines (Stdlib & TinyFish A/B testing)."""
+"""Unit tests for Arity pluggable search engines (Stdlib & TinyFish A/B testing)."""
 import unittest
 from unittest.mock import MagicMock, patch
 
-from gorkbot.tools import SandboxToolRunner
-from gorkbot.types import ExecuteTool
+from arity.tools import SandboxToolRunner
+from arity.types import ExecuteTool
 
 
 class TestSearchEngines(unittest.TestCase):
     def test_stdlib_github_search_engine(self):
-        from gorkbot.tools import stdlib_github_search
+        from arity.tools import stdlib_github_search
         runner = SandboxToolRunner(custom_tools={"web_search": stdlib_github_search})
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"items": [{"full_name": "DietrichGebert/ponytail", "stargazers_count": 2500, "description": "Lazy senior dev skill", "html_url": "https://github.com/DietrichGebert/ponytail"}]}'
@@ -21,7 +21,7 @@ class TestSearchEngines(unittest.TestCase):
             self.assertIn("2500", res.output)
 
     def test_tinyfish_search_engine_with_key(self):
-        from gorkbot.tools import tinyfish_search
+        from arity.tools import tinyfish_search
         runner = SandboxToolRunner(
             custom_tools={"web_search": lambda query, limit=5: tinyfish_search(query, limit, api_key="test_key_123")}
         )
@@ -36,7 +36,7 @@ class TestSearchEngines(unittest.TestCase):
             self.assertIn("YAGNI for AI agents", res.output)
 
     def test_tinyfish_search_engine_missing_key(self):
-        from gorkbot.tools import tinyfish_search
+        from arity.tools import tinyfish_search
         runner = SandboxToolRunner(
             custom_tools={"web_search": lambda query, limit=5: tinyfish_search(query, limit, api_key=None)}
         )

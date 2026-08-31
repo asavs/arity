@@ -1,14 +1,14 @@
-"""Tests for gorkbot terrarium and multi-kernel parallel execution."""
+"""Tests for the Arity terrarium and multi-kernel parallel execution."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
-from gorkbot.types import CallModel, ModelCompleted
+from arity.ledger import Seat, SeatLedger
+from arity.roles import BUILDER_ROLE
+from arity.terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from arity.types import CallModel, ModelCompleted
 
 
 class TestTerrariumDispatcher(unittest.TestCase):
