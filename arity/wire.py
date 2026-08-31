@@ -149,13 +149,7 @@ class AntigravityWireProvider:
                     content_text, tool_calls = parse_parts(candidates[0].get("content", {}).get("parts", []))
 
                 usage_meta = res.get("response", {}).get("usageMetadata", {})
-                usage = {
-                    "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                    # thoughts are output the account pays for; candidatesTokenCount alone under-reports
-                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0) + usage_meta.get("thoughtsTokenCount", 0),
-                    "thought_tokens": usage_meta.get("thoughtsTokenCount", 0),
-                    "total_tokens": usage_meta.get("totalTokenCount", 0),
-                }
+                usage = usage_from(usage_meta)
 
                 return ModelCompleted(
                     content=content_text,
@@ -274,6 +268,8 @@ class CodexWireProvider:
         tool_calls: list[dict[str, Any]] = []
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens: Optional[int] = None
+        usage_reported = False
 
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -307,8 +303,12 @@ class CodexWireProvider:
                             res = event.get("response", {})
                             usage_raw = res.get("usage", {}) or {}
                             if usage_raw:
+                                usage_reported = True
                                 prompt_tokens = int(usage_raw.get("input_tokens", 0) or 0)
                                 completion_tokens = int(usage_raw.get("output_tokens", 0) or 0)
+                                details = usage_raw.get("input_tokens_details", {}) or {}
+                                if "cached_tokens" in details:
+                                    cached_tokens = int(details["cached_tokens"])
                     except Exception:
                         continue
 
@@ -317,11 +317,14 @@ class CodexWireProvider:
                 content=output_text or None,
                 tool_calls=tool_calls,
                 usage={
-                    "prompt_tokens": prompt_tokens or (sum(len(str(m.get("content") or "")) for m in effect.messages) // 4),
-                    "completion_tokens": completion_tokens or (
+                    "prompt_tokens": prompt_tokens if usage_reported else (
+                        sum(len(str(m.get("content") or "")) for m in effect.messages) // 4
+                    ),
+                    "completion_tokens": completion_tokens if usage_reported else (
                         (len(output_text) + sum(len(str(tc["function"].get("arguments", ""))) for tc in tool_calls)) // 4
                     ),
-                    "estimated": not (prompt_tokens and completion_tokens),
+                    "estimated": not usage_reported,
+                    **({"cached_tokens": cached_tokens} if cached_tokens is not None else {}),
                 },
                 finish_reason="tool_calls" if tool_calls else "stop",
                 seat_id=f"wire:codex:{self.model}",

@@ -39,7 +39,7 @@ class ModelCompleted:
     """The model finished a completion turn."""
     content: Optional[str]
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
     finish_reason: str = "stop"
     seat_id: Optional[str] = None
     usage_evidence: Optional["UsageEvidence"] = None

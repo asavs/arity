@@ -84,9 +84,12 @@ def parse_parts(parts: list[dict[str, Any]]) -> tuple[Optional[str], list[dict[s
 
 
 def usage_from(meta: dict[str, Any]) -> dict[str, int]:
-    return {
+    usage = {
         "prompt_tokens": meta.get("promptTokenCount", 0),
         "completion_tokens": meta.get("candidatesTokenCount", 0) + meta.get("thoughtsTokenCount", 0),
         "thought_tokens": meta.get("thoughtsTokenCount", 0),
         "total_tokens": meta.get("totalTokenCount", 0),
     }
+    if "cachedContentTokenCount" in meta:
+        usage["cache_read_input_tokens"] = meta["cachedContentTokenCount"]
+    return usage

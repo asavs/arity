@@ -253,7 +253,11 @@ class CLIModelProvider:
             return ModelCompleted(
                 content=output,
                 tool_calls=[],
-                usage={"prompt_tokens": len(full_prompt) // 4, "completion_tokens": len(output) // 4},
+                usage={
+                    "prompt_tokens": len(full_prompt) // 4,
+                    "completion_tokens": len(output) // 4,
+                    "estimated": True,
+                },
                 finish_reason="stop",
                 seat_id=f"{self.harness}:{self.model}",
             )
@@ -321,7 +325,11 @@ class OMPModelProvider:
             return ModelCompleted(
                 content=output,
                 tool_calls=[],
-                usage={"prompt_tokens": len(full_prompt) // 4, "completion_tokens": len(output) // 4},
+                usage={
+                    "prompt_tokens": len(full_prompt) // 4,
+                    "completion_tokens": len(output) // 4,
+                    "estimated": True,
+                },
                 finish_reason="stop",
                 seat_id=f"omp:{self.model}",
             )

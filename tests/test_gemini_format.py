@@ -40,8 +40,15 @@ class TestGeminiFormat(unittest.TestCase):
     def test_declarations_and_usage(self):
         decls = tool_declarations([{"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}}, {"function": {}}])
         self.assertEqual([d["name"] for d in decls], ["f"])
-        u = usage_from({"promptTokenCount": 10, "candidatesTokenCount": 5, "thoughtsTokenCount": 7})
+        u = usage_from({
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 5,
+            "thoughtsTokenCount": 7,
+            "cachedContentTokenCount": 6,
+        })
         self.assertEqual((u["prompt_tokens"], u["completion_tokens"], u["thought_tokens"]), (10, 12, 7))
+        self.assertEqual(u["cache_read_input_tokens"], 6)
+        self.assertNotIn("cache_read_input_tokens", usage_from({"promptTokenCount": 1}))
 
 
 if __name__ == "__main__":
