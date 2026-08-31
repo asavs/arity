@@ -5,10 +5,13 @@ from __future__ import annotations
 import io
 from argparse import Namespace
 from collections.abc import Callable
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
-from arity.record_readers import RecordChanged
+from arity.inspection import TrialCatalog
+from arity.record_readers import RecordChanged, RecordNotFound, StoreSpec
 from arity.watch_cli import run_watch_command
 from arity.watch_follow import TerminalSession, TerminalUnavailable
 from arity.watch_terminal import TerminalCapabilities, render_watch_follow_frame
@@ -399,6 +402,48 @@ def test_read_error_keeps_last_good_frame_and_only_canned_error() -> None:
     assert "watch error: record_store_changed" in terminal.frames[-1]
     assert "SECRET" not in "".join(terminal.frames)
     assert RAW_ONE not in "".join(terminal.frames)
+
+
+def test_deleted_store_becomes_changed_after_follow_observes_it() -> None:
+    terminal = FakeTerminal([None, "q"])
+    reads = 0
+    clock_calls = 0
+    leak = "SECRET deleted store path"
+
+    @contextmanager
+    def open_reader(spec: StoreSpec):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise RecordNotFound(leak, path=spec.path)
+        yield object()
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return 1.0
+
+    code = run_watch_command(
+        _args(),
+        store_spec=StoreSpec("jsonl", Path(leak)),
+        reader_opener=open_reader,
+        inspector=lambda _reader: TrialCatalog(trials=()),
+        clock=clock,
+        terminal=terminal,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        monotonic=lambda: 0.0,
+    )
+
+    assert code == 1
+    assert reads == 2
+    assert clock_calls == 1
+    assert len(terminal.frames) == 2
+    assert "No persisted trials." in terminal.frames[-1]
+    assert "last good snapshot" in terminal.frames[-1].lower()
+    assert "watch error: record_store_changed" in terminal.frames[-1]
+    assert leak not in "".join(terminal.frames)
+    assert terminal.events[-1] == "restore"
 
 
 def test_follow_renderer_bounds_cells_and_capabilities_independently() -> None:

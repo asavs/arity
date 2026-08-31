@@ -50,28 +50,66 @@ def load_watch_model(
 ) -> WatchViewModel:
     """Load the full catalog once, close the reader, then sample the read clock."""
 
+    model, _store_missing = _load_watch_model_state(
+        store_spec,
+        selected_trial_id=selected_trial_id,
+        clock=clock,
+        reader_opener=reader_opener,
+        projector=projector,
+        inspector=inspector,
+        missing_store_is_changed=False,
+    )
+    return model
+
+
+def _load_watch_model_state(
+    store_spec: StoreSpec | None = None,
+    *,
+    selected_trial_id: str | None = None,
+    clock: Clock | None = None,
+    reader_opener: ReaderOpener | None = None,
+    projector: WatchProjector | None = None,
+    inspector: CatalogInspector | None = None,
+    missing_store_is_changed: bool,
+) -> tuple[WatchViewModel, bool]:
+    """Load one model and retain whether the source store was absent.
+
+    One-shot callers intentionally treat an absent store as an empty catalog.  A
+    follow session can instead fail a disappearance after it has observed the store,
+    without exposing source paths or replacing its last-good snapshot.
+    """
+
     if selected_trial_id is not None and type(selected_trial_id) is not str:
         raise TypeError("selected_trial_id must be a string or None")
     if store_spec is not None and type(store_spec) is not StoreSpec:
         raise TypeError("store_spec must be an exact StoreSpec or None")
+    if type(missing_store_is_changed) is not bool:
+        raise TypeError("missing_store_is_changed must be a boolean")
 
     spec = store_spec if store_spec is not None else configured_store_spec()
     open_reader = reader_opener if reader_opener is not None else open_record_reader
     inspect_catalog = inspector if inspector is not None else inspect_trials
+    store_missing = False
     try:
         with open_reader(spec) as reader:
             catalog = inspect_catalog(reader)
-    except RecordNotFound:
+    except RecordNotFound as error:
+        if missing_store_is_changed:
+            raise RecordChanged("record store disappeared during follow") from error
         catalog = TrialCatalog(trials=())
+        store_missing = True
 
     read_clock = clock if clock is not None else time.time
     read_at = read_clock()
     active_projector = projector if projector is not None else WatchProjector()
-    return active_projector.project(
-        catalog,
-        backend=spec.backend,
-        read_at=read_at,
-        selected_trial_id=selected_trial_id,
+    return (
+        active_projector.project(
+            catalog,
+            backend=spec.backend,
+            read_at=read_at,
+            selected_trial_id=selected_trial_id,
+        ),
+        store_missing,
     )
 
 
@@ -218,7 +256,10 @@ def _try_run_watch_follow(
         else (store_spec if store_spec is not None else configured_store_spec())
     )
 
+    store_observed = False
+
     def loader(selected_trial_id: str | None) -> WatchViewModel:
+        nonlocal store_observed
         if model_loader is not None:
             return model_loader(
                 store_spec,
@@ -228,14 +269,18 @@ def _try_run_watch_follow(
             )
         if resolved_spec is None:
             raise RuntimeError("follow store specification was not resolved")
-        return load_watch_model(
+        model, store_missing = _load_watch_model_state(
             resolved_spec,
             selected_trial_id=selected_trial_id,
             clock=clock,
             reader_opener=reader_opener,
             projector=active_projector,
             inspector=inspector,
+            missing_store_is_changed=store_observed,
         )
+        if not store_missing:
+            store_observed = True
+        return model
 
     controller_options: dict[str, object] = {
         "terminal": terminal_session,
