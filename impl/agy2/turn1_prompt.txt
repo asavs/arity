@@ -1,11 +1,11 @@
 I will send a long brief in 3 parts. Reply only 'ok 1/3 received' after each part until I say BEGIN. Part 1 of 3:
-# BRIEF — v0 implementation of gorkbot (A/B/C, same brief to three houses)
+# BRIEF — v0 implementation of Arity (A/B/C, same brief to three houses)
 
 wiki-snapshot: sha256:e2b271d3a57ff78d  (axioms, core, components, spine, tier-two, methods — inlined below)
 
 ## The task
 
-Write a v0 implementation of the whole gorkbot system in Python 3.13, standard library only
+Write a v0 implementation of the whole Arity system in Python 3.13, standard library only
 (urllib for HTTP, no pip installs), as a SMALL SET OF MODULES in the directory you were given,
 so pieces can be cherry-picked across houses. Under 1,500 lines total. Suggested split (rename
 if you have a better cut): store.py, ledger.py, roles.py, tiers.py, cadence.py, scorecard.py,

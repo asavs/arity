@@ -1,10 +1,13 @@
-# BRIEF — v0 implementation of gorkbot (A/B/C, same brief to three houses)
+# BRIEF — v0 implementation of Arity (A/B/C, same brief to three houses)
+
+> Provenance note: project-name tokens in this brief and its tracked relay copies were
+> canonicalized to Arity; task contents, results, timings, and identities are otherwise unchanged.
 
 wiki-snapshot: sha256:e2b271d3a57ff78d  (axioms, core, components, spine, tier-two, methods — inlined below)
 
 ## The task
 
-Write a v0 implementation of the whole gorkbot system in Python 3.13, standard library only
+Write a v0 implementation of the whole Arity system in Python 3.13, standard library only
 (urllib for HTTP, no pip installs), as a SMALL SET OF MODULES in the directory you were given,
 so pieces can be cherry-picked across houses. Under 1,500 lines total. Suggested split (rename
 if you have a better cut): store.py, ledger.py, roles.py, tiers.py, cadence.py, scorecard.py,
@@ -1199,4 +1202,3 @@ Each should get a story or be cut.
 3. **`kernel.spawn`** — the moment a role, a brief, a seat, and an identity tuple become one runtime; roles, tiers, and the ledger all converge on its arguments.
 4. **`kernel.die`** — the one transition that produces both accounts; it calls `write_report`, enqueues `archivist.write_entry`, and lands both via `tiers.write`, so lineage, memory, and evidence all hang off it.
 5. **`tiers.assemble`** — the compiler that makes axiom 8 real: it decides what each kernel knows, refuses on denial, and carries the predecessor's two accounts across a cold wake, which is what lets a bot outlive its kernel.
-
