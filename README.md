@@ -75,9 +75,11 @@ arity run --mock --arity 3 --task lru_cache
 arity trials
 arity trial show <trial-id>
 arity trial replay <trial-id> --json
+arity watch
+arity watch <trial-id> --ascii --no-motion
 ```
 
-These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. Add `--json` to any inspection command for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
+These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `watch` prints one ANSI-free ASCII snapshot with neutral trial and agent labels; an optional trial ID selects its structural detail without echoing the ID. `--ascii` and `--no-motion` are accepted now for forward-compatible scripts and do not change this deliberately static output. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. The `trials` and `trial` commands accept `--json` for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
 
 Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `GORKBOT_STORE` compatibility fallback and `.gorkbot/` paths.
 
