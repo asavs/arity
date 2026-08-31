@@ -128,12 +128,14 @@ class TestGorkbotAuth(unittest.TestCase):
             Path,
             "unlink",
             side_effect=OSError("synthetic cleanup failure"),
-        ):
+        ) as mocked_unlink:
             with self.assertRaisesRegex(OSError, "synthetic replace failure"):
                 self.store.save_credential(
                     "mock-provider",
                     {"access": "synthetic-access"},
                 )
+
+        mocked_unlink.assert_called_once_with(missing_ok=True)
 
     @unittest.skipUnless(os.name == "posix", "POSIX file mode semantics")
     def test_saved_credentials_are_owner_only_on_posix(self):

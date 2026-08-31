@@ -115,9 +115,9 @@ class TokenStore:
 
     Writes use same-directory atomic replacement and mode ``0600`` on POSIX,
     but each update is a read-modify-replace operation and is not transactional
-    across processes. On Windows, confidentiality depends on the destination
-    directory's ACLs. Callers providing a custom ``auth_path`` must secure its
-    parent directory. This store is not encrypted.
+    across threads or processes. On Windows, confidentiality depends on the
+    destination directory's ACLs. Callers providing a custom ``auth_path`` must
+    secure its parent directory. This store is not encrypted.
     """
 
     def __init__(self, auth_path: Optional[Path] = None):
