@@ -843,8 +843,10 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         # A task's tags pick the type (python, rust, ...) unless the role already names one.
         pack = roles.type_for_tags(race_task.tags)
         if pack and not role.type_name:
-            role = roles.with_type(role, pack.name)
-            notes.append(f"type '{pack.name}' from task tags -> {role.name}")
+            typed_role = roles.with_type(role, pack.name)
+            role = typed_role
+            if role.type_name == pack.name:
+                notes.append(f"type '{pack.name}' from task tags -> {role.name}")
     type_name = role.type_name or None
     brief = cfg.prompt or (race_task.brief if race_task else "")
     if not brief:

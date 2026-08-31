@@ -285,7 +285,7 @@ class RoleRegistry:
         return next((p for p in self._types.values() if wanted & set(p.tags)), None)
 
     def get(self, name: str) -> Optional[Role]:
-        """Look up 'role' or 'role:type'. Composition is cached; an unknown type returns None."""
+        """Look up ``role`` or safely compose ``role:type`` when the role is open-authority."""
         key = name.lower().strip()
         if key in self._roles:
             return self._roles[key]
@@ -296,6 +296,11 @@ class RoleRegistry:
             base, pack = self._roles.get(base_name), self._types.get(type_name)
             if base is None or pack is None:
                 return None
+            # A closed allowlist is an authority boundary. Current type packs are
+            # implementation-oriented and can inject write/run/TDD instructions, so retain
+            # the canonical role until type packs declare compatible authority explicitly.
+            if base.allowed_tools:
+                return base
             self._composed[key] = compose(base, pack)
             return self._composed[key]
         return None
@@ -359,6 +364,10 @@ class RoleRegistry:
         starts_implementation = query.startswith(("implement ", "code "))
         starts_build = query.startswith("build ")
         starts_design = query.startswith(("design ", "prototype ", "mock up ", "mockup "))
+        starts_experience_artifact = query.startswith((
+            "design ", "create ", "make ", "produce ", "build ",
+            "wireframe ", "mock up ", "mockup ",
+        ))
         if has_interface:
             if any(term in query for term in ("system architecture", "technical architecture")):
                 if engineer_role is not None:
@@ -368,6 +377,12 @@ class RoleRegistry:
             if starts_build and not has_design_artifact and developer_role is not None:
                 return developer_role
             if (starts_design or has_design_artifact) and designer_role is not None:
+                return designer_role
+
+        if any(term in query for term in experience_artifacts):
+            if starts_implementation and developer_role is not None:
+                return developer_role
+            if starts_experience_artifact and designer_role is not None:
                 return designer_role
 
         # "Prototype" by itself describes delivery maturity, not product-design intent.

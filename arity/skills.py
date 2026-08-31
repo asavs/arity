@@ -93,6 +93,21 @@ SCOUT_RECON_SKILL = Skill(
     tags=("recon", "search", "read-only"),
 )
 
+DESIGN_EVIDENCE_SKILL = Skill(
+    name="design-evidence",
+    description="Build truthful interface contracts from local evidence and bounded Scout handoffs.",
+    instructions=(
+        "1. Inspect local product and runtime evidence with targeted file reads, listings, and searches.\n"
+        "2. Separate verified behavior from proposed experience and record missing runtime states as schema requests.\n"
+        "3. For external facts, use `message` to request a bounded Scout evidence packet that names the "
+        "exact questions, preferred primary sources, and required freshness.\n"
+        "4. Attribute received Scout findings in Verified inputs and leave unsupported claims in Unknowns.\n"
+        "5. Do not perform network research or production implementation directly."
+    ),
+    tools=("read_file", "list_directory", "search_files", "message"),
+    tags=("design", "evidence", "local", "read-only"),
+)
+
 
 class SkillRegistry:
     """Discover built-ins and active ``.arity/skills`` overrides."""
@@ -104,7 +119,14 @@ class SkillRegistry:
         self._discover_from_disk()
 
     def _register_defaults(self) -> None:
-        for sk in (FIRECRAWL_SKILL, PYTHON_DEVELOPER_SKILL, PYTEST_TDD_SKILL, SCOUT_RECON_SKILL, TEST_ENGINEERING_SKILL):
+        for sk in (
+            FIRECRAWL_SKILL,
+            PYTHON_DEVELOPER_SKILL,
+            PYTEST_TDD_SKILL,
+            SCOUT_RECON_SKILL,
+            DESIGN_EVIDENCE_SKILL,
+            TEST_ENGINEERING_SKILL,
+        ):
             self.register(sk)
 
     def _discover_from_disk(self) -> None:

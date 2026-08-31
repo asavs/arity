@@ -24,6 +24,7 @@ from .roles import (
     TypePack,
 )
 from .skills import (
+    DESIGN_EVIDENCE_SKILL,
     FIRECRAWL_SKILL,
     PYTHON_DEVELOPER_SKILL,
     PYTEST_TDD_SKILL,
@@ -223,6 +224,7 @@ __all__ = [
     "VOICE_ROLE",
     "ENGINEER_ROLE",
     "DESIGNER_ROLE",
+    "DESIGN_EVIDENCE_SKILL",
     "PYTHON_DEVELOPER_ROLE",
     "BUILDER_ROLE",
     "REVIEWER_ROLE",
