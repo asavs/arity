@@ -282,13 +282,13 @@ def test_issue_and_missing_trial_have_stable_machine_readable_shapes() -> None:
 
 
 def persist_cli_events(events: tuple[TrialEvent, ...]) -> None:
-    store = JsonlRecordStore(Path(".gorkbot/records"))
+    store = JsonlRecordStore(Path(".arity/records"))
     for event in events:
         store.append(StoreRecord(kind="trial_event", record=event.to_dict()))
 
 
 def persist_cli_records(records_to_write: tuple[Mapping[str, Any], ...]) -> None:
-    store = JsonlRecordStore(Path(".gorkbot/records"))
+    store = JsonlRecordStore(Path(".arity/records"))
     for record in records_to_write:
         store.append(StoreRecord(kind="trial_event", record=dict(record)))
 
@@ -314,7 +314,7 @@ def test_empty_cli_catalog_is_read_only_in_human_and_json_modes(
 
     code, stdout, stderr = invoke_cli(monkeypatch, capsys, "trials")
     assert (code, stdout, stderr) == (0, "No persisted trials.\n", "")
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
     code, stdout, stderr = invoke_cli(monkeypatch, capsys, "trials", "--json")
     document = json.loads(stdout)
@@ -328,7 +328,7 @@ def test_empty_cli_catalog_is_read_only_in_human_and_json_modes(
         "error": None,
         "warnings": [],
     }
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 def test_cli_list_show_and_replay_share_the_versioned_projection(
@@ -456,7 +456,7 @@ def test_cli_reports_physical_store_corruption_as_one_json_document(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ARITY_STORE", "jsonl")
-    root = tmp_path / ".gorkbot" / "records"
+    root = tmp_path / ".arity" / "records"
     root.mkdir(parents=True)
     (root / "trial_event.jsonl").write_text("not-json\n", encoding="utf-8")
 
@@ -474,7 +474,7 @@ def test_cli_reads_configured_sqlite_without_mutating_the_store(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ARITY_STORE", "sqlite")
-    path = tmp_path / ".gorkbot" / "records.db"
+    path = tmp_path / ".arity" / "records.db"
     store = SqliteRecordStore(path)
     store.append(
         StoreRecord(kind="trial_event", record=started_event("sqlite-cli", 1).to_dict())
@@ -1272,7 +1272,7 @@ def test_machine_json_round_trips_a_persisted_lone_surrogate(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ARITY_STORE", "jsonl")
-    root = tmp_path / ".gorkbot" / "records"
+    root = tmp_path / ".arity" / "records"
     root.mkdir(parents=True)
     record = started_event("surrogate", 1).to_dict()
     record["payload"]["brief"] = "\ud800"

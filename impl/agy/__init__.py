@@ -1,4 +1,4 @@
-"""gorkbot - modular multi-model kernel coordination system."""
+"""Arity - modular multi-model kernel coordination system."""
 
 from .store import Store
 from .ledger import Ledger, Seat, AXIOM7_CACHE

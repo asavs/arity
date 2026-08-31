@@ -9,7 +9,7 @@ Every seam from axiom 12 is a class you can swap:
     Transport — how a channel reaches a human            (ConsoleTransport prints)
 
 No fakes. Every kernel turn is a real call to whatever seat the caster picked.
-The ``.gorkbot`` state directory remains a compatibility surface for now. Run
+The ``.arity`` state directory holds this prototype's local records. Run
 ``python arity.py demo`` to play S1, S3, S7, S36, S39 against available seats.
 """
 from __future__ import annotations
@@ -712,7 +712,7 @@ def demo() -> None:
     try: _sys.stdout.reconfigure(encoding="utf-8")   # Windows consoles default to cp1252
     except Exception: pass
     home = str(Path.home()).replace("\\", "/")
-    root = Path(__file__).parent / ".gorkbot"
+    root = Path(__file__).parent / ".arity"
     sys_ = System(root, biograph="Asa builds many things at once and is tired of holding all the worlds in his head. Prefers short answers.",
                   projects={"brokie": "brokie: a catalog of free-tier developer deals. Code lives in the workspace as brokie/. Trunk is 1shit/."})
     default_roles(sys_.roles, home)

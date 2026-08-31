@@ -486,10 +486,10 @@ def persist_events(
     events: tuple[TrialEvent, ...],
 ) -> Path:
     if backend == "jsonl":
-        path = root / ".gorkbot" / "records"
+        path = root / ".arity" / "records"
         store = JsonlRecordStore(path)
     else:
-        path = root / ".gorkbot" / "records.db"
+        path = root / ".arity" / "records.db"
         store = SqliteRecordStore(path)
     for event in events:
         store.append(StoreRecord(kind="trial_event", record=event.to_dict()))
@@ -1497,14 +1497,14 @@ def test_real_readers_render_selected_snapshot_without_mutating_source(
 
 
 @pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
-def test_real_missing_store_never_creates_dot_gorkbot(
+def test_real_missing_store_never_creates_dot_arity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ARITY_STORE", backend)
-    missing_tree = tmp_path / ".gorkbot"
+    missing_tree = tmp_path / ".arity"
 
     assert run_direct(watch_args()) == (0, "No persisted trials.\n", "")
     assert not missing_tree.exists()
@@ -1859,7 +1859,7 @@ def test_default_windows_like_streams_receive_exact_lf_ascii_bytes(
     assert b"\r" not in expected_stdout + expected_stderr
     emitted = stdout.buffer if expected_stdout else stderr.buffer
     assert emitted.flush_calls >= 1
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 def test_default_raw_output_completes_short_writes_without_translation(
@@ -1885,7 +1885,7 @@ def test_default_raw_output_completes_short_writes_without_translation(
     assert stdout.text_writes == []
     assert stderr.buffer.getvalue() == b""
     assert stderr.text_writes == []
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 def test_real_closed_stdout_pipe_exits_one_without_shutdown_traceback(
@@ -1927,7 +1927,7 @@ def test_real_closed_stdout_pipe_exits_one_without_shutdown_traceback(
 
     assert return_code == 1
     assert errors == b""
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 def test_explicit_text_streams_bypass_newline_translating_process_defaults(
@@ -1996,7 +1996,7 @@ def test_default_output_write_and_flush_failures_return_operational_one(
     assert b"\r" not in combined
     assert stdout.text_writes == []
     assert stderr.text_writes == []
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 @pytest.mark.parametrize("failure", ["write", "flush"])
@@ -2039,7 +2039,7 @@ def test_cli_main_real_one_shot_smoke_uses_default_handler_without_creating_stor
     )
 
     assert result == (0, "No persisted trials.\n", "")
-    assert not (tmp_path / ".gorkbot").exists()
+    assert not (tmp_path / ".arity").exists()
 
 
 @pytest.mark.parametrize(

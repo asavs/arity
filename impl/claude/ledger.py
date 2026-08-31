@@ -83,7 +83,7 @@ class Proxy:
     def headers(self, seat):
         h = {"Content-Type": "application/json", "Authorization": "Bearer " + self._keys[seat.id]}
         if "openrouter" in seat.endpoint:
-            h["HTTP-Referer"], h["X-Title"] = "https://redphone.example/asas", "gorkbot"
+            h["HTTP-Referer"], h["X-Title"] = "https://redphone.example/asas", "arity"
         return h
 
 def _openrouter_models(key):

@@ -42,7 +42,7 @@ def test_configured_store_spec_is_shared_with_the_writable_default(
     spec = configured_store_spec()
     store = default_record_store()
 
-    assert spec == StoreSpec("sqlite", Path(".gorkbot/records.db"))
+    assert spec == StoreSpec("sqlite", Path(".arity/records.db"))
     assert isinstance(store, SqliteRecordStore)
     assert store.path == spec.path
     store.close()
@@ -50,7 +50,7 @@ def test_configured_store_spec_is_shared_with_the_writable_default(
     monkeypatch.setenv("ARITY_STORE", "jsonl")
     spec = configured_store_spec()
     store = default_record_store()
-    assert spec == StoreSpec("jsonl", Path(".gorkbot/records"))
+    assert spec == StoreSpec("jsonl", Path(".arity/records"))
     assert isinstance(store, JsonlRecordStore)
     assert store.root == spec.path
 

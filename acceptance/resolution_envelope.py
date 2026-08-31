@@ -146,7 +146,7 @@ def main() -> None:
         root = Path(raw_root).resolve()
         cwd = root / "cwd"
         workspaces = root / "workspaces"
-        database = cwd / ".gorkbot" / "records.db"
+        database = cwd / ".arity" / "records.db"
         delivery_root = root / "delivery"
         evidence_path = root / "evidence.json"
         cwd.mkdir()
@@ -268,7 +268,7 @@ def main() -> None:
 
             before_inspection = {
                 path.relative_to(cwd).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
-                for path in (cwd / ".gorkbot").rglob("*")
+                for path in (cwd / ".arity").rglob("*")
                 if path.is_file()
             }
             with open_record_reader(StoreSpec("sqlite", database)) as reader:
@@ -309,7 +309,7 @@ def main() -> None:
 
             after_inspection = {
                 path.relative_to(cwd).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
-                for path in (cwd / ".gorkbot").rglob("*")
+                for path in (cwd / ".arity").rglob("*")
                 if path.is_file()
             }
             assert after_inspection == before_inspection
