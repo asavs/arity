@@ -24,7 +24,8 @@ def venv_arity(root: Path) -> Path:
 
 
 def verify_watch_command(environment: Path, *, cwd: Path) -> None:
-    command = [str(venv_arity(environment)), "watch", "--ascii", "--no-motion"]
+    executable = str(venv_arity(environment))
+    command = [executable, "watch", "--ascii", "--no-motion"]
     print("+", " ".join(command), flush=True)
     env = os.environ.copy()
     env["ARITY_STORE"] = "jsonl"
@@ -41,20 +42,44 @@ def verify_watch_command(environment: Path, *, cwd: Path) -> None:
         cwd=cwd,
         env=env,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="strict",
         timeout=30,
         check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"installed arity watch returned {result.returncode}")
-    if result.stdout != "No persisted trials.\n":
+    if result.stdout != b"No persisted trials.\n":
         raise RuntimeError("installed arity watch changed its empty-state output")
     if result.stderr:
         raise RuntimeError("installed arity watch wrote to stderr")
-    if not result.stdout.isascii() or "\x1b" in result.stdout:
+    if not result.stdout.isascii() or b"\x1b" in result.stdout:
         raise RuntimeError("installed arity watch output was not fixed ANSI-free ASCII")
+
+    missing_command = [
+        executable,
+        "watch",
+        "acceptance-missing-trial",
+        "--ascii",
+        "--no-motion",
+    ]
+    print("+", " ".join(missing_command), flush=True)
+    missing = subprocess.run(
+        missing_command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if missing.returncode != 3:
+        raise RuntimeError(
+            f"installed arity watch missing selection returned {missing.returncode}"
+        )
+    if missing.stdout:
+        raise RuntimeError("installed arity watch missing selection wrote to stdout")
+    if missing.stderr != b"arity: trial_not_found\n":
+        raise RuntimeError("installed arity watch changed its missing-selection error")
+    if b"\r" in result.stdout + result.stderr + missing.stdout + missing.stderr:
+        raise RuntimeError("installed arity watch emitted translated CRLF output")
     if store_root.exists():
         raise RuntimeError("installed arity watch created a missing store")
 
