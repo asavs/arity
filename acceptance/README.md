@@ -1,6 +1,7 @@
 # Installed resolution acceptance
 
-Run this gate from a development environment that has `build` installed:
+Run this gate from a development environment with `build`, `setuptools>=77.0`, and
+`wheel` installed:
 
 ```bash
 python acceptance/verify_installed.py
