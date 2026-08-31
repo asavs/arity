@@ -1,9 +1,8 @@
 """Arity — a small, composable trial kernel for autonomous agent harnesses.
 
-Version: 0.3.0
-
 The ``arity`` import namespace is retained for compatibility.
 """
+from ._version import __version__
 from .handlers import (
     ConsoleTransport,
     JsonlRecordStore,
@@ -146,9 +145,8 @@ from .types import (
     UserMessage,
 )
 
-__version__ = "0.3.0"
-
 __all__ = [
+    "__version__",
     # Core types
     "Status",
     "State",
