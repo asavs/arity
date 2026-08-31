@@ -393,21 +393,70 @@ def test_direct_evidence_cannot_satisfy_an_arm_specific_projection() -> None:
     assert view == CacheHeatView(state="unknown")
 
 
-def test_projection_does_not_consume_past_its_public_record_cap() -> None:
+def test_projection_accepts_an_iterator_at_its_public_record_cap() -> None:
     evidence = _evidence(
         observed_at=100.0,
         window=30,
         clock_basis="response_received",
     )
+    next_calls = 0
 
-    def bounded_source():
-        for _ in range(MAX_CACHE_USAGE_RECORDS):
-            yield evidence
-        raise AssertionError("projection consumed beyond its record cap")
+    class BoundedSource:
+        def __iter__(self):
+            return self
 
-    view = project_cache_heat(bounded_source(), now=110.0, mode="exact")
+        def __next__(self):
+            nonlocal next_calls
+            next_calls += 1
+            if next_calls > MAX_CACHE_USAGE_RECORDS:
+                raise StopIteration
+            return evidence
+
+    view = project_cache_heat(BoundedSource(), now=110.0, mode="exact")
 
     assert view.deadline_at == 130.0
+    assert next_calls == MAX_CACHE_USAGE_RECORDS + 1
+
+
+def test_projection_fails_closed_when_a_sized_history_exceeds_the_record_cap() -> None:
+    oldest = _record(
+        _evidence(window=30),
+        started_at=0.0,
+    )
+    newest = _record(
+        _evidence(window=300),
+        started_at=100.0,
+    )
+    history = (oldest,) * MAX_CACHE_USAGE_RECORDS + (newest,)
+
+    view = project_cache_heat(history, now=110.0, mode="exact")
+
+    assert view == CacheHeatView(state="unknown")
+
+
+def test_projection_probes_only_one_item_past_the_iterator_cap() -> None:
+    evidence = _evidence(
+        observed_at=100.0,
+        window=30,
+        clock_basis="response_received",
+    )
+    next_calls = 0
+
+    class OverflowSource:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal next_calls
+            next_calls += 1
+            if next_calls > MAX_CACHE_USAGE_RECORDS + 1:
+                raise AssertionError("projection consumed beyond its overflow probe")
+            return evidence
+
+    view = project_cache_heat(OverflowSource(), now=110.0, mode="exact")
+
+    assert view == CacheHeatView(state="unknown")
+    assert next_calls == MAX_CACHE_USAGE_RECORDS + 1
 
 
 def test_malformed_current_data_and_future_anchors_make_no_claim() -> None:
