@@ -111,6 +111,16 @@ from .trial_events import (
     UnsupportedTrialEventSchema,
     replay_trial,
 )
+from .telemetry import (
+    CachePolicyHint,
+    JournaledModelProvider,
+    RequestOrdinalSource,
+    TokenMeasurement,
+    UnsupportedUsageEvidenceSchema,
+    UsageEvidence,
+    UsageRecordingContext,
+    normalize_usage_evidence,
+)
 from .inspection import (
     InspectionIssue,
     TrialCatalog,
@@ -252,6 +262,14 @@ __all__ = [
     "TrialReplay",
     "UnsupportedTrialEventSchema",
     "replay_trial",
+    "TokenMeasurement",
+    "CachePolicyHint",
+    "UsageEvidence",
+    "UnsupportedUsageEvidenceSchema",
+    "UsageRecordingContext",
+    "RequestOrdinalSource",
+    "JournaledModelProvider",
+    "normalize_usage_evidence",
     "InspectionIssue",
     "TrialCatalog",
     "TrialInspection",
