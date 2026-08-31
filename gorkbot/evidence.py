@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import PurePosixPath
@@ -19,6 +20,89 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 EVIDENCE_SCHEMA_VERSION = 2
 EVALUATION_SCHEMA_VERSION = 1
 RESOLUTION_SCHEMA_VERSION = 2
+
+
+class UnsupportedEvidenceContractSchema(ValueError):
+    """Base class for a future version of a nested evidence contract."""
+
+    document_type = "evidence contract"
+
+    def __init__(self, schema_version: int) -> None:
+        super().__init__(
+            f"unsupported {self.document_type} schema version {schema_version}"
+        )
+        self.schema_version = schema_version
+
+
+class UnsupportedEvidenceSchema(UnsupportedEvidenceContractSchema):
+    document_type = "evidence"
+
+
+class UnsupportedEvaluationSchema(UnsupportedEvidenceContractSchema):
+    document_type = "evaluation"
+
+
+class UnsupportedResolutionSchema(UnsupportedEvidenceContractSchema):
+    document_type = "resolution"
+
+
+def _require_schema_version(
+    value: Mapping[str, Any],
+    expected: int,
+    error_type: type[UnsupportedEvidenceContractSchema],
+) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{error_type.document_type} must be a JSON object")
+    schema_version = value.get("schema_version")
+    if type(schema_version) is not int:
+        raise TypeError(f"{error_type.document_type} schema_version must be an integer")
+    if schema_version != expected:
+        raise error_type(schema_version)
+
+
+def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a JSON object")
+    return value
+
+
+def _require_array(value: Any, label: str) -> tuple[Any, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{label} must be a JSON array")
+    return tuple(value)
+
+
+def _require_string(value: Any, label: str, *, nullable: bool = False) -> Optional[str]:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    return value
+
+
+def _require_integer(value: Any, label: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{label} must be an integer")
+    return value
+
+
+def _require_number(value: Any, label: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{label} must be a number")
+    try:
+        finite = math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be finite") from exc
+    if not finite:
+        raise ValueError(f"{label} must be finite")
+    return value
+
+
+def _require_strings(value: Any, label: str) -> tuple[str, ...]:
+    items = _require_array(value, label)
+    if any(not isinstance(item, str) for item in items):
+        raise TypeError(f"{label} must contain only strings")
+    return items  # type: ignore[return-value]
 
 
 def _freeze_json(value: Any) -> Any:
@@ -52,7 +136,11 @@ def _canonical_json(value: Any) -> str:
 
 
 def _content_hash(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    try:
+        encoded = _canonical_json(value).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("evidence text must contain valid Unicode") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -118,13 +206,14 @@ class ArtifactEvidence:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ArtifactEvidence":
+        value = _require_mapping(value, "artifact evidence")
         return cls(
-            path=str(value["path"]),
-            sha256=str(value["sha256"]),
-            size=int(value["size"]),
-            text=None if value.get("text") is None else str(value["text"]),
-            content_base64=(
-                None if value.get("content_base64") is None else str(value["content_base64"])
+            path=_require_string(value["path"], "artifact path") or "",
+            sha256=_require_string(value["sha256"], "artifact sha256") or "",
+            size=_require_integer(value["size"], "artifact size"),
+            text=_require_string(value.get("text"), "artifact text", nullable=True),
+            content_base64=_require_string(
+                value.get("content_base64"), "artifact content_base64", nullable=True
             ),
         )
 
@@ -244,31 +333,42 @@ class CandidateEvidence:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "CandidateEvidence":
+        value = _require_mapping(value, "candidate evidence")
+        candidate_id = _require_string(value["candidate_id"], "candidate id") or ""
+        artifacts = _require_array(value.get("artifacts", ()), "candidate artifacts")
         return cls.create(
-            candidate_id=str(value["candidate_id"]),
-            name=str(value.get("name", value["candidate_id"])),
-            signature=str(value.get("signature", "")),
-            model=str(value.get("model", "")),
-            provider=str(value.get("provider", "")),
-            role=str(value.get("role", "")),
-            harness=str(value.get("harness", "")),
-            tool_runner=str(value.get("tool_runner", "")),
-            skills=value.get("skills") or (),
-            context=str(value.get("context", "accounts")),
-            status=str(value.get("status", "completed")),
-            verdict=str(value.get("verdict", "")),
-            rank=int(value.get("rank", 0)),
-            tied_with=value.get("tied_with") or (),
-            tokens_used=int(value.get("tokens_used", 0)),
-            duration_seconds=float(value.get("duration_seconds", 0.0)),
-            fallbacks=int(value.get("fallbacks", 0)),
-            test_results=value.get("test_results") or {},
-            axes=value.get("axes") or {},
-            artifacts=tuple(ArtifactEvidence.from_dict(item) for item in value.get("artifacts") or ()),
-            output=value.get("output"),
-            arm_id=value.get("arm_id"),
-            arm_ordinal=int(value.get("arm_ordinal", 0)),
-            context_adapter=value.get("context_adapter"),
+            candidate_id=candidate_id,
+            name=_require_string(value.get("name", candidate_id), "candidate name") or "",
+            signature=_require_string(value.get("signature", ""), "candidate signature") or "",
+            model=_require_string(value.get("model", ""), "candidate model") or "",
+            provider=_require_string(value.get("provider", ""), "candidate provider") or "",
+            role=_require_string(value.get("role", ""), "candidate role") or "",
+            harness=_require_string(value.get("harness", ""), "candidate harness") or "",
+            tool_runner=_require_string(
+                value.get("tool_runner", ""), "candidate tool runner"
+            ) or "",
+            skills=_require_strings(value.get("skills", ()), "candidate skills"),
+            context=_require_string(value.get("context", "accounts"), "candidate context") or "",
+            status=_require_string(value.get("status", "completed"), "candidate status") or "",
+            verdict=_require_string(value.get("verdict", ""), "candidate verdict") or "",
+            rank=_require_integer(value.get("rank", 0), "candidate rank"),
+            tied_with=_require_strings(value.get("tied_with", ()), "candidate ties"),
+            tokens_used=_require_integer(value.get("tokens_used", 0), "candidate tokens"),
+            duration_seconds=_require_number(
+                value.get("duration_seconds", 0.0), "candidate duration"
+            ),
+            fallbacks=_require_integer(value.get("fallbacks", 0), "candidate fallbacks"),
+            test_results=_require_mapping(
+                value.get("test_results", {}), "candidate test results"
+            ),
+            axes=_require_mapping(value.get("axes", {}), "candidate axes"),
+            artifacts=tuple(ArtifactEvidence.from_dict(item) for item in artifacts),
+            output=_require_string(value.get("output"), "candidate output", nullable=True),
+            arm_id=_require_string(value.get("arm_id"), "candidate arm id", nullable=True),
+            arm_ordinal=_require_integer(value.get("arm_ordinal", 0), "candidate arm ordinal"),
+            context_adapter=_require_string(
+                value.get("context_adapter"), "candidate context adapter", nullable=True
+            ),
         )
 
 
@@ -352,19 +452,30 @@ class EvidenceBundle:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceBundle":
-        schema_version = int(value.get("schema_version", 0))
-        if schema_version != EVIDENCE_SCHEMA_VERSION:
-            raise ValueError(f"unsupported evidence schema version {schema_version}")
-        bundle = cls.create(
-            trial_id=str(value["trial_id"]),
-            task_id=str(value["task_id"]),
-            task_name=value.get("task_name"),
-            brief=str(value.get("brief", "")),
-            candidates=tuple(CandidateEvidence.from_dict(item) for item in value.get("candidates") or ()),
-            hidden_test_hashes=value.get("hidden_test_hashes") or {},
-            metadata=value.get("metadata") or {},
+        _require_schema_version(value, EVIDENCE_SCHEMA_VERSION, UnsupportedEvidenceSchema)
+        candidates = _require_array(value.get("candidates", ()), "evidence candidates")
+        hidden_test_hashes = _require_mapping(
+            value.get("hidden_test_hashes", {}), "evidence hidden test hashes"
         )
-        claimed_hash = str(value.get("evidence_hash", ""))
+        if any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in hidden_test_hashes.items()
+        ):
+            raise TypeError("evidence hidden test hashes must map strings to strings")
+        bundle = cls.create(
+            trial_id=_require_string(value["trial_id"], "evidence trial id") or "",
+            task_id=_require_string(value["task_id"], "evidence task id") or "",
+            task_name=_require_string(
+                value.get("task_name"), "evidence task name", nullable=True
+            ),
+            brief=_require_string(value.get("brief", ""), "evidence brief") or "",
+            candidates=tuple(CandidateEvidence.from_dict(item) for item in candidates),
+            hidden_test_hashes=hidden_test_hashes,
+            metadata=_require_mapping(value.get("metadata", {}), "evidence metadata"),
+        )
+        claimed_hash = _require_string(
+            value.get("evidence_hash", ""), "evidence content hash"
+        ) or ""
         if not claimed_hash:
             raise ValueError("evidence bundle is missing its content hash")
         if claimed_hash != bundle.evidence_hash:
@@ -445,20 +556,26 @@ class Evaluation:
 
     @classmethod
     def from_dict(cls, bundle: EvidenceBundle, value: Mapping[str, Any]) -> "Evaluation":
-        schema_version = int(value.get("schema_version", 0))
-        if schema_version != EVALUATION_SCHEMA_VERSION:
-            raise ValueError(f"unsupported evaluation schema version {schema_version}")
+        _require_schema_version(value, EVALUATION_SCHEMA_VERSION, UnsupportedEvaluationSchema)
+        ties = _require_array(value.get("ties", ()), "evaluation ties")
+        validated_ties = tuple(
+            _require_strings(group, "evaluation tie group") for group in ties
+        )
         evaluation = cls.create(
             bundle,
-            evaluator_id=str(value["evaluator_id"]),
-            order=value.get("order") or (),
-            ties=value.get("ties") or (),
-            reason=str(value.get("reason", "")),
-            metadata=value.get("metadata") or {},
+            evaluator_id=_require_string(value["evaluator_id"], "evaluation evaluator id") or "",
+            order=_require_strings(value.get("order", ()), "evaluation order"),
+            ties=validated_ties,
+            reason=_require_string(value.get("reason", ""), "evaluation reason") or "",
+            metadata=_require_mapping(value.get("metadata", {}), "evaluation metadata"),
         )
-        if str(value.get("evidence_hash", "")) != bundle.evidence_hash:
+        if _require_string(
+            value.get("evidence_hash", ""), "evaluation evidence hash"
+        ) != bundle.evidence_hash:
             raise ValueError("evaluation was produced for a different evidence bundle")
-        claimed_id = str(value.get("evaluation_id", ""))
+        claimed_id = _require_string(
+            value.get("evaluation_id", ""), "evaluation content id"
+        ) or ""
         if not claimed_id:
             raise ValueError("evaluation is missing its content id")
         if claimed_id != evaluation.evaluation_id:
@@ -555,23 +672,40 @@ class Resolution:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Resolution":
-        schema_version = int(value.get("schema_version", 0))
-        if schema_version != RESOLUTION_SCHEMA_VERSION:
-            raise ValueError(f"unsupported resolution schema version {schema_version}")
+        _require_schema_version(value, RESOLUTION_SCHEMA_VERSION, UnsupportedResolutionSchema)
         resolution = cls(
-            kind=ResolutionKind(str(value.get("source", "unresolved"))),
-            candidate_id=None if value.get("candidate_id") is None else str(value["candidate_id"]),
-            evidence_hash=str(value["evidence_hash"]),
-            reason=str(value.get("reason", "")),
-            eligible_candidate_ids=tuple(str(item) for item in value.get("eligible_candidate_ids") or ()),
-            expected_evaluator_ids=tuple(str(item) for item in value.get("expected_evaluator_ids") or ()),
-            evaluator_ids=tuple(str(item) for item in value.get("evaluator_ids") or ()),
-            evaluation_ids=tuple(str(item) for item in value.get("evaluation_ids") or ()),
-            resolution_id=str(value.get("resolution_id", "")),
+            kind=ResolutionKind(
+                _require_string(value.get("source", "unresolved"), "resolution source")
+                or "unresolved"
+            ),
+            candidate_id=_require_string(
+                value.get("candidate_id"), "resolution candidate id", nullable=True
+            ),
+            evidence_hash=_require_string(
+                value["evidence_hash"], "resolution evidence hash"
+            ) or "",
+            reason=_require_string(value.get("reason", ""), "resolution reason") or "",
+            eligible_candidate_ids=_require_strings(
+                value.get("eligible_candidate_ids", ()), "resolution eligible candidates"
+            ),
+            expected_evaluator_ids=_require_strings(
+                value.get("expected_evaluator_ids", ()), "resolution expected evaluators"
+            ),
+            evaluator_ids=_require_strings(
+                value.get("evaluator_ids", ()), "resolution evaluators"
+            ),
+            evaluation_ids=_require_strings(
+                value.get("evaluation_ids", ()), "resolution evaluations"
+            ),
+            resolution_id=_require_string(
+                value.get("resolution_id", ""), "resolution content id"
+            ) or "",
         )
         if not value.get("resolution_id"):
             raise ValueError("resolution is missing its content id")
-        claimed_status = str(value.get("status", ""))
+        claimed_status = _require_string(
+            value.get("status", ""), "resolution status"
+        ) or ""
         if claimed_status and claimed_status != ("resolved" if resolution.resolved else "unresolved"):
             raise ValueError("resolution status contradicts its source and candidate")
         return resolution

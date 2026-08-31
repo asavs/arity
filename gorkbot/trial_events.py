@@ -74,6 +74,228 @@ def _strict_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return _freeze_json(decoded)
 
 
+def _payload_string(
+    payload: Mapping[str, Any],
+    key: str,
+    label: str,
+    *,
+    required: bool = False,
+    nullable: bool = False,
+) -> Optional[str]:
+    if key not in payload:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    value = payload[key]
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if required and not value:
+        raise ValueError(f"{label} must not be empty")
+    return value
+
+
+def _payload_integer(
+    payload: Mapping[str, Any], key: str, label: str, *, required: bool = False
+) -> Optional[int]:
+    if key not in payload:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    value = payload[key]
+    if type(value) is not int:
+        raise TypeError(f"{label} must be an integer")
+    return value
+
+
+def _payload_number(payload: Mapping[str, Any], key: str, label: str) -> None:
+    if key not in payload:
+        return
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{label} must be a number")
+    try:
+        finite = math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be finite") from exc
+    if not finite:
+        raise ValueError(f"{label} must be finite")
+
+
+def _payload_mapping(
+    payload: Mapping[str, Any], key: str, label: str, *, required: bool = False
+) -> Optional[Mapping[str, Any]]:
+    if key not in payload:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    value = payload[key]
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a JSON object")
+    return value
+
+
+def _payload_array(
+    payload: Mapping[str, Any], key: str, label: str, *, required: bool = False
+) -> Optional[tuple[Any, ...]]:
+    if key not in payload:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    value = payload[key]
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{label} must be a JSON array")
+    return tuple(value)
+
+
+def _payload_strings(payload: Mapping[str, Any], key: str, label: str) -> None:
+    items = _payload_array(payload, key, label)
+    if items is not None and any(not isinstance(item, str) for item in items):
+        raise TypeError(f"{label} must contain only strings")
+
+
+def _validate_arm_declaration(arm: Mapping[str, Any]) -> None:
+    _payload_string(arm, "arm_id", "trial arm id", required=True)
+    _payload_integer(arm, "arm_ordinal", "trial arm ordinal", required=True)
+    for key, label in (
+        ("name", "trial arm name"),
+        ("signature", "trial arm signature"),
+        ("model", "trial arm model"),
+        ("provider", "trial arm provider"),
+        ("role", "trial arm role"),
+        ("harness", "trial arm harness"),
+        ("tool_runner", "trial arm tool runner"),
+        ("context", "trial arm context"),
+    ):
+        _payload_string(arm, key, label)
+    _payload_string(
+        arm, "context_adapter", "trial arm context adapter", nullable=True
+    )
+    _payload_strings(arm, "skills", "trial arm skills")
+
+
+def _validate_known_event_payload(event_type: str, payload: Mapping[str, Any]) -> None:
+    """Reject lossy payload coercion before reducing a current-schema event."""
+    if event_type == "trial.started":
+        for key, label in (
+            ("task_id", "trial task id"),
+            ("brief", "trial brief"),
+            ("role", "trial role"),
+        ):
+            _payload_string(payload, key, label)
+        _payload_string(payload, "task_name", "trial task name", nullable=True)
+        requested = (
+            None
+            if payload.get("requested_arity") is None
+            else _payload_integer(payload, "requested_arity", "requested arity")
+        )
+        resolved = _payload_integer(payload, "resolved_arity", "resolved arity")
+        if requested is not None and requested < 0:
+            raise ValueError("requested arity must not be negative")
+        if resolved is not None and resolved < 0:
+            raise ValueError("resolved arity must not be negative")
+        arms = _payload_array(payload, "arms", "trial arms")
+        if arms is not None:
+            for arm in arms:
+                if isinstance(arm, Mapping):
+                    _validate_arm_declaration(arm)
+                elif not isinstance(arm, str) or not arm:
+                    raise TypeError(
+                        "each trial arm must be a non-empty string or JSON object"
+                    )
+        _payload_strings(payload, "evaluator_ids", "trial evaluator ids")
+        hidden = _payload_mapping(
+            payload, "hidden_test_hashes", "trial hidden test hashes"
+        )
+        if hidden is not None and any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in hidden.items()
+        ):
+            raise TypeError("trial hidden test hashes must map strings to strings")
+        return
+
+    if event_type == "arm.completed":
+        _payload_string(payload, "phase", "completed arm phase")
+        _payload_string(payload, "arm_id", "completed arm id", required=True)
+        _payload_string(
+            payload, "candidate_id", "completed candidate id", required=True
+        )
+        _payload_integer(payload, "arm_ordinal", "completed arm ordinal")
+        for key, label in (
+            ("name", "completed arm name"),
+            ("status", "completed arm status"),
+            ("signature", "completed arm signature"),
+            ("model", "completed arm model"),
+            ("provider", "completed arm provider"),
+            ("role", "completed arm role"),
+            ("harness", "completed arm harness"),
+            ("tool_runner", "completed arm tool runner"),
+            ("context", "completed arm context"),
+        ):
+            _payload_string(payload, key, label)
+        _payload_string(
+            payload, "context_adapter", "completed arm context adapter", nullable=True
+        )
+        _payload_strings(payload, "skills", "completed arm skills")
+        _payload_integer(payload, "tokens_used", "completed arm token count")
+        _payload_number(payload, "duration_seconds", "completed arm duration")
+        _payload_integer(payload, "fallbacks", "completed arm fallback count")
+        return
+
+    if event_type == "evidence.frozen":
+        _payload_mapping(payload, "bundle", "frozen evidence bundle", required=True)
+        return
+
+    if event_type == "review.recorded":
+        _payload_string(payload, "evaluator_id", "review evaluator id", required=True)
+        _payload_string(payload, "evidence_hash", "review evidence hash", required=True)
+        _payload_string(payload, "status", "review status", required=True)
+        _payload_string(payload, "error", "review error", nullable=True)
+        if payload.get("raw") is not None:
+            _payload_mapping(payload, "raw", "review raw response")
+        if payload.get("evaluation") is not None:
+            _payload_mapping(payload, "evaluation", "review evaluation")
+        return
+
+    if event_type == "resolution.recorded":
+        _payload_mapping(payload, "resolution", "recorded resolution", required=True)
+        return
+
+    if event_type == "delivery.completed":
+        _payload_string(
+            payload, "candidate_id", "delivery candidate id", required=True
+        )
+        _payload_integer(
+            payload, "resolution_sequence", "delivery resolution sequence", required=True
+        )
+        _payload_string(
+            payload, "resolution_id", "delivery resolution id", required=True
+        )
+        _payload_string(
+            payload, "evidence_hash", "delivery evidence hash", required=True
+        )
+        delivery = _payload_mapping(
+            payload, "delivery", "portable delivery", required=True
+        )
+        assert delivery is not None
+        _payload_strings(delivery, "files", "delivery files")
+        _payload_string(delivery, "answer", "delivery answer", nullable=True)
+        for key, label in (
+            ("winner_name", "delivery winner name"),
+            ("signature", "delivery signature"),
+            ("receipt", "delivery receipt"),
+            ("resolution_source", "delivery resolution source"),
+        ):
+            _payload_string(delivery, key, label)
+        for key, label in (
+            ("delivered", "delivery delivered flag"),
+            ("asked_human", "delivery asked-human flag"),
+        ):
+            if key in delivery and type(delivery[key]) is not bool:
+                raise TypeError(f"{label} must be a boolean")
+
+
 @dataclass(frozen=True)
 class TrialEvent:
     schema_version: int
@@ -134,8 +356,6 @@ class TrialEvent:
         schema_version = value.get("schema_version")
         if type(schema_version) is not int:
             raise TypeError("trial event schema_version must be an integer")
-        if schema_version != TRIAL_EVENT_SCHEMA_VERSION:
-            raise UnsupportedTrialEventSchema(schema_version)
         trial_id = value.get("trial_id")
         if not isinstance(trial_id, str) or not trial_id:
             raise TypeError("trial event trial_id must be a non-empty string")
@@ -156,6 +376,8 @@ class TrialEvent:
             not isinstance(idempotency_key, str) or not idempotency_key
         ):
             raise TypeError("trial event idempotency_key must be a non-empty string or null")
+        if schema_version != TRIAL_EVENT_SCHEMA_VERSION:
+            raise UnsupportedTrialEventSchema(schema_version)
         return cls.create(
             trial_id=trial_id,
             sequence=sequence,
@@ -354,7 +576,10 @@ def replay_trial(
         raise ValueError("a trial replay requires exactly one trial.started event")
 
     started = ordered[0].payload
+    _validate_known_event_payload("trial.started", started)
     declared_arms = started.get("arms") or ()
+    if not isinstance(declared_arms, (list, tuple)):
+        raise TypeError("trial arms must be a JSON array")
     declarations_by_arm = {
         str(arm.get("arm_id")): arm
         for arm in declared_arms
@@ -374,7 +599,10 @@ def replay_trial(
     }
     declared_panel: Optional[tuple[str, ...]] = None
     if "evaluator_ids" in started:
-        raw_panel = tuple(str(item) for item in (started.get("evaluator_ids") or ()))
+        encoded_panel = started.get("evaluator_ids") or ()
+        if not isinstance(encoded_panel, (list, tuple)):
+            raise TypeError("trial evaluator declarations must be a JSON array")
+        raw_panel = tuple(str(item) for item in encoded_panel)
         if len(raw_panel) != len(set(raw_panel)):
             raise ValueError("trial evaluator declarations must be unique")
         declared_panel = tuple(sorted(raw_panel))
@@ -395,6 +623,7 @@ def replay_trial(
 
     for event in ordered[1:]:
         payload = event.payload
+        _validate_known_event_payload(event.event_type, payload)
         if event.event_type == "arm.completed":
             phase = str(payload.get("phase", "trial"))
             if phase not in TRIAL_PHASES:
@@ -526,9 +755,11 @@ def replay_trial(
             if evidence_hash not in bundle_by_hash:
                 raise ValueError("review references evidence that was not frozen earlier")
             if encoded_evaluation is not None:
-                if str(encoded_evaluation.get("evidence_hash", "")) != evidence_hash:
-                    raise ValueError("review envelope and evaluation reference different evidence")
+                if not isinstance(encoded_evaluation, Mapping):
+                    raise TypeError("review evaluation must be a JSON object")
                 evaluation = Evaluation.from_dict(bundle_by_hash[evidence_hash], encoded_evaluation)
+                if evaluation.evidence_hash != evidence_hash:
+                    raise ValueError("review envelope and evaluation reference different evidence")
                 if str(payload.get("evaluator_id", "")) != evaluation.evaluator_id:
                     raise ValueError("review envelope and evaluation identify different evaluators")
                 evaluations.append(evaluation)

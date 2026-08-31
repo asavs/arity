@@ -7,9 +7,14 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping, Optional
 
-from .evidence import _freeze_json, _thaw_json
+from .evidence import (
+    UnsupportedEvidenceContractSchema,
+    _freeze_json,
+    _thaw_json,
+)
 from .seams import RecordReader
 from .trial_events import (
+    KNOWN_EVENT_TYPES,
     TRIAL_EVENT_SCHEMA_VERSION,
     TrialEvent,
     TrialReplay,
@@ -222,11 +227,12 @@ def _freeze_record(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _finite_number(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(float(value))
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _optional_string(value: Any) -> Optional[str]:
@@ -263,6 +269,35 @@ def _ordered_records(records: Iterable[Mapping[str, Any]]) -> tuple[Mapping[str,
     )
 
 
+def _canonical_records(
+    records: tuple[Mapping[str, Any], ...],
+) -> tuple[Mapping[str, Any], ...]:
+    """Validate the whole envelope before any unsupported-event trust boundary."""
+    by_sequence: dict[int, Mapping[str, Any]] = {}
+    by_idempotency_key: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        sequence = _sequence(record)
+        if sequence is None:
+            raise ValueError("trial event sequence must be a positive integer")
+        existing = by_sequence.get(sequence)
+        if existing is None:
+            by_sequence[sequence] = record
+        elif existing != record:
+            raise ValueError(f"conflicting trial events at sequence {sequence}")
+        key = record.get("idempotency_key")
+        if isinstance(key, str):
+            prior = by_idempotency_key.get(key)
+            if prior is not None and prior != record:
+                raise ValueError(f"idempotency key {key!r} identifies distinct trial events")
+            by_idempotency_key[key] = record
+    canonical = tuple(by_sequence[index] for index in sorted(by_sequence))
+    expected = list(range(1, len(canonical) + 1))
+    actual = [_sequence(record) for record in canonical]
+    if actual != expected:
+        raise ValueError(f"trial event sequence has gaps: expected {expected}, got {actual}")
+    return canonical
+
+
 def _issue(
     code: str,
     message: str,
@@ -285,13 +320,84 @@ def _lifecycle_status(replay: Optional[TrialReplay]) -> LifecycleStatus:
     return "unknown" if replay is None else replay.lifecycle_status  # type: ignore[return-value]
 
 
+def _unhandled_issues(replay: Optional[TrialReplay], trial_id: str) -> list[InspectionIssue]:
+    if replay is None:
+        return []
+    return [
+        _issue(
+            "unsupported_event",
+            f"unsupported trial event type {event.event_type!r}",
+            trial_id,
+            event.to_dict(),
+        )
+        for event in replay.unhandled_events
+    ]
+
+
+def _nested_schema_inspection(
+    trial_id: str,
+    events: tuple[TrialEvent, ...],
+    ordered: tuple[Mapping[str, Any], ...],
+    inherited_issues: Iterable[InspectionIssue] = (),
+) -> TrialInspection:
+    """Find a future nested contract and retain only the projection before it."""
+    last_replay: Optional[TrialReplay] = None
+    inherited = list(inherited_issues)
+    for index, event in enumerate(events):
+        try:
+            last_replay = replay_trial(events[: index + 1], trial_id)
+        except UnsupportedEvidenceContractSchema as exc:
+            issues = inherited + _unhandled_issues(last_replay, trial_id)
+            issues.append(
+                _issue(
+                    f"unsupported_{exc.document_type.replace(' ', '_')}_schema",
+                    str(exc),
+                    trial_id,
+                    event.to_dict(),
+                )
+            )
+            issues.sort(
+                key=lambda issue: (
+                    issue.sequence if issue.sequence is not None else 2**63 - 1,
+                    issue.code,
+                )
+            )
+            return TrialInspection(
+                trial_id=trial_id,
+                integrity="unsupported",
+                status=_lifecycle_status(last_replay),
+                events=ordered,
+                replay=last_replay,
+                issues=tuple(issues),
+            )
+        except (
+            AttributeError,
+            KeyError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            return TrialInspection(
+                trial_id=trial_id,
+                integrity="corrupt",
+                status="unknown",
+                events=ordered,
+                replay=None,
+                issues=tuple(inherited) + (
+                    _issue("invalid_replay", str(exc), trial_id, event.to_dict()),
+                ),
+            )
+    raise RuntimeError("nested schema inspection was requested without an unsupported schema")
+
+
 def _inspect_records(
     trial_id: str,
     records: Iterable[Mapping[str, Any]],
 ) -> TrialInspection:
     try:
         ordered = _ordered_records(records)
-    except (AttributeError, TypeError, ValueError) as exc:
+    except (AttributeError, OverflowError, RecursionError, TypeError, ValueError) as exc:
         return TrialInspection(
             trial_id=trial_id,
             integrity="corrupt",
@@ -301,23 +407,20 @@ def _inspect_records(
             issues=(_issue("invalid_record", str(exc), trial_id),),
         )
 
-    supported: list[TrialEvent] = []
-    unsupported_records: list[Mapping[str, Any]] = []
-    issues: list[InspectionIssue] = []
+    # Validate every common envelope field even when its schema is from the future.
     for record in ordered:
         try:
-            supported.append(TrialEvent.from_dict(record))
-        except UnsupportedTrialEventSchema as exc:
-            unsupported_records.append(record)
-            issues.append(
-                _issue(
-                    "unsupported_event_schema",
-                    str(exc),
-                    trial_id,
-                    record,
-                )
-            )
-        except (KeyError, TypeError, ValueError) as exc:
+            TrialEvent.from_dict(record)
+        except UnsupportedTrialEventSchema:
+            pass
+        except (
+            AttributeError,
+            KeyError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
             return TrialInspection(
                 trial_id=trial_id,
                 integrity="corrupt",
@@ -327,30 +430,84 @@ def _inspect_records(
                 issues=(_issue("invalid_event", str(exc), trial_id, record),),
             )
 
-    if unsupported_records:
-        unsupported_sequences = tuple(
-            sequence
-            for sequence in (_sequence(record) for record in unsupported_records)
-            if sequence is not None
+    try:
+        canonical = _canonical_records(ordered)
+    except ValueError as exc:
+        return TrialInspection(
+            trial_id=trial_id,
+            integrity="corrupt",
+            status="unknown",
+            events=ordered,
+            replay=None,
+            issues=(_issue("invalid_replay", str(exc), trial_id),),
+        )
+
+    supported: list[TrialEvent] = []
+    boundary_sequences: list[int] = []
+    issues: list[InspectionIssue] = []
+    for record in canonical:
+        try:
+            event = TrialEvent.from_dict(record)
+        except UnsupportedTrialEventSchema as exc:
+            boundary_sequences.append(_sequence(record) or 2**63 - 1)
+            issues.append(
+                _issue("unsupported_event_schema", str(exc), trial_id, record)
+            )
+            continue
+        supported.append(event)
+        if event.event_type not in KNOWN_EVENT_TYPES:
+            boundary_sequences.append(event.sequence)
+            issues.append(
+                _issue(
+                    "unsupported_event",
+                    f"unsupported trial event type {event.event_type!r}",
+                    trial_id,
+                    event.to_dict(),
+                )
+            )
+
+    if boundary_sequences:
+        boundary = min(boundary_sequences)
+        prefix = tuple(
+            event
+            for event in supported
+            if event.sequence < boundary and event.event_type in KNOWN_EVENT_TYPES
         )
         replay: Optional[TrialReplay] = None
-        if len(unsupported_sequences) == len(unsupported_records):
-            boundary = min(unsupported_sequences)
-            prefix = tuple(event for event in supported if event.sequence < boundary)
-            if prefix:
-                try:
-                    replay = replay_trial(prefix, trial_id)
-                except (KeyError, TypeError, ValueError) as exc:
-                    return TrialInspection(
-                        trial_id=trial_id,
-                        integrity="corrupt",
-                        status="unknown",
-                        events=ordered,
-                        replay=None,
-                        issues=tuple(issues) + (
-                            _issue("invalid_replay", str(exc), trial_id),
-                        ),
-                    )
+        if prefix:
+            try:
+                replay = replay_trial(prefix, trial_id)
+            except UnsupportedEvidenceContractSchema:
+                return _nested_schema_inspection(
+                    trial_id,
+                    prefix,
+                    ordered,
+                    issues,
+                )
+            except (
+                AttributeError,
+                KeyError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                return TrialInspection(
+                    trial_id=trial_id,
+                    integrity="corrupt",
+                    status="unknown",
+                    events=ordered,
+                    replay=None,
+                    issues=tuple(issues) + (
+                        _issue("invalid_replay", str(exc), trial_id),
+                    ),
+                )
+        issues.sort(
+            key=lambda issue: (
+                issue.sequence if issue.sequence is not None else 2**63 - 1,
+                issue.code,
+            )
+        )
         return TrialInspection(
             trial_id=trial_id,
             integrity="unsupported",
@@ -362,7 +519,20 @@ def _inspect_records(
 
     try:
         replay = replay_trial(supported, trial_id)
-    except (KeyError, TypeError, ValueError) as exc:
+    except UnsupportedEvidenceContractSchema:
+        return _nested_schema_inspection(
+            trial_id,
+            tuple(supported),
+            ordered,
+        )
+    except (
+        AttributeError,
+        KeyError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
         return TrialInspection(
             trial_id=trial_id,
             integrity="corrupt",
@@ -372,24 +542,11 @@ def _inspect_records(
             issues=(_issue("invalid_replay", str(exc), trial_id),),
         )
 
-    if replay.unhandled_events:
-        issues.extend(
-            _issue(
-                "unsupported_event",
-                f"unsupported trial event type {event.event_type!r}",
-                trial_id,
-                event.to_dict(),
-            )
-            for event in replay.unhandled_events
-        )
-        integrity: Integrity = "unsupported"
-    else:
-        integrity = "valid"
     return TrialInspection(
         trial_id=trial_id,
-        integrity=integrity,
+        integrity="valid",
         status=_lifecycle_status(replay),
-        events=tuple(_freeze_record(event.to_dict()) for event in replay.events),
+        events=ordered,
         replay=replay,
         issues=tuple(issues),
     )
