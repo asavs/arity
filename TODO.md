@@ -3,6 +3,19 @@
 Open items, roughly in the order they matter. Use the repository's GitHub issue tracker for
 external reports; this file remains the maintainer's near-term roadmap.
 
+## Arity clean break (before Stage 3)
+- [ ] Complete the no-user rename now: make `arity` the only Python namespace and
+      command, remove former environment and harness aliases, and rename active
+      project state to `.arity/`.  The acceptance gate is zero former-name
+      occurrences in active source, tests, package metadata, and current docs.
+- [ ] Protect local credentials during the state rename.  Discover only file
+      metadata, copy the credential file to `.arity/` without printing it, verify
+      restrictive permissions and byte identity, and retain the source until the
+      renamed CLI has authenticated successfully.  Never commit either file.
+- [ ] Keep history action separate from the code rename.  Reachable public commit
+      subjects are already clean; decide explicitly whether removing the former name
+      from historical trees is worth a destructive history rewrite.
+
 ## Cost and casting
 - [ ] **Pre-flight casting.** Estimate a task's cost from `trial_axes` history for the signature and skip
       seats whose remaining quota cannot cover it, instead of attempting and rotating at zero usage.
@@ -21,8 +34,24 @@ external reports; this file remains the maintainer's near-term roadmap.
 ## Observability
 - [x] Read-only `arity trials`, `arity trial show`, and `arity trial replay` commands share a versioned
       Python projection, strict JSONL/SQLite readers, semantic exit codes, and forward-schema boundaries.
-- [ ] Build the first agent-graph TUI as a pure consumer of the inspection API. Keep execution controls out
-      of the first pass so the observer contract can settle before it becomes a control plane.
+- [x] `arity watch` adds a blind-safe, bounded, one-shot projection and fixed ASCII
+      renderer without contacting providers, tools, runtimes, or credential stores.
+- [ ] Stage 3: add explicit `arity watch --follow` polling, stable selection, keyboard
+      control, last-good-snapshot errors, terminal cleanup, and the bounded
+      journal-change spiral.  Keep ordinary `arity watch` deterministic and one-shot.
+- [ ] Define an attributed observation envelope so mechanical checks, optional LLM
+      interpretations, and human judgments can examine equivalent blinded evidence,
+      retain disagreements, and feed later analytics.  Mechanical facts remain
+      distinct from model hypotheses and human decisions.
+- [ ] Persist per-request cache telemetry at the runtime boundary: request-start
+      time, cache-read/write and prompt-token counts, documented retention policy,
+      and context-reset events such as compaction or model switches.  `watch` only
+      consumes these records; it never probes or prewarms a provider.
+- [ ] Add user-facing cache heat with `exact`, `conservative`, and `off` policies.
+      Exact uses the observed provider policy, conservative uses the shortest
+      configured response window, and off prevents the timer from becoming an A/B
+      identity fingerprint.  Show documented reuse eligibility and certainty, never
+      claim direct knowledge of provider cache residency.
 
 ## Resolve (what happens after facts tie)
 - [ ] Refine the choices when models cannot settle on one implementation: present Asa the judges' cherry-picks as
