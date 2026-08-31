@@ -1,7 +1,11 @@
 """Presentation contract for the plain-``arity`` terminal lobby."""
 from __future__ import annotations
 
+import io
+from argparse import Namespace
+
 from arity.cache_heat import CacheHeatView
+from arity.watch_cli import run_watch_command
 from arity.watch_terminal import (
     TerminalCapabilities,
     render_arity_lobby_frame,
@@ -12,6 +16,7 @@ from arity.watch_view_model import (
     WatchAgent,
     WatchTrial,
     WatchTrialDetail,
+    WatchProjector,
     WatchViewModel,
 )
 
@@ -103,3 +108,89 @@ def test_lobby_collapse_hides_detail_while_explicit_follow_keeps_its_contract() 
     assert "cache deadline" not in collapsed
     assert explicit.startswith("arity watch |")
     assert "selected: Trial 1" in explicit
+
+
+class _LobbyTerminal:
+    def __init__(self) -> None:
+        self.frames: list[str] = []
+
+    def stdin_isatty(self) -> bool:
+        return True
+
+    def stdout_isatty(self) -> bool:
+        return True
+
+    def supports_interactive(self) -> bool:
+        return True
+
+    def width(self) -> int:
+        return 120
+
+    def setup(self) -> None:
+        pass
+
+    def restore(self) -> None:
+        pass
+
+    def draw(self, frame: str) -> None:
+        self.frames.append(frame)
+
+    def read_key(self, timeout: float) -> str:
+        assert timeout > 0
+        return "q"
+
+
+def test_lobby_flag_selects_the_plain_renderer_in_the_real_follow_path() -> None:
+    terminal = _LobbyTerminal()
+    raw_trial_id = "private-trial-id-must-not-render"
+
+    def load_model(
+        _store_spec: object = None,
+        *,
+        selected_trial_id: str | None,
+        projector: WatchProjector,
+        **_kwargs: object,
+    ) -> WatchViewModel:
+        projector._label_registry.assign((raw_trial_id,))
+        trial = WatchTrial(
+            trial_number=projector._label_registry.number_for(raw_trial_id),
+            integrity="valid",
+            lifecycle="evidenced",
+            detail=_detail(completed=1, cache=True),
+            issue=None,
+            selected=selected_trial_id == raw_trial_id,
+        )
+        return WatchViewModel(
+            backend="jsonl",
+            read_at=100.0,
+            trials=(trial,),
+            more_trials_omitted=False,
+            catalog_integrity="valid",
+            selected_trial_number=trial.trial_number if trial.selected else None,
+        )
+
+    code = run_watch_command(
+        Namespace(
+            trial_id=None,
+            ascii=True,
+            no_motion=True,
+            follow=True,
+            cache_policy="conservative",
+            lobby=True,
+        ),
+        terminal=terminal,
+        model_loader=load_model,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        monotonic=lambda: 0.0,
+        environ={"NO_COLOR": "1"},
+    )
+
+    assert code == 0
+    assert len(terminal.frames) == 1
+    frame = terminal.frames[0]
+    assert frame.startswith("arity | jsonl | 1 trial | read ")
+    assert "> Trial 1 | evidenced | valid | completions 1/2" in frame
+    assert "    Agent A | completion recorded" in frame
+    assert "selected:" not in frame
+    assert raw_trial_id not in frame
