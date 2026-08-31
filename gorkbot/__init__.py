@@ -84,6 +84,17 @@ from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
 from .orchestrator import ArityOrchestrator, GorkbotOrchestrator, OrchestrationResponse
 from .runtime import Runtime
+from .record_readers import (
+    JsonlRecordReader,
+    RecordChanged,
+    RecordCorruption,
+    RecordNotFound,
+    RecordReadError,
+    SqliteRecordReader,
+    StoreSpec,
+    configured_store_spec,
+    open_record_reader,
+)
 from .seams import (
     ModelProvider,
     Observer,
@@ -99,6 +110,15 @@ from .trial_events import (
     TrialReplay,
     UnsupportedTrialEventSchema,
     replay_trial,
+)
+from .inspection import (
+    InspectionIssue,
+    TrialCatalog,
+    TrialInspection,
+    TrialNotFound,
+    TrialSummary,
+    inspect_trial,
+    inspect_trials,
 )
 from .types import (
     CallModel,
@@ -162,6 +182,16 @@ __all__ = [
     "JsonlRecordStore",
     "ConsoleTransport",
     "MetricsObserver",
+    # Query-only record readers
+    "JsonlRecordReader",
+    "SqliteRecordReader",
+    "RecordReadError",
+    "RecordNotFound",
+    "RecordCorruption",
+    "RecordChanged",
+    "StoreSpec",
+    "configured_store_spec",
+    "open_record_reader",
     # Roles & Denial Sets
     "Role",
     "DenialSet",
@@ -219,6 +249,13 @@ __all__ = [
     "TrialReplay",
     "UnsupportedTrialEventSchema",
     "replay_trial",
+    "InspectionIssue",
+    "TrialCatalog",
+    "TrialInspection",
+    "TrialNotFound",
+    "TrialSummary",
+    "inspect_trial",
+    "inspect_trials",
     # Pulse & Keepalive
     "PulseEngine",
     "PulseAction",
