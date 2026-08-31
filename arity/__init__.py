@@ -10,6 +10,7 @@ from .handlers import (
 from .roles import (
     ARCHITECT_ROLE,
     BUILDER_ROLE,
+    DESIGNER_ROLE,
     ENGINEER_ROLE,
     PYTHON_DEVELOPER_ROLE,
     REVIEWER_ROLE,
@@ -221,6 +222,7 @@ __all__ = [
     "SECRETARY_ROLE",
     "VOICE_ROLE",
     "ENGINEER_ROLE",
+    "DESIGNER_ROLE",
     "PYTHON_DEVELOPER_ROLE",
     "BUILDER_ROLE",
     "REVIEWER_ROLE",

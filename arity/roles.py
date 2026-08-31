@@ -259,6 +259,9 @@ class RoleRegistry:
                 self._roles[alias] = self._roles["developer"]
         if "engineer" in self._roles:
             self._roles["architect"] = self._roles["engineer"]
+        if "designer" in self._roles:
+            for alias in ("ux", "ux_designer", "ui_designer", "interaction_designer", "product_designer"):
+                self._roles[alias] = self._roles["designer"]
         if "reviewer" in self._roles:
             self._roles["auditor"] = self._roles["reviewer"]
             self._roles.setdefault("tester", self._roles["reviewer"])
@@ -345,6 +348,11 @@ class RoleRegistry:
             "developer:rust": ("rust", "cargo", "crate"),
             "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
             "engineer": ("architecture", "system design", "spec", "decompose"),
+            "designer": (
+                "user journey", "human journey", "information hierarchy", "interaction design",
+                "accessibility", "visual direction", "prototype", "ui design", "tui design",
+                "blind interface", "a/b-blind",
+            ),
             "tester": ("verify tests", "run pytest", "check regression"),
             "reviewer": ("audit code", "check pr", "code review"),
             "scout": ("recon", "find repo", "locate docs"),
@@ -377,6 +385,7 @@ SECRETARY_ROLE = _default_registry.get("secretary") or parse_role_document("---\
 VOICE_ROLE = _default_registry.get("voice") or SECRETARY_ROLE
 ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\n---\nEngineer")
 ARCHITECT_ROLE = _default_registry.get("architect") or ENGINEER_ROLE
+DESIGNER_ROLE = _default_registry.get("designer") or parse_role_document("---\nname: designer\ntier: 1\n---\nDesigner")
 DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\n---\nDeveloper")
 BUILDER_ROLE = _default_registry.get("builder") or DEVELOPER_ROLE
 PYTHON_DEVELOPER_ROLE = _default_registry.get("developer:python") or BUILDER_ROLE

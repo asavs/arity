@@ -18,7 +18,7 @@ from .roles import Role, VOICE_ROLE
 class TierLevel(IntEnum):
     """Distance from Asa (Axiom 8)."""
     TIER_0 = 0  # Secretary: knows personal context, biograph, switchboard
-    TIER_1 = 1  # Lead Engineer & Scout: project context, roadmap, general web/repo intelligence
+    TIER_1 = 1  # Engineer, Designer & Scout: project context, roadmap, domain intelligence
     TIER_2 = 2  # Python Developer: sandboxed implementation scope
     TIER_3 = 3  # Reviewer: code auditor and regression verifier
 class BriefRefusalError(Exception):
@@ -131,7 +131,7 @@ class BriefCompiler:
                 if self.scorecard and hasattr(self.scorecard, "get_summary"):
                     scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
                 layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
-            elif rname in ("engineer", "scout", "architect", "recon"):
+            elif rname in ("engineer", "designer", "scout", "architect", "recon"):
                 layers.append(f"# Project Context\n{self.tier1_context}")
             else:  # python_developer, reviewer, builder, etc.
                 layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
