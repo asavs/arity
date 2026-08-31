@@ -19,7 +19,7 @@ from .record_readers import (
     configured_store_spec,
     open_record_reader,
 )
-from .watch_terminal import ReadTimeFormatter, render_watch_snapshot
+from .watch_terminal import render_watch_snapshot
 from .watch_view_model import WatchProjector, WatchViewModel
 
 
@@ -104,7 +104,6 @@ def run_watch_command(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     renderer: SnapshotRenderer | None = None,
-    format_read_time: ReadTimeFormatter | None = None,
 ) -> int:
     """Execute one blind snapshot without polling or terminal interaction."""
 
@@ -139,7 +138,7 @@ def run_watch_command(
     if renderer is not None:
         frame = renderer(model)
     else:
-        frame = render_watch_snapshot(model, format_read_time=format_read_time)
+        frame = render_watch_snapshot(model)
     output.write(frame)
     return exit_code
 

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 
 from .watch_view_model import BoundedCount, WatchIssue, WatchTrial, WatchViewModel
 
 
-ReadTimeFormatter = Callable[[float], str]
 UNKNOWN_READ_TIME = "??:??:??"
 
 
@@ -19,11 +17,13 @@ def _default_read_time(read_at: float) -> str:
         return UNKNOWN_READ_TIME
 
 
-def _validated_read_time(read_at: float, formatter: ReadTimeFormatter) -> str:
-    rendered = formatter(read_at)
+def _read_time(read_at: float) -> str:
+    rendered = _default_read_time(read_at)
+    if type(rendered) is not str:
+        raise TypeError("read time must be a plain string")
     if rendered == UNKNOWN_READ_TIME:
         return rendered
-    if type(rendered) is not str or len(rendered) != 8:
+    if len(rendered) != 8:
         raise ValueError("read time must use HH:MM:SS")
     if rendered[2] != ":" or rendered[5] != ":":
         raise ValueError("read time must use HH:MM:SS")
@@ -98,11 +98,7 @@ def _validate_frame(frame: str) -> None:
             raise RuntimeError("watch frame must be printable ASCII")
 
 
-def render_watch_snapshot(
-    model: WatchViewModel,
-    *,
-    format_read_time: ReadTimeFormatter | None = None,
-) -> str:
+def render_watch_snapshot(model: WatchViewModel) -> str:
     """Render one complete, printable-ASCII snapshot from an exact view model."""
 
     if type(model) is not WatchViewModel:
@@ -111,8 +107,7 @@ def render_watch_snapshot(
     if not model.trials and not model.catalog_issues and not model.more_trials_omitted:
         return "No persisted trials.\n"
 
-    formatter = format_read_time or _default_read_time
-    read_time = _validated_read_time(model.read_at, formatter)
+    read_time = _read_time(model.read_at)
     trial_word = "trial" if len(model.trials) == 1 else "trials"
     trial_count = f"{len(model.trials)} {trial_word}"
 
@@ -146,4 +141,4 @@ def render_watch_snapshot(
     return frame
 
 
-__all__ = ["ReadTimeFormatter", "render_watch_snapshot"]
+__all__ = ["render_watch_snapshot"]
