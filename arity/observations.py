@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 import re
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, TypeAlias
 
@@ -18,7 +20,7 @@ OBSERVER_KINDS = frozenset({"mechanical", "model", "human"})
 OBSERVATION_PHASES = frozenset({"trial", "conference", "review", "resolution"})
 OBSERVATION_STATUSES = frozenset({"recorded", "failed", "unavailable", "declined"})
 SUBJECT_KINDS = frozenset({"trial", "arm", "evidence", "review", "resolution"})
-REVIEW_ATTEMPT_STATUSES = frozenset({"completed", "failed", "missing"})
+REVIEW_ATTEMPT_STATUSES = frozenset({"completed", "failed", "invalid", "missing"})
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -64,6 +66,17 @@ def _finite_time(value: object) -> float:
     if not math.isfinite(resolved):
         raise ValueError("observation time must be finite")
     return resolved
+
+
+def _content_hash(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -247,6 +260,7 @@ class Observation:
     status: str
     subject: ObservationSubject
     reference: ObservationReference
+    observation_id: str = ""
     schema_version: int = OBSERVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -274,6 +288,15 @@ class Observation:
         }:
             raise TypeError("observation reference must be an exact supported reference")
         self._validate_attribution()
+        expected_id = _content_hash(self._body())
+        if self.observation_id:
+            if type(self.observation_id) is not str or not _SHA256.fullmatch(
+                self.observation_id
+            ):
+                raise ValueError("observation id must be a lowercase SHA-256 digest")
+            if self.observation_id != expected_id:
+                raise ValueError("observation id does not match observation contents")
+        object.__setattr__(self, "observation_id", expected_id)
 
     def _validate_attribution(self) -> None:
         if self.observer_kind == "mechanical":
@@ -287,6 +310,7 @@ class Observation:
             expected = {
                 "completed": "recorded",
                 "failed": "failed",
+                "invalid": "failed",
                 "missing": "unavailable",
             }[self.reference.attempt_status]
             if self.status != expected:
@@ -298,7 +322,7 @@ class Observation:
             if self.status != expected:
                 raise ValueError("human observation status must match human decision")
 
-    def to_dict(self) -> dict[str, Any]:
+    def _body(self) -> dict[str, Any]:
         return {
             "schema_version": OBSERVATION_SCHEMA_VERSION,
             "observer_kind": self.observer_kind,
@@ -309,6 +333,12 @@ class Observation:
             "status": self.status,
             "subject": self.subject.to_dict(),
             "reference": self.reference.to_dict(),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._body(),
+            "observation_id": self.observation_id,
         }
 
     @classmethod
@@ -324,6 +354,7 @@ class Observation:
             value,
             {
                 "schema_version",
+                "observation_id",
                 "observer_kind",
                 "observer_id",
                 "observer_version",
@@ -344,6 +375,7 @@ class Observation:
             status=value["status"],
             subject=ObservationSubject.from_dict(value["subject"]),
             reference=_reference_from_dict(value["reference"]),
+            observation_id=value["observation_id"],
             schema_version=schema_version,
         )
 
