@@ -6,6 +6,9 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from arity.handlers import JsonlRecordStore
+from arity.inspection import inspect_trial
+from arity.stores.sqlite import SqliteRecordStore
 from arity.telemetry import (
     CachePolicyHint,
     JournaledModelProvider,
@@ -15,7 +18,9 @@ from arity.telemetry import (
     UsageRecordingContext,
     normalize_usage_evidence,
 )
+from arity.trial_events import TrialEvent, TrialJournal, replay_trial
 from arity.types import CallModel, ModelCompleted, ModelFailed
+from arity.watch_view_model import WatchProjector
 
 
 def test_token_measurements_preserve_unknown_reported_zero_and_provenance() -> None:
@@ -245,3 +250,188 @@ def test_recording_context_rejects_ambiguous_identity_phase_and_policy() -> None
         values.update(changes)
         with pytest.raises(ValueError):
             UsageRecordingContext(**values)
+
+
+def _started_payload() -> dict[str, object]:
+    return {
+        "task_id": "trial-usage",
+        "brief": "private brief",
+        "arms": [
+            {
+                "arm_id": "arm-1",
+                "arm_ordinal": 0,
+                "name": "private name",
+                "model": "private model",
+                "provider": "private provider",
+                "role": "developer",
+                "harness": "arity",
+                "tool_runner": "tools",
+                "skills": [],
+                "context": "fresh",
+                "context_adapter": None,
+            }
+        ],
+    }
+
+
+def _usage_payload(*, ordinal: int = 1) -> dict[str, object]:
+    return {
+        "phase": "trial",
+        "arm_id": "arm-1",
+        "actor_kind": "candidate",
+        "actor_ref": "arm-1",
+        "request_ordinal": ordinal,
+        "outcome": "completed",
+        "request_started_at": 10.0,
+        "evidence": normalize_usage_evidence(
+            {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 80},
+            },
+            evidence_observed_at=12.0,
+            cache_policy=CachePolicyHint(
+                window_seconds=300,
+                refresh_on_reuse=True,
+                basis="configured",
+                clock_basis="request_started",
+            ),
+        ).to_dict(),
+    }
+
+
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_request_usage_is_a_known_strict_replay_event(tmp_path, backend: str) -> None:
+    store = (
+        JsonlRecordStore(tmp_path / "records")
+        if backend == "jsonl"
+        else SqliteRecordStore(tmp_path / "records.db")
+    )
+    journal = TrialJournal(store, "trial-usage")
+    journal.append("trial.started", _started_payload(), timestamp=1)
+    journal.append("request.usage_recorded", _usage_payload(), timestamp=12)
+
+    replay = replay_trial(store, "trial-usage")
+
+    assert replay.status == "started"
+    assert len(replay.request_usage) == 1
+    assert replay.request_usage[0]["request_ordinal"] == 1
+    assert UsageEvidence.from_dict(replay.request_usage[0]["evidence"]).cache_read_tokens.value == 80
+    assert replay.unhandled_events == ()
+    if backend == "sqlite":
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("phase", "bogus", "phase"),
+        ("arm_id", "missing-arm", "declared"),
+        ("actor_kind", "model", "actor kind"),
+        ("actor_ref", "other", "actor reference"),
+        ("request_ordinal", 0, "ordinal"),
+        ("request_ordinal", True, "ordinal"),
+        ("outcome", "maybe", "outcome"),
+        ("request_started_at", float("nan"), "finite"),
+    ],
+)
+def test_request_usage_replay_rejects_ambiguous_or_lossy_fields(
+    field: str, value: object, message: str,
+) -> None:
+    payload = _usage_payload()
+    payload[field] = value
+    with pytest.raises((TypeError, ValueError), match=message):
+        events = (
+            TrialEvent.create(
+                trial_id="trial-usage",
+                sequence=1,
+                event_type="trial.started",
+                payload=_started_payload(),
+                timestamp=1,
+            ),
+            TrialEvent.create(
+                trial_id="trial-usage",
+                sequence=2,
+                event_type="request.usage_recorded",
+                payload=payload,
+                timestamp=2,
+            ),
+        )
+        replay_trial(events, "trial-usage")
+
+
+def test_request_ordinals_are_unique_per_arm_and_usage_cannot_follow_completion() -> None:
+    start = TrialEvent.create(
+        trial_id="trial-usage",
+        sequence=1,
+        event_type="trial.started",
+        payload=_started_payload(),
+        timestamp=1,
+    )
+    usage = TrialEvent.create(
+        trial_id="trial-usage",
+        sequence=2,
+        event_type="request.usage_recorded",
+        payload=_usage_payload(),
+        timestamp=2,
+    )
+    duplicate = TrialEvent.create(
+        trial_id="trial-usage",
+        sequence=3,
+        event_type="request.usage_recorded",
+        payload=_usage_payload(),
+        timestamp=3,
+    )
+    with pytest.raises(ValueError, match="ordinal"):
+        replay_trial((start, usage, duplicate), "trial-usage")
+
+    completed_payload = {
+        "phase": "trial",
+        "arm_id": "arm-1",
+        "arm_ordinal": 0,
+        "candidate_id": "candidate-1",
+    }
+    completed = TrialEvent.create(
+        trial_id="trial-usage",
+        sequence=3,
+        event_type="arm.completed",
+        payload=completed_payload,
+        timestamp=3,
+    )
+    late = TrialEvent.create(
+        trial_id="trial-usage",
+        sequence=4,
+        event_type="request.usage_recorded",
+        payload={**_usage_payload(), "request_ordinal": 2},
+        timestamp=4,
+    )
+    with pytest.raises(ValueError, match="after.*completed"):
+        replay_trial((start, usage, completed, late), "trial-usage")
+
+
+def test_future_nested_usage_schema_is_a_blind_safe_partial_boundary(tmp_path) -> None:
+    marker = "PRIVATE_FUTURE_USAGE_MARKER"
+    store = JsonlRecordStore(tmp_path / "records")
+    journal = TrialJournal(store, "trial-usage")
+    journal.append("trial.started", _started_payload(), timestamp=1)
+    future = _usage_payload()
+    future_evidence = dict(future["evidence"])
+    future_evidence["schema_version"] = 2
+    future_evidence["private_future_field"] = marker
+    future["evidence"] = future_evidence
+    journal.append("request.usage_recorded", future, timestamp=2)
+
+    inspection = inspect_trial(store, "trial-usage")
+
+    assert inspection.integrity == "unsupported"
+    assert inspection.replay is not None
+    assert inspection.replay.request_usage == ()
+    assert inspection.issues[0].code == "unsupported_usage_evidence_schema"
+
+    from arity.inspection import TrialCatalog
+
+    projected = WatchProjector().project(
+        TrialCatalog((inspection,)), backend="jsonl", read_at=3,
+    )
+    assert marker not in repr(projected)
+    assert projected.trials[0].issue.code == "unsupported_usage_evidence_schema"
