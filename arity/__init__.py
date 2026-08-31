@@ -93,7 +93,13 @@ from .seams import (
     Transport,
 )
 from .transition import transition
-from .trial_events import TrialEvent, TrialJournal, TrialReplay, replay_trial
+from .trial_events import (
+    TrialEvent,
+    TrialJournal,
+    TrialReplay,
+    UnsupportedTrialEventSchema,
+    replay_trial,
+)
 from .types import (
     CallModel,
     Effect,
@@ -211,6 +217,7 @@ __all__ = [
     "TrialEvent",
     "TrialJournal",
     "TrialReplay",
+    "UnsupportedTrialEventSchema",
     "replay_trial",
     # Pulse & Keepalive
     "PulseEngine",
