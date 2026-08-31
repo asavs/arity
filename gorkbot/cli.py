@@ -544,6 +544,26 @@ def main() -> int:
     )
     trials_parser.add_argument("--json", action="store_true", help="Emit a versioned JSON catalog")
 
+    watch_parser = subparsers.add_parser(
+        "watch", help="Show a blind-safe one-shot trial snapshot"
+    )
+    watch_parser.add_argument(
+        "trial_id",
+        nargs="?",
+        type=_non_empty_trial_id,
+        help="Optional persisted trial id to select",
+    )
+    watch_parser.add_argument(
+        "--ascii",
+        action="store_true",
+        help="Use fixed ASCII output (currently always enabled)",
+    )
+    watch_parser.add_argument(
+        "--no-motion",
+        action="store_true",
+        help="Disable motion (the current one-shot view has none)",
+    )
+
     trial_parser = subparsers.add_parser(
         "trial", help="Inspect or replay one persisted trial journal"
     )
@@ -649,6 +669,9 @@ def main() -> int:
     elif args.command == "trials":
         from .inspection_cli import run_trials_command
         return run_trials_command(args)
+    elif args.command == "watch":
+        from .watch_cli import run_watch_command
+        return run_watch_command(args)
     elif args.command == "trial":
         from .inspection_cli import run_trial_command
         return run_trial_command(args)
