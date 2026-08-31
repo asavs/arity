@@ -339,7 +339,37 @@ class RoleRegistry:
         if any(query.startswith(qs) for qs in question_starters) or query.endswith("?"):
             return secretary_role
 
-        # 4. Actionable task intent matching
+        # 4. Common interface briefs need verb/object disambiguation. A prototype is
+        # design work; implementing the same named surface is developer work.
+        designer_role = self.get("designer")
+        developer_role = self.get("builder")
+        engineer_role = self.get("engineer")
+        interface_terms = (
+            "tui", "terminal", " ui", "user interface", "interface", "screen",
+            "lobby", "dashboard",
+        )
+        design_artifacts = (
+            "prototype", "mockup", "wireframe", "ui design", "tui design",
+            "user journey", "human journey", "information hierarchy", "interaction design",
+            "accessibility", "accessible",
+        )
+        has_interface = any(term in f" {query}" for term in interface_terms)
+        has_design_artifact = any(term in query for term in design_artifacts)
+        starts_implementation = query.startswith(("implement ", "code "))
+        starts_build = query.startswith("build ")
+        starts_design = query.startswith(("design ", "prototype ", "mock up ", "mockup "))
+        if has_interface:
+            if any(term in query for term in ("system architecture", "technical architecture")):
+                if engineer_role is not None:
+                    return engineer_role
+            if starts_implementation and developer_role is not None:
+                return developer_role
+            if starts_build and not has_design_artifact and developer_role is not None:
+                return developer_role
+            if (starts_design or has_design_artifact) and designer_role is not None:
+                return designer_role
+
+        # 5. Actionable task intent matching
         best_role = secretary_role
         best_score = 0
 

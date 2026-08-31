@@ -239,6 +239,11 @@ def live_seats(ledger: Optional[SeatLedger] = None) -> list[Seat]:
     return sorted(seats, key=lambda s: -s.remaining / max(1.0, s.total_allowance))
 
 
+def _default_candidate_skills(role: Role) -> list[str]:
+    """Default implementation skill axis for roles that own implementation."""
+    return ["pytest-tdd"] if role.base_name == "developer" else []
+
+
 def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int) -> CandidateSpec:
     kv: dict[str, str] = {}
     for part in spec_str.split("+"):
@@ -251,7 +256,11 @@ def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int
     seat = next((s for s in seats if model and (s.model == model or s.id == model)), None)
     if seat is None:
         seat = seats[idx % len(seats)] if not model else Seat(provider="custom", model=model)
-    skills = [s for s in kv["skills"].split("/") if s] if "skills" in kv else ["pytest-tdd"]
+    skills = (
+        [s for s in kv["skills"].split("/") if s]
+        if "skills" in kv
+        else _default_candidate_skills(role)
+    )
     return CandidateSpec(
         seat=seat,
         name=kv.get("name", spec_str),
@@ -271,7 +280,12 @@ def resolve_candidates(variants: str, role: Role, seats: list[Seat]) -> tuple[li
         seats = placeholder_seats()
         notes.append("no authenticated seats in the ledger; using placeholder seats (run `arity auth login`)")
     first = seats[0]
-    fixed = dict(role=role, harness="wire", tool_runner_type="sandbox", skills=["pytest-tdd"])
+    fixed = dict(
+        role=role,
+        harness="wire",
+        tool_runner_type="sandbox",
+        skills=_default_candidate_skills(role),
+    )
 
     if v == "models":
         specs = [CandidateSpec(seat=s, name=s.model, **fixed) for s in seats]

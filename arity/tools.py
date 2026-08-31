@@ -429,13 +429,13 @@ class SandboxToolRunner(ToolRunner):
 
         self.register(
             name="message",
-            description="Send a message to the user ('user') or consult a peer agent ('scout', 'engineer', 'python_developer', 'reviewer').",
+            description="Send a message to the user ('user') or consult a peer agent ('scout', 'designer', 'engineer', 'python_developer', 'reviewer').",
             parameters={
                 "type": "object",
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient: 'user' to message Asa, or peer role (e.g. 'scout', 'engineer', 'python_developer', 'reviewer')",
+                        "description": "Recipient: 'user' to message Asa, or peer role (e.g. 'scout', 'designer', 'engineer', 'python_developer', 'reviewer')",
                     },
                     "text": {
                         "type": "string",

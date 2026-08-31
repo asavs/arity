@@ -131,7 +131,7 @@ class BriefCompiler:
                 if self.scorecard and hasattr(self.scorecard, "get_summary"):
                     scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
                 layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
-            elif rname in ("engineer", "designer", "scout", "architect", "recon"):
+            elif role.base_name in ("engineer", "designer", "scout"):
                 layers.append(f"# Project Context\n{self.tier1_context}")
             else:  # python_developer, reviewer, builder, etc.
                 layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
