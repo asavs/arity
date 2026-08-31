@@ -1,7 +1,7 @@
 # TODO
 
-Open items, roughly in the order they matter. Once the public GitHub remote is available, use
-its issue tracker for external reports; this file remains the maintainer's near-term roadmap.
+Open items, roughly in the order they matter. Use the repository's GitHub issue tracker for
+external reports; this file remains the maintainer's near-term roadmap.
 
 ## Cost and casting
 - [ ] **Pre-flight casting.** Estimate a task's cost from `trial_axes` history for the signature and skip
