@@ -402,28 +402,43 @@ class JournaledModelProvider:
             raise
 
         observed_at = _finite_number(self.clock(), label="evidence observed time")
-        if isinstance(result, ModelCompleted):
-            if result.usage_evidence is None:
-                evidence = normalize_usage_evidence(
-                    result.usage,
+        try:
+            if isinstance(result, ModelCompleted):
+                if result.usage_evidence is None:
+                    evidence = normalize_usage_evidence(
+                        result.usage,
+                        evidence_observed_at=observed_at,
+                        cache_policy=self.context.cache_policy,
+                    )
+                else:
+                    evidence = replace(
+                        result.usage_evidence,
+                        evidence_observed_at=observed_at,
+                    )
+                result = replace(result, usage_evidence=evidence)
+                outcome = "completed"
+            elif isinstance(result, ModelFailed):
+                evidence = UsageEvidence.unknown(
                     evidence_observed_at=observed_at,
                     cache_policy=self.context.cache_policy,
                 )
+                outcome = "failed"
             else:
-                evidence = replace(
-                    result.usage_evidence,
-                    evidence_observed_at=observed_at,
-                )
-            result = replace(result, usage_evidence=evidence)
-            outcome = "completed"
-        elif isinstance(result, ModelFailed):
+                raise TypeError("model provider returned an unsupported result")
+        except (
+            AttributeError,
+            KeyError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ):
             evidence = UsageEvidence.unknown(
                 evidence_observed_at=observed_at,
                 cache_policy=self.context.cache_policy,
             )
-            outcome = "failed"
-        else:
-            raise TypeError("model provider returned an unsupported result")
+            self._append(ordinal, started_at, observed_at, "failed", evidence)
+            raise
 
         self._append(ordinal, started_at, observed_at, outcome, evidence)
         return result
