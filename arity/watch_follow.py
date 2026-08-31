@@ -633,6 +633,7 @@ class FollowController:
         renderer: FollowRenderer = render_watch_follow_frame,
         monotonic: MonotonicClock = time.monotonic,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
+        auto_select_first: bool = False,
     ) -> None:
         if type(projector) is not WatchProjector:
             raise TypeError("projector must be an exact WatchProjector")
@@ -642,12 +643,16 @@ class FollowController:
             raise TypeError("refresh_interval must be a finite positive number")
         if not math.isfinite(float(refresh_interval)) or float(refresh_interval) <= 0:
             raise ValueError("refresh_interval must be a finite positive number")
+        if type(auto_select_first) is not bool:
+            raise TypeError("auto_select_first must be a boolean")
         self._terminal = terminal
         self._loader = loader
         self._projector = projector
         self._renderer = renderer
         self._monotonic = monotonic
         self._refresh_interval = float(refresh_interval)
+        self._auto_select_first = auto_select_first
+        self._automatic_selection_established = False
         self._model: WatchViewModel | None = None
         self._fingerprint: tuple[object, ...] | None = None
         self._selected_trial_id: str | None = None
@@ -697,6 +702,7 @@ class FollowController:
     def _establish_selection(self, model: WatchViewModel, trial: WatchTrial) -> WatchViewModel:
         trial_id = self._projector._trial_id_for_number(trial.trial_number)
         self._selected_trial_id = trial_id
+        self._automatic_selection_established = True
         return _select_model(model, trial.trial_number)
 
     def _refresh(self, *, force: bool) -> None:
@@ -720,6 +726,19 @@ class FollowController:
                 self._pulse_phase = None
                 self._draw()
             return
+
+        if (
+            self._auto_select_first
+            and not self._automatic_selection_established
+            and self._selected_trial_id is None
+            and model.trials
+        ):
+            try:
+                model = self._establish_selection(model, model.trials[0])
+            except KeyError:
+                pass
+            else:
+                self._expanded = True
 
         requested_missing = model.requested_trial_missing
         fingerprint = model.fingerprint

@@ -302,6 +302,7 @@ def _try_run_watch_follow(
         "loader": loader,
         "projector": active_projector,
         "refresh_interval": refresh_interval,
+        "auto_select_first": getattr(args, "lobby", False) is True,
     }
     if follow_renderer is not None:
         controller_options["renderer"] = follow_renderer
