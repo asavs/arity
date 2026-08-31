@@ -159,10 +159,19 @@ def _records(
     source: object,
     *,
     arm_id: Optional[str],
-) -> tuple[list[_Record], bool]:
+) -> tuple[list[_Record], bool, bool]:
     records: list[_Record] = []
     unsupported = False
-    for item in islice(_source_items(source), MAX_CACHE_USAGE_RECORDS):
+    # The extra item is an overflow probe.  Never project the oldest bounded
+    # prefix as though it were the complete history: a newer activity may have
+    # changed the truthful deadline.  Materializing at most cap + 1 also keeps a
+    # generic or infinite iterator bounded without asking it for a second item
+    # after overflow is established.
+    items = list(islice(_source_items(source), MAX_CACHE_USAGE_RECORDS + 1))
+    if len(items) > MAX_CACHE_USAGE_RECORDS:
+        return [], False, True
+
+    for item in items:
         if type(item) is UsageEvidence:
             if arm_id is not None:
                 continue
@@ -215,7 +224,7 @@ def _records(
                     group="direct",
                 )
             )
-    return records, unsupported
+    return records, unsupported, False
 
 
 def _clock_anchor(record: _Record) -> Optional[float]:
@@ -323,7 +332,9 @@ def project_cache_heat(
     if resolved_now is None:
         return CacheHeatView(state="unknown")
 
-    records, unsupported = _records(request_usage, arm_id=arm_id)
+    records, unsupported, overflow = _records(request_usage, arm_id=arm_id)
+    if overflow:
+        return CacheHeatView(state="unknown")
     if unsupported:
         return CacheHeatView(state="unsupported")
 
