@@ -34,8 +34,11 @@ def _count(value: BoundedCount) -> str:
     return f"{value.value}{suffix}"
 
 
-def _issue_line(prefix: str, issue: WatchIssue) -> str:
-    return f"{prefix}issue {issue.code} | {issue.message}"
+def _issue_lines(prefix: str, issue: WatchIssue) -> list[str]:
+    return [
+        f"{prefix}issue {issue.code}",
+        f"{prefix}  {issue.message}",
+    ]
 
 
 def _trial_row(trial: WatchTrial) -> str:
@@ -59,17 +62,23 @@ def _selected_lines(trial: WatchTrial) -> list[str]:
 
     detail = trial.detail
     lines = [f"selected: {trial.label}"]
-    for agent in detail.agents:
-        lines.append(f"  {agent.label} | {agent.status}")
-    if detail.arms.more_omitted:
-        lines.append("  agents (more omitted)")
     lines.append(
         "  "
         f"evidence {_count(detail.evidence)} | "
         f"reviews {_count(detail.reviews)} | "
         f"resolutions {_count(detail.resolutions)} | "
-        f"delivery {'recorded' if detail.delivery_recorded else 'not recorded'}"
+        f"delivery {'yes' if detail.delivery_recorded else 'no'}"
     )
+    return lines
+
+
+def _selected_agent_lines(trial: WatchTrial) -> list[str]:
+    detail = trial.detail
+    if detail is None:
+        return []
+    lines = [f"    {agent.label} | {agent.status}" for agent in detail.agents]
+    if detail.arms.more_omitted:
+        lines.append("    more agents omitted")
     return lines
 
 
@@ -98,21 +107,25 @@ def render_watch_snapshot(
 
     formatter = format_read_time or _default_read_time
     read_time = _validated_read_time(model.read_at, formatter)
-    trial_count = f"{len(model.trials)} trials"
-    if model.more_trials_omitted:
-        trial_count += " (more omitted)"
+    trial_word = "trial" if len(model.trials) == 1 else "trials"
+    trial_count = f"{len(model.trials)} {trial_word}"
 
     lines = [f"arity watch | {model.backend} | {trial_count} | read {read_time}"]
     selected_trial: WatchTrial | None = None
     for trial in model.trials:
         lines.append(_trial_row(trial))
+        if trial.selected:
+            lines.extend(_selected_agent_lines(trial))
         if trial.issue is not None:
-            lines.append(_issue_line("    ", trial.issue))
+            lines.extend(_issue_lines("    ", trial.issue))
         if trial.selected:
             selected_trial = trial
 
+    if model.more_trials_omitted:
+        lines.append("  more trials omitted")
+
     for issue in model.catalog_issues:
-        lines.append(_issue_line("catalog ", issue))
+        lines.extend(_issue_lines("  ", issue))
 
     if model.selected_trial_number is not None:
         if selected_trial is None:
