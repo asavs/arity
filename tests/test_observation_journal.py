@@ -1,6 +1,7 @@
 """Durable wiring contracts for independent mechanical/model/human observations."""
 from __future__ import annotations
 
+import dataclasses
 import json
 
 from arity.inspection import inspect_trial, inspect_trials
@@ -187,3 +188,36 @@ def test_follow_view_counts_each_lens_without_rendering_attribution(tmp_path) ->
     assert "observations mechanical 1 | model 2 | human 1" in frame
     assert "PRIVATE_HUMAN_ATTRIBUTION" not in frame
     assert report.task.id not in frame
+
+
+def test_watch_rejects_observation_counts_not_backed_by_journal_events(
+    tmp_path,
+) -> None:
+    report = _mock_report(tmp_path)
+    catalog = inspect_trials(report.archivist.store)
+    source = catalog.trials[0]
+    replay = source.replay
+
+    assert replay is not None
+    assert len(replay.observations) == 1
+    forged_collections = (
+        (),
+        replay.observations + (replay.observations[0],),
+    )
+
+    for observations in forged_collections:
+        forged_replay = dataclasses.replace(replay, observations=observations)
+        forged_source = dataclasses.replace(source, replay=forged_replay)
+        forged_catalog = dataclasses.replace(catalog, trials=(forged_source,))
+        model = WatchProjector().project(
+            forged_catalog,
+            backend="jsonl",
+            read_at=100.0,
+        )
+        row = model.trials[0]
+
+        assert row.integrity == "corrupt"
+        assert row.lifecycle == "unknown"
+        assert row.detail is None
+        assert row.issue is not None
+        assert row.issue.code == "inspection_incomplete"
