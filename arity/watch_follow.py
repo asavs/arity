@@ -591,6 +591,29 @@ def _read_failure(error: RecordReadError) -> tuple[int, str]:
     return EXIT_OPERATIONAL, RecordReadError.code
 
 
+def _retain_unchanged_snapshot(
+    previous: WatchViewModel,
+    current: WatchViewModel,
+) -> WatchViewModel:
+    """Keep clock-derived detail stable while accepting new selection state."""
+
+    previous_rows = {trial.trial_number: trial for trial in previous.trials}
+    rows = tuple(
+        replace(
+            previous_rows[trial.trial_number],
+            selected=trial.selected,
+        )
+        for trial in current.trials
+    )
+    return replace(
+        previous,
+        trials=rows,
+        selected_trial_number=current.selected_trial_number,
+        selected_trial_omitted=current.selected_trial_omitted,
+        requested_trial_missing=current.requested_trial_missing,
+    )
+
+
 class FollowController:
     """Poll safe snapshots and manage only controller-private selection identity."""
 
@@ -697,9 +720,9 @@ class FollowController:
         if self._model is None or changed or force:
             self._model = model
         else:
-            # Preserve only the displayed read clock on an unchanged journal.
-            # Selection/request state is presentation state and may still change.
-            self._model = replace(model, read_at=self._model.read_at)
+            # Preserve clock-derived detail on an unchanged journal. Selection and
+            # request state remain presentation state and may still change.
+            self._model = _retain_unchanged_snapshot(self._model, model)
         self._fingerprint = fingerprint
         self._failure_exit = None
         self._error_code = "trial_not_found" if requested_missing else None

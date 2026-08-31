@@ -131,6 +131,23 @@ def _selected_observation_lines(trial: WatchTrial) -> list[str]:
     ]
 
 
+def _selected_cache_lines(trial: WatchTrial) -> list[str]:
+    detail = trial.detail
+    if detail is None or detail.cache_heat is None:
+        return []
+    cache_heat = detail.cache_heat
+    if cache_heat.deadline_at is None:
+        return [f"  cache deadline {cache_heat.state} | eligibility only"]
+    deadline = _read_time(cache_heat.deadline_at)
+    confidence = cache_heat.activity_confidence
+    if confidence is None:
+        raise RuntimeError("timed cache deadline has no activity confidence")
+    return [
+        f"  cache deadline | respond by {deadline} | "
+        f"prior activity {confidence} | eligibility only"
+    ]
+
+
 def _validate_frame(frame: str) -> None:
     if not frame.endswith("\n") or frame.endswith("\n\n"):
         raise RuntimeError("watch frame must end with one newline")
@@ -300,6 +317,7 @@ def render_watch_follow_frame(
             if expanded:
                 lines.extend(_selected_agent_lines(selected))
                 lines.extend(_selected_observation_lines(selected))
+                lines.extend(_selected_cache_lines(selected))
 
     if help_visible:
         lines.extend(

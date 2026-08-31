@@ -565,6 +565,12 @@ def main() -> int:
         action="store_true",
         help="Refresh in a supported interactive terminal",
     )
+    watch_parser.add_argument(
+        "--cache-policy",
+        choices=("conservative", "exact", "off"),
+        default="conservative",
+        help="Cache deadline display: shortest recorded, per-window, or off",
+    )
 
     trial_parser = subparsers.add_parser(
         "trial", help="Inspect or replay one persisted trial journal"

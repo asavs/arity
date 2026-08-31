@@ -8,6 +8,7 @@ import io
 import pytest
 
 import arity.watch_terminal as watch_terminal
+import arity.watch_view_model as watch_view_model
 from arity.cache_heat import CacheHeatView
 from arity.inspection import TrialCatalog, TrialInspection
 from arity.telemetry import CachePolicyHint, TokenMeasurement, UsageEvidence
@@ -147,11 +148,12 @@ def test_follow_expansion_shows_stable_deadline_but_one_shot_stays_identical(
     one_shot = render_watch_snapshot(model)
 
     assert (
-        "cache deadline | respond by 12:34:56 | activity confirmed | eligibility only"
+        "cache deadline | respond by 12:34:56 | prior activity confirmed | "
+        "eligibility only"
         in expanded
     )
-    assert "cache window" not in collapsed
-    assert "cache window" not in one_shot
+    assert "cache deadline" not in collapsed
+    assert "cache deadline" not in one_shot
     for rendered in (expanded, collapsed, one_shot):
         assert PRIVATE_TRIAL not in rendered
         assert PRIVATE_ARM not in rendered
@@ -192,8 +194,20 @@ class _UnavailableTerminal:
         return False
 
 
-def test_off_policy_survives_noninteractive_one_shot_fallback() -> None:
+def test_off_policy_survives_noninteractive_one_shot_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     projected = []
+
+    def forbidden_cache_projection(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("off policy inspected cache evidence")
+
+    monkeypatch.setattr(
+        watch_view_model,
+        "project_cache_heat",
+        forbidden_cache_projection,
+    )
 
     def loader(
         store_spec=None,

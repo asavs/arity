@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Any, Literal, Optional
 
 from .telemetry import UnsupportedUsageEvidenceSchema, UsageEvidence
@@ -16,6 +17,7 @@ from .telemetry import UnsupportedUsageEvidenceSchema, UsageEvidence
 
 CacheHeatMode = Literal["conservative", "exact", "off"]
 CacheHeatState = Literal["confirmed", "estimated", "elapsed", "unknown", "unsupported"]
+CacheActivityConfidence = Literal["confirmed", "estimated"]
 
 _MODES = frozenset({"conservative", "exact", "off"})
 _STATES = frozenset({"confirmed", "estimated", "elapsed", "unknown", "unsupported"})
@@ -37,12 +39,23 @@ class CacheHeatView:
     """
 
     state: CacheHeatState
+    activity_confidence: Optional[CacheActivityConfidence] = None
     deadline_at: Optional[float] = None
     seconds_remaining: Optional[int] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.state) is not str or self.state not in _STATES:
             raise ValueError("cache heat state is unsupported")
+        if self.activity_confidence is None and self.state in {
+            "confirmed",
+            "estimated",
+        }:
+            object.__setattr__(self, "activity_confidence", self.state)
+        if self.activity_confidence is not None and (
+            type(self.activity_confidence) is not str
+            or self.activity_confidence not in {"confirmed", "estimated"}
+        ):
+            raise ValueError("cache activity confidence is unsupported")
         if self.deadline_at is not None:
             if isinstance(self.deadline_at, bool) or not isinstance(
                 self.deadline_at, (int, float)
@@ -59,24 +72,38 @@ class CacheHeatView:
                 raise TypeError("cache heat seconds must be a non-negative integer or null")
             raise ValueError("cache heat seconds must not be negative")
         if self.state in _NO_TIMING_STATES:
-            if self.deadline_at is not None or self.seconds_remaining is not None:
+            if (
+                self.activity_confidence is not None
+                or self.deadline_at is not None
+                or self.seconds_remaining is not None
+            ):
                 raise ValueError("non-timing cache heat states cannot expose timing")
         elif self.deadline_at is None or self.seconds_remaining is None:
             raise ValueError("timed cache heat states require a deadline and countdown")
+        elif self.activity_confidence is None:
+            raise ValueError("timed cache heat states require activity confidence")
+        elif self.state in {"confirmed", "estimated"} and (
+            self.activity_confidence != self.state
+        ):
+            raise ValueError("cache heat state and activity confidence disagree")
         if self.state == "elapsed" and self.seconds_remaining != 0:
             raise ValueError("elapsed cache heat must have zero seconds remaining")
 
     @property
     def stable_fingerprint(self) -> tuple[str, Optional[float]]:
-        """Return a journal-stable key that excludes the changing countdown."""
+        """Return a journal-stable key that excludes clock-only presentation state."""
 
-        return (self.state, self.deadline_at)
+        if self.deadline_at is not None:
+            assert self.activity_confidence is not None
+            return (self.activity_confidence, self.deadline_at)
+        return (self.state, None)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the complete, bounded public projection."""
 
         return {
             "state": self.state,
+            "activity_confidence": self.activity_confidence,
             "deadline_at": self.deadline_at,
             "seconds_remaining": self.seconds_remaining,
         }
@@ -135,10 +162,10 @@ def _records(
 ) -> tuple[list[_Record], bool]:
     records: list[_Record] = []
     unsupported = False
-    for index, item in enumerate(_source_items(source)):
-        if index >= MAX_CACHE_USAGE_RECORDS:
-            break
+    for item in islice(_source_items(source), MAX_CACHE_USAGE_RECORDS):
         if type(item) is UsageEvidence:
+            if arm_id is not None:
+                continue
             records.append(
                 _Record(
                     evidence=item,
@@ -176,6 +203,8 @@ def _records(
 
         # A normalized UsageEvidence mapping may be projected directly when the
         # caller has already selected its trial/arm.
+        if arm_id is not None:
+            continue
         evidence, future_schema = _decode_evidence(item)
         unsupported = unsupported or future_schema
         if evidence is not None:
@@ -330,26 +359,29 @@ def project_cache_heat(
     current = _latest_by_group(candidates)
     deadlines = [candidate.anchor + candidate.window_seconds for candidate in current]
     deadline_at = min(deadlines)
-    if resolved_now >= deadline_at:
-        return CacheHeatView(
-            state="elapsed",
-            deadline_at=deadline_at,
-            seconds_remaining=0,
-        )
-
-    state: CacheHeatState = (
+    confidence: CacheActivityConfidence = (
         "confirmed"
         if all(candidate.confidence == "confirmed" for candidate in current)
         else "estimated"
     )
+    if resolved_now >= deadline_at:
+        return CacheHeatView(
+            state="elapsed",
+            activity_confidence=confidence,
+            deadline_at=deadline_at,
+            seconds_remaining=0,
+        )
+
     return CacheHeatView(
-        state=state,
+        state=confidence,
+        activity_confidence=confidence,
         deadline_at=deadline_at,
         seconds_remaining=max(0, math.ceil(deadline_at - resolved_now)),
     )
 
 
 __all__ = [
+    "CacheActivityConfidence",
     "CacheHeatMode",
     "CacheHeatState",
     "CacheHeatView",

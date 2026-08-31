@@ -167,7 +167,13 @@ def _try_run_watch_follow(
         supports_injected_terminal,
     )
 
-    active_projector = projector if projector is not None else WatchProjector()
+    active_projector = (
+        projector
+        if projector is not None
+        else WatchProjector(
+            cache_policy=getattr(args, "cache_policy", "conservative")
+        )
+    )
     ascii_only = bool(getattr(args, "ascii", False))
     no_motion = bool(getattr(args, "no_motion", False))
 
@@ -314,6 +320,13 @@ def run_watch_command(
     output = stdout if stdout is not None else sys.stdout
     errors = stderr if stderr is not None else sys.stderr
     trial_id = getattr(args, "trial_id", None)
+    active_projector = (
+        projector
+        if projector is not None
+        else WatchProjector(
+            cache_policy=getattr(args, "cache_policy", "conservative")
+        )
+    )
 
     if bool(getattr(args, "follow", False)):
         input_stream = stdin if stdin is not None else sys.stdin
@@ -322,7 +335,7 @@ def run_watch_command(
             store_spec=store_spec,
             clock=clock,
             reader_opener=reader_opener,
-            projector=projector,
+            projector=active_projector,
             inspector=inspector,
             stdin=input_stream,
             stdout=output,
@@ -348,12 +361,11 @@ def run_watch_command(
 
     try:
         if model_loader is not None:
-            fallback_projector = projector if projector is not None else WatchProjector()
             model = model_loader(
                 store_spec,
                 selected_trial_id=trial_id,
                 clock=clock,
-                projector=fallback_projector,
+                projector=active_projector,
             )
         else:
             model = load_watch_model(
@@ -361,7 +373,7 @@ def run_watch_command(
                 selected_trial_id=trial_id,
                 clock=clock,
                 reader_opener=reader_opener,
-                projector=projector,
+                projector=active_projector,
                 inspector=inspector,
             )
     except RecordReadError as error:
