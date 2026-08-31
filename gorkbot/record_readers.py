@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
 
+from .configuration import get_config_value
 from .seams import RecordReader
 
 
@@ -79,8 +80,6 @@ class StoreSpec:
 
 def configured_store_spec() -> StoreSpec:
     """Resolve the same backend and path used by ``default_record_store``."""
-    from .tools import get_config_value
-
     configured = (
         get_config_value("ARITY_STORE")
         or get_config_value("GORKBOT_STORE")
