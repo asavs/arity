@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+import urllib.request
 
 import arity
+import pytest
 from arity.handlers import JsonlRecordStore
 from arity.ledger import Seat, SeatLedger
 from arity.race import resolve_candidates
@@ -22,6 +24,8 @@ from arity.tiers import BriefCompiler, TierLevel
 from arity.tools import (
     RoleEnforcingToolRunner,
     SandboxToolRunner,
+    UnsafeFetchUrlError,
+    _PublicHTTPRedirectHandler,
     create_mcp_tool_runner,
 )
 from arity.types import CallModel, ExecuteTool, ModelCompleted, ToolCompleted
@@ -363,6 +367,20 @@ def test_fetch_url_cannot_read_a_synthetic_local_file(tmp_path) -> None:
     assert "Security Denial" in result.output
     assert "SYNTHETIC_SECRET_MUST_NOT_ESCAPE" not in result.output
 
+    direct_result = SandboxToolRunner(
+        workspace_root=tmp_path,
+        role=DESIGNER_ROLE,
+    ).execute(
+        ExecuteTool(
+            call_id="designer-direct-local-fetch",
+            name="fetch_url",
+            arguments={"url": secret.resolve().as_uri()},
+        )
+    )
+    assert direct_result.is_error
+    assert "Security Denial" in direct_result.output
+    assert "SYNTHETIC_SECRET_MUST_NOT_ESCAPE" not in direct_result.output
+
 
 def test_fetch_url_rejects_non_web_credentials_and_obvious_local_targets(tmp_path) -> None:
     delegate = _FetchRunner()
@@ -445,6 +463,30 @@ def test_mcp_wrapper_rejects_local_fetch_before_delegation(tmp_path) -> None:
     assert result.is_error
     assert "Security Denial" in result.output
     assert "Unknown MCP tool" not in result.output
+
+
+def test_fetch_redirects_reapply_the_public_web_policy() -> None:
+    handler = _PublicHTTPRedirectHandler()
+    original = urllib.request.Request("https://example.com/start")
+
+    for target in (
+        "ftp://example.com/archive",
+        "http://localhost/private",
+        "http://127.0.0.1/private",
+        "https://user:password@example.com/private",
+    ):
+        with pytest.raises(UnsafeFetchUrlError):
+            handler.redirect_request(original, None, 302, "Found", {}, target)
+
+    redirected = handler.redirect_request(
+        original,
+        None,
+        302,
+        "Found",
+        {},
+        "https://docs.example.org/arity",
+    )
+    assert redirected.full_url == "https://docs.example.org/arity"
 
 
 def test_designer_credentials_stay_denied() -> None:
