@@ -1,4 +1,4 @@
-# Arity rename and compatibility boundary
+# Arity release notes
 
 The distribution and primary CLI are now `arity`. Python imports remain exclusively under
 `arity`, and `.arity/` remains the active state/config location. Historical entries below
@@ -7,6 +7,48 @@ retain the names used when they were published.
 Architecture correction: `transition` mutates `State` and emits effect descriptions; it is
 I/O-free, not referentially pure. Verification, archival, and blind review are built-in trial
 stages; `Observer` is a telemetry hook.
+
+## Arity 0.4.0 — Frozen evidence, replayable trials
+
+**Release Date:** 2026-08-30
+
+Arity now carries an A/B trial from declared arms through frozen evidence, explicit resolution,
+delivery, and read-only inspection without relying on a live workspace or provider to explain what
+happened.
+
+### What changed:
+
+1. **Arity is the public distribution and control surface**
+   - The primary package distribution and command are `arity`; `--arity N` is a positive requested
+     maximum and reports how many unique candidates actually resolved.
+   - The `arity` Python namespace, console entry point, state directory, and environment fallbacks
+     remain an explicit compatibility boundary rather than a second product identity.
+
+2. **Evidence and resolution are explicit contracts**
+   - Candidate artifacts and factual axes freeze into a content-addressed `EvidenceBundle` before
+     evaluation. Evaluators rank that immutable bundle, so alternate eval systems can run later
+     without rerunning candidate harnesses.
+   - `Resolution` records facts winners, judge consensus, attributable human picks, or an unresolved
+     outcome. Delivery validates the persisted resolution and writes the frozen artifact bytes rather
+     than trusting a mutable workspace or caller-supplied report.
+
+3. **Trial lifecycles are journaled and replayable**
+   - Versioned events record trial declaration, arm completion, frozen evidence, reviews, resolution,
+     and delivery through the configured JSONL or SQLite `RecordStore`.
+   - Strict replay checks declared arms, phase ordering, evidence hashes, evaluator panels, resolution
+     authority, and delivery binding; malformed or incomplete histories fail closed.
+
+4. **Inspection is a read-only observer surface**
+   - `arity trials`, `arity trial show`, and `arity trial replay` inspect persisted journals without
+     running agents, consulting providers, repairing records, or creating a missing store.
+   - The shared Python projection is intended for TUIs, GUIs, and other observers. Human and JSON
+     output distinguish missing, partial future-schema, changed, and corrupt records; `show` omits
+     candidate output and artifact bodies while explicit replay can expose the full local journal.
+
+5. **The installed artifact has its own acceptance gate**
+   - A clean-wheel two-arm trial verifies context isolation, immutable evidence, evaluator-driven
+     resolution, frozen-byte delivery, persisted replay, JSONL/SQLite inspection behavior, and the
+     installed `arity` command outside the source checkout.
 
 ## arity 0.3.0 — Trials
 

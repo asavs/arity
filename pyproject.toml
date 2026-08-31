@@ -19,6 +19,13 @@ version = { attr = "arity._version.__version__" }
 [project.scripts]
 arity = "arity.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/asavs/arity"
+Repository = "https://github.com/asavs/arity"
+Issues = "https://github.com/asavs/arity/issues"
+Changelog = "https://github.com/asavs/arity/blob/main/RELEASE.md"
+Security = "https://github.com/asavs/arity/security/policy"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["arity*"]
