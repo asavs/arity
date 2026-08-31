@@ -21,7 +21,7 @@ from .record_readers import (
     configured_store_spec,
     open_record_reader,
 )
-from .watch_terminal import render_watch_snapshot
+from .watch_terminal import render_arity_lobby_frame, render_watch_snapshot
 from .watch_view_model import WatchProjector, WatchViewModel
 
 
@@ -318,6 +318,8 @@ def _try_run_watch_follow(
             return snapshot_renderer(model)
 
         controller_options["renderer"] = adapted_snapshot_renderer
+    elif getattr(args, "lobby", False) is True:
+        controller_options["renderer"] = render_arity_lobby_frame
     if monotonic is not None:
         controller_options["monotonic"] = monotonic
 

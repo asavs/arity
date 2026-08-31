@@ -149,6 +149,25 @@ def _selected_cache_lines(trial: WatchTrial) -> list[str]:
     ]
 
 
+def _lobby_expanded_lines(trial: WatchTrial) -> list[str]:
+    """Nest truthful selected-trial detail directly beneath its lobby row."""
+
+    detail = trial.detail
+    if detail is None:
+        return []
+    lines = [
+        "    "
+        f"evidence {_count(detail.evidence)} | "
+        f"reviews {_count(detail.reviews)} | "
+        f"resolutions {_count(detail.resolutions)} | "
+        f"delivery {'yes' if detail.delivery_recorded else 'no'}"
+    ]
+    lines.extend(_selected_agent_lines(trial))
+    lines.extend(f"  {line}" for line in _selected_observation_lines(trial))
+    lines.extend(f"  {line}" for line in _selected_cache_lines(trial))
+    return lines
+
+
 def _validate_frame(frame: str) -> None:
     if not frame.endswith("\n") or frame.endswith("\n\n"):
         raise RuntimeError("watch frame must end with one newline")
@@ -255,10 +274,11 @@ def _pulse_line(capabilities: TerminalCapabilities, phase: int) -> str:
     return f"{marker} journal update"
 
 
-def render_watch_follow_frame(
+def _render_follow_frame(
     model: Optional[WatchViewModel],
     capabilities: TerminalCapabilities,
     *,
+    lobby: bool,
     expanded: bool = False,
     help_visible: bool = False,
     error_code: Optional[str] = None,
@@ -270,6 +290,8 @@ def render_watch_follow_frame(
         raise TypeError("model must be an exact WatchViewModel or None")
     if type(capabilities) is not TerminalCapabilities:
         raise TypeError("capabilities must be exact TerminalCapabilities")
+    if type(lobby) is not bool:
+        raise TypeError("lobby presentation flag must be a boolean")
     if type(expanded) is not bool or type(help_visible) is not bool:
         raise TypeError("follow presentation flags must be booleans")
     if error_code is not None and error_code not in FOLLOW_ERROR_CODES:
@@ -277,13 +299,14 @@ def render_watch_follow_frame(
     if pulse_phase is not None and (type(pulse_phase) is not int or pulse_phase < 0):
         raise ValueError("pulse_phase must be a non-negative integer or None")
 
+    title_text = "arity" if lobby else "arity watch"
     if model is None:
-        title = "arity watch" if capabilities.ascii else "arity watch ·"
+        title = title_text if capabilities.ascii else f"{title_text} ·"
         lines = [f"{title} | snapshot unavailable"]
     else:
         read_time = _read_time(model.read_at)
         trial_word = "trial" if len(model.trials) == 1 else "trials"
-        title = "arity watch" if capabilities.ascii else "arity watch ·"
+        title = title_text if capabilities.ascii else f"{title_text} ·"
         lines = [
             f"{title} | {model.backend} | {len(model.trials)} {trial_word} | "
             f"read {read_time}"
@@ -305,6 +328,8 @@ def render_watch_follow_frame(
                 lines.extend(_issue_lines("    ", trial.issue))
             if trial.selected:
                 selected = trial
+                if lobby and expanded:
+                    lines.extend(_lobby_expanded_lines(trial))
 
         if model.more_trials_omitted:
             lines.append("  more trials omitted")
@@ -312,13 +337,17 @@ def render_watch_follow_frame(
             lines.extend(_issue_lines("  ", issue))
 
         if model.selected_trial_omitted:
-            lines.append("selected: omitted trial | details unavailable")
+            if lobby:
+                lines.append("  selected trial omitted | details unavailable")
+            else:
+                lines.append("selected: omitted trial | details unavailable")
         elif selected is not None:
-            lines.extend(_selected_lines(selected))
-            if expanded:
-                lines.extend(_selected_agent_lines(selected))
-                lines.extend(_selected_observation_lines(selected))
-                lines.extend(_selected_cache_lines(selected))
+            if not lobby:
+                lines.extend(_selected_lines(selected))
+                if expanded:
+                    lines.extend(_selected_agent_lines(selected))
+                    lines.extend(_selected_observation_lines(selected))
+                    lines.extend(_selected_cache_lines(selected))
 
     if help_visible:
         lines.extend(
@@ -341,9 +370,54 @@ def render_watch_follow_frame(
     return "\n".join(fitted) + "\n"
 
 
+def render_watch_follow_frame(
+    model: Optional[WatchViewModel],
+    capabilities: TerminalCapabilities,
+    *,
+    expanded: bool = False,
+    help_visible: bool = False,
+    error_code: Optional[str] = None,
+    pulse_phase: Optional[int] = None,
+) -> str:
+    """Render the explicit ``arity watch --follow`` presentation contract."""
+
+    return _render_follow_frame(
+        model,
+        capabilities,
+        lobby=False,
+        expanded=expanded,
+        help_visible=help_visible,
+        error_code=error_code,
+        pulse_phase=pulse_phase,
+    )
+
+
+def render_arity_lobby_frame(
+    model: Optional[WatchViewModel],
+    capabilities: TerminalCapabilities,
+    *,
+    expanded: bool = False,
+    help_visible: bool = False,
+    error_code: Optional[str] = None,
+    pulse_phase: Optional[int] = None,
+) -> str:
+    """Render the plain-``arity`` lobby with detail nested under its trial."""
+
+    return _render_follow_frame(
+        model,
+        capabilities,
+        lobby=True,
+        expanded=expanded,
+        help_visible=help_visible,
+        error_code=error_code,
+        pulse_phase=pulse_phase,
+    )
+
+
 __all__ = [
     "FOLLOW_ERROR_CODES",
     "TerminalCapabilities",
+    "render_arity_lobby_frame",
     "render_watch_follow_frame",
     "render_watch_snapshot",
 ]
