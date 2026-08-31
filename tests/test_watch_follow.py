@@ -32,7 +32,12 @@ import arity.tools as tools
 import arity.watch_cli as watch_cli
 from arity.cli import main as cli_main
 from arity.inspection import TrialCatalog, TrialInspection
-from arity.record_readers import RecordChanged, RecordCorruption, RecordReadError
+from arity.record_readers import (
+    RecordChanged,
+    RecordCorruption,
+    RecordLimitExceeded,
+    RecordReadError,
+)
 from arity.trial_events import TrialEvent, TrialReplay
 from arity.watch_cli import run_watch_command
 from arity.watch_terminal import render_watch_snapshot
@@ -594,23 +599,25 @@ def test_typed_read_failures_retain_last_good_and_retry_with_canned_errors() -> 
         first,
         RecordChanged(f"changed {LEAK}", path=Path(HOSTILE_ID)),
         RecordCorruption(f"corrupt {LEAK}", path=Path(HOSTILE_ID)),
+        RecordLimitExceeded(f"large {LEAK}", path=Path(HOSTILE_ID)),
         RecordReadError(f"failed {LEAK}", path=Path(HOSTILE_ID)),
         recovered,
     )
-    terminal = FakeTerminal(TIMEOUT, "r", "r", "r", "q")
+    terminal = FakeTerminal(TIMEOUT, "r", "r", "r", "r", "q")
 
     code, stdout, stderr = run_injected(
         watch_args(), loader=loader, terminal=terminal,
     )
 
     assert (code, stdout, stderr) == (0, "", "")
-    assert len(terminal.frames) == 5
+    assert len(terminal.frames) == 6
     expected_codes = (
         "record_store_changed",
         "record_store_corrupt",
+        "record_store_limit_exceeded",
         "record_read_error",
     )
-    for frame, safe_code in zip(terminal.frames[1:4], expected_codes):
+    for frame, safe_code in zip(terminal.frames[1:5], expected_codes):
         plain = _SGR.sub("", frame)
         assert "last good snapshot" in plain.lower()
         assert safe_code in plain
@@ -620,7 +627,7 @@ def test_typed_read_failures_retain_last_good_and_retry_with_canned_errors() -> 
     recovered_frame = _SGR.sub("", terminal.frames[-1])
     assert "evidenced" in recovered_frame
     assert all(code not in recovered_frame for code in expected_codes)
-    assert loader.calls == 5
+    assert loader.calls == 6
     assert_terminal_restored(terminal)
 
 

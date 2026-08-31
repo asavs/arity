@@ -17,6 +17,7 @@ FOLLOW_ERROR_CODES = frozenset(
         "record_read_error",
         "record_store_changed",
         "record_store_corrupt",
+        "record_store_limit_exceeded",
         "trial_not_found",
         "watch_render_error",
         "watch_terminal_error",

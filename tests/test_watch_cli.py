@@ -75,8 +75,10 @@ from arity.inspection import InspectionIssue, TrialCatalog, TrialInspection
 from arity.record_readers import (
     RecordChanged,
     RecordCorruption,
+    RecordLimitExceeded,
     RecordNotFound,
     RecordReadError,
+    RecordReadLimits,
     StoreSpec,
 )
 from arity.stores.sqlite import SqliteRecordStore
@@ -454,8 +456,13 @@ def install_catalog_source(
         events.append("configured")
         return spec
 
-    def opened(actual: StoreSpec | None = None) -> ReaderContext:
+    def opened(
+        actual: StoreSpec | None = None,
+        *,
+        limits: RecordReadLimits | None = None,
+    ) -> ReaderContext:
         assert actual is spec
+        assert limits == watch_cli.WATCH_RECORD_READ_LIMITS
         events.append("reader_open")
         return ReaderContext(events, reader)
 
@@ -1312,6 +1319,14 @@ def test_selected_valid_trial_does_not_hide_other_logical_failure(
             "arity: record_store_changed\n",
         ),
         (
+            RecordLimitExceeded(
+                f"large {BLIND_LEAK_SENTINEL}",
+                path=Path(BLIND_LEAK_SENTINEL),
+            ),
+            1,
+            "arity: record_store_limit_exceeded\n",
+        ),
+        (
             RecordReadError(
                 f"failed {BLIND_LEAK_SENTINEL}",
                 path=Path(BLIND_LEAK_SENTINEL),
@@ -1367,6 +1382,14 @@ def test_typed_physical_failures_close_once_and_emit_only_canned_stderr(
             ),
             1,
             "arity: record_store_changed\n",
+        ),
+        (
+            RecordLimitExceeded(
+                f"large {BLIND_LEAK_SENTINEL}",
+                path=Path(BLIND_LEAK_SENTINEL),
+            ),
+            1,
+            "arity: record_store_limit_exceeded\n",
         ),
         (
             RecordReadError(
@@ -1427,8 +1450,13 @@ def test_record_not_found_is_empty_without_selection_and_missing_with_selection(
     def configured() -> StoreSpec:
         return spec
 
-    def missing(actual: StoreSpec | None = None) -> AbstractContextManager[object]:
+    def missing(
+        actual: StoreSpec | None = None,
+        *,
+        limits: RecordReadLimits | None = None,
+    ) -> AbstractContextManager[object]:
         assert actual is spec
+        assert limits == watch_cli.WATCH_RECORD_READ_LIMITS
         raise RecordNotFound(
             f"missing {BLIND_LEAK_SENTINEL}",
             path=Path(BLIND_LEAK_SENTINEL),
