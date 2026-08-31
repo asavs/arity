@@ -569,10 +569,10 @@ def test_empty_renderer_is_exact_and_independent_of_backend_and_clock() -> None:
 
 
 @pytest.mark.parametrize("read_at", [1e308, -1e308])
-def test_unrepresentable_finite_read_time_uses_fixed_safe_hhmmss(
+def test_unrepresentable_finite_read_time_uses_fixed_unknown_time(
     read_at: float,
 ) -> None:
-    """Finite model values outside the platform datetime range never escape."""
+    """An unrepresentable local time stays unknown instead of inventing midnight."""
     rendered = render_watch_snapshot(
         model(
             valid_trial(1),
@@ -581,9 +581,10 @@ def test_unrepresentable_finite_read_time_uses_fixed_safe_hhmmss(
     )
 
     assert rendered == (
-        "arity watch | jsonl | 1 trial | read 00:00:00\n"
+        "arity watch | jsonl | 1 trial | read ??:??:??\n"
         "  Trial 1 | started | valid | completions 0/0\n"
     )
+    assert "read 00:00:00" not in rendered
     assert_printable_ascii_snapshot(rendered)
 
 
