@@ -6,9 +6,18 @@ fakes.  No test in this module needs a real console, store, provider, or credent
 from __future__ import annotations
 
 import argparse
+import builtins
 import io
+import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
+import threading
+import time
+import urllib.request
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +26,12 @@ from unittest.mock import patch
 
 import pytest
 
+import arity.auth as auth
+import arity.handlers as handlers
+import arity.pulse as pulse
+import arity.runtime as runtime
+import arity.stores.sqlite as sqlite_store_module
+import arity.tools as tools
 import arity.watch_cli as watch_cli
 from arity.cli import main as cli_main
 from arity.inspection import TrialCatalog, TrialInspection
@@ -328,6 +343,12 @@ def assert_no_raw_identity(value: str, *raw_ids: str) -> None:
     assert "\x1b" not in without_sgr
 
 
+def selected_label(frame: str) -> str | None:
+    plain = _SGR.sub("", frame)
+    selected = re.search(r"(?m)^>\s+(Trial [0-9]+)\b", plain)
+    return None if selected is None else selected.group(1)
+
+
 def test_cli_requires_explicit_follow_and_preserves_ordinary_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -456,4 +477,250 @@ def test_follow_reuses_one_projector_and_never_recycles_private_labels() -> None
     assert "> Trial 2" in terminal.frames[4]
     joined = "".join(terminal.frames) + stdout + stderr
     assert_no_raw_identity(joined, raw_a, raw_b, raw_c, raw_d)
+    assert_terminal_restored(terminal)
+
+
+def test_keyboard_navigation_expand_help_retry_and_quit_use_private_selection() -> None:
+    raw_a = f"a:{HOSTILE_ID}"
+    raw_b = f"b:{HOSTILE_ID}"
+    raw_c = f"c:{HOSTILE_ID}"
+    source = TrialCatalog(trials=(
+        started_inspection(raw_a, timestamp=30.0),
+        started_inspection(raw_b, timestamp=20.0),
+        started_inspection(raw_c, timestamp=10.0),
+    ))
+    loader = SequenceLoader(source, source)
+    terminal = FakeTerminal(
+        "j",
+        "down",
+        "k",
+        "down",
+        "up",
+        "enter",
+        "?",
+        "?",
+        "r",
+        "q",
+    )
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert [selected_label(frame) for frame in terminal.frames[:6]] == [
+        None,
+        "Trial 1",
+        "Trial 2",
+        "Trial 1",
+        "Trial 2",
+        "Trial 1",
+    ]
+    assert "Agent A" not in _SGR.sub("", terminal.frames[5])
+    assert "Agent A" in _SGR.sub("", terminal.frames[6])
+    help_frame = _SGR.sub("", terminal.frames[7]).lower()
+    for help_text in ("j/k", "enter", "retry", "help", "quit"):
+        assert help_text in help_frame
+    assert help_frame != _SGR.sub("", terminal.frames[8]).lower()
+    assert loader.calls == 2
+    assert loader.selected_ids == [None, raw_a]
+    assert all(projector is loader.projectors[0] for projector in loader.projectors)
+    assert_no_raw_identity("".join(terminal.frames), raw_a, raw_b, raw_c)
+    assert_terminal_restored(terminal)
+
+
+def test_unchanged_started_journal_never_claims_motion_or_progress() -> None:
+    raw_id = f"still:{HOSTILE_ID}"
+    unchanged = TrialCatalog(trials=(started_inspection(raw_id, timestamp=1.0),))
+    loader = SequenceLoader(unchanged, unchanged, unchanged)
+    terminal = FakeTerminal(TIMEOUT, TIMEOUT, "q")
+
+    code, stdout, stderr = run_injected(
+        watch_args(),
+        loader=loader,
+        terminal=terminal,
+        clock=FakeClock(100.0, 200.0, 300.0),
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert len(terminal.frames) == 3
+    combined = _SGR.sub("", "".join(terminal.frames)).lower()
+    assert "journal update" not in combined
+    for false_claim in ("running", "working", "thinking", "queued", "progress", "%"):
+        assert false_claim not in combined
+    assert_no_raw_identity(combined, raw_id)
+    assert_terminal_restored(terminal)
+
+
+def test_update_pulse_depends_only_on_safe_fingerprint_change() -> None:
+    raw_id = f"pulse:{HOSTILE_ID}"
+    first = TrialCatalog(trials=(started_inspection(raw_id, timestamp=1.0),))
+    timestamp_only = TrialCatalog(trials=(started_inspection(raw_id, timestamp=999.0),))
+    completed = TrialCatalog(trials=(
+        started_inspection(
+            raw_id,
+            timestamp=999.0,
+            completions=({"arm_id": f"arm:{raw_id}"},),
+        ),
+    ))
+    loader = SequenceLoader(first, first, timestamp_only, completed)
+    terminal = FakeTerminal(TIMEOUT, TIMEOUT, TIMEOUT, "q")
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    cues = ["journal update" in _SGR.sub("", frame).lower() for frame in terminal.frames]
+    assert cues == [False, False, False, True]
+    assert "completions 1/1" in _SGR.sub("", terminal.frames[-1])
+    assert_no_raw_identity("".join(terminal.frames), raw_id)
+    assert_terminal_restored(terminal)
+
+
+def test_typed_read_failures_retain_last_good_and_retry_with_canned_errors() -> None:
+    first = safe_model("started", selected_number=1, read_at=100.0)
+    recovered = safe_model("evidenced", selected_number=1, read_at=200.0)
+    loader = SequenceLoader(
+        first,
+        RecordChanged(f"changed {LEAK}", path=Path(HOSTILE_ID)),
+        RecordCorruption(f"corrupt {LEAK}", path=Path(HOSTILE_ID)),
+        RecordReadError(f"failed {LEAK}", path=Path(HOSTILE_ID)),
+        recovered,
+    )
+    terminal = FakeTerminal(TIMEOUT, "r", "r", "r", "q")
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert len(terminal.frames) == 5
+    expected_codes = (
+        "record_store_changed",
+        "record_store_corrupt",
+        "record_read_error",
+    )
+    for frame, safe_code in zip(terminal.frames[1:4], expected_codes):
+        plain = _SGR.sub("", frame)
+        assert "last good snapshot" in plain.lower()
+        assert safe_code in plain
+        assert "Trial 1" in plain
+        assert LEAK not in plain
+        assert HOSTILE_ID not in plain
+    recovered_frame = _SGR.sub("", terminal.frames[-1])
+    assert "evidenced" in recovered_frame
+    assert all(code not in recovered_frame for code in expected_codes)
+    assert loader.calls == 5
+    assert_terminal_restored(terminal)
+
+
+@pytest.mark.parametrize("reported_width", [20, 37, 10**9, LEAK])
+def test_width_is_bounded_and_hostile_identity_cannot_control_frames(
+    reported_width: object,
+) -> None:
+    raw_id = f"width:{HOSTILE_ID}"
+    source = TrialCatalog(trials=(started_inspection(raw_id, timestamp=1.0),))
+    loader = SequenceLoader(source)
+    terminal = FakeTerminal("q", width=reported_width)
+
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert len(terminal.frames) == 1
+    plain = _SGR.sub("", terminal.frames[0])
+    assert "Trial 1" in plain
+    longest = max(len(line) for line in plain.splitlines())
+    if type(reported_width) is int and 20 <= reported_width <= 256:
+        assert longest <= reported_width
+    else:
+        assert longest <= 256
+    assert_no_raw_identity(terminal.frames[0], raw_id)
+    assert_terminal_restored(terminal)
+
+
+def test_ascii_no_motion_and_no_color_are_independent_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = (safe_model("started"), safe_model("evidenced"))
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    ascii_terminal = FakeTerminal(TIMEOUT, "q")
+    assert run_injected(
+        watch_args(ascii=True),
+        loader=SequenceLoader(*changed),
+        terminal=ascii_terminal,
+    ) == (0, "", "")
+    ascii_frame = ascii_terminal.frames[-1]
+    assert _SGR.sub("", ascii_frame).isascii()
+    assert "journal update" in _SGR.sub("", ascii_frame).lower()
+    assert "\x1b[" in ascii_frame
+
+    no_motion_terminal = FakeTerminal(TIMEOUT, TIMEOUT, "q")
+    steady = safe_model("started", read_at=100.0)
+    assert run_injected(
+        watch_args(no_motion=True),
+        loader=SequenceLoader(steady, steady, steady),
+        terminal=no_motion_terminal,
+    ) == (0, "", "")
+    assert no_motion_terminal.frames == [no_motion_terminal.frames[0]] * 3
+    assert any(ord(character) > 127 for character in _SGR.sub("", no_motion_terminal.frames[0]))
+    assert "\x1b[" in no_motion_terminal.frames[0]
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    no_color_terminal = FakeTerminal(TIMEOUT, "q")
+    assert run_injected(
+        watch_args(),
+        loader=SequenceLoader(*changed),
+        terminal=no_color_terminal,
+    ) == (0, "", "")
+    no_color_frame = no_color_terminal.frames[-1]
+    assert "\x1b" not in no_color_frame
+    assert any(ord(character) > 127 for character in no_color_frame)
+    assert "journal update" in no_color_frame.lower()
+
+
+def test_follow_uses_only_injected_query_reader_and_presentation_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        raise AssertionError("follow invoked provider/runtime/tool/auth/writer/prewarm")
+
+    monkeypatch.setattr(builtins, "input", forbidden)
+    monkeypatch.setattr(os, "isatty", forbidden)
+    monkeypatch.setattr(os, "get_terminal_size", forbidden)
+    monkeypatch.setattr(shutil, "get_terminal_size", forbidden)
+    monkeypatch.setattr(time, "sleep", forbidden)
+    monkeypatch.setattr(threading, "Timer", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(webbrowser, "open", forbidden)
+    monkeypatch.setattr(runtime.Runtime, "run", forbidden)
+    monkeypatch.setattr(handlers, "create_model_provider", forbidden)
+    monkeypatch.setattr(handlers, "create_default_model_provider", forbidden)
+    monkeypatch.setattr(handlers, "default_record_store", forbidden)
+    monkeypatch.setattr(handlers, "JsonlRecordStore", forbidden)
+    monkeypatch.setattr(sqlite_store_module, "SqliteRecordStore", forbidden)
+    monkeypatch.setattr(handlers.LocalToolRunner, "execute", forbidden)
+    monkeypatch.setattr(tools.SandboxToolRunner, "execute", forbidden)
+    monkeypatch.setattr(auth.TokenStore, "load_all", forbidden)
+    monkeypatch.setattr(auth.TokenStore, "save_credential", forbidden)
+    monkeypatch.setattr(pulse.PulseEngine, "evaluate_session", forbidden)
+    monkeypatch.setattr(pulse.PulseEngine, "scan_expiring_seats", forbidden)
+
+    loader = SequenceLoader(safe_model("started"))
+    terminal = FakeTerminal("q")
+    code, stdout, stderr = run_injected(
+        watch_args(), loader=loader, terminal=terminal,
+    )
+
+    assert (code, stdout, stderr) == (0, "", "")
+    assert loader.calls == 1
+    assert len(terminal.frames) == 1
+    assert_no_raw_identity(terminal.frames[0])
     assert_terminal_restored(terminal)
