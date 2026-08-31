@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ._version import USER_AGENT
+from .configuration import get_config_value
 from .roles import Role
 from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
@@ -449,22 +450,6 @@ class SandboxToolRunner(ToolRunner):
 # -----------------------------------------------------------------------------
 # Smart Tool Routing & Pluggable Providers (The Tool Seam)
 # -----------------------------------------------------------------------------
-
-def get_config_value(key: str) -> Optional[str]:
-    """Resolve an environment or active ``.gorkbot/config.json`` setting."""
-    val = os.environ.get(key)
-    if val:
-        return val
-    for p in (Path(".gorkbot/config.json"), Path.home() / ".gorkbot" / "config.json"):
-        if p.exists():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if key in data and data[key]:
-                    return str(data[key])
-            except Exception:
-                pass
-    return None
-
 
 def positive_int(value: Any, *, name: str = "value") -> int:
     """Parse a positive integer without silently truncating floats or accepting booleans."""
