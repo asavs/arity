@@ -41,10 +41,11 @@ class DenialSet:
 
 @dataclass(frozen=True)
 class Role:
-    """A role profile with tier level, capabilities, skills, and restrictions."""
+    """A stable personality profile with team, tier, capabilities, and restrictions."""
     name: str
     description: str
-    tier: int = 2  # 0 = Secretary (closest to Asa), 1 = Lead Engineer, 2 = Specialist (Python Dev), 3 = Leaf worker
+    tier: int = 2  # 0 = Secretary, 1 = project peers, 2 = specialists, 3 = leaf workers
+    team: str = ""
     skills: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
@@ -129,6 +130,7 @@ def parse_role_document(content: str) -> Role:
     name = meta.get("name", "unknown")
     desc = meta.get("description", "")
     tier = int(meta.get("tier", 2))
+    team = str(meta.get("team", ""))
     skills = tuple(meta.get("skills", []))
     allowed_tools = tuple(meta.get("allowed_tools", []))
     denied_tools = tuple(meta.get("denied_tools", []))
@@ -139,6 +141,7 @@ def parse_role_document(content: str) -> Role:
         name=name,
         description=desc,
         tier=tier,
+        team=team,
         skills=skills,
         allowed_tools=allowed_tools,
         denial_set=DenialSet(
@@ -165,7 +168,7 @@ class TypePack:
     """What a role needs to work in one language or domain: skills, rules, and how to verify.
 
     A role is who you are and what you may not touch; a type is what you are working in.
-    developer:python, tester:python and reviewer:python share one pack.
+    developer:python, test-engineer:python and judge:python share one pack.
     """
     name: str
     description: str = ""
@@ -199,6 +202,7 @@ def compose(role: Role, pack: TypePack) -> Role:
         name=f"{role.base_name}:{pack.name}",
         description=f"{role.description} [{pack.name}]",
         tier=role.tier,
+        team=role.team,
         skills=skills,
         allowed_tools=role.allowed_tools,
         denial_set=role.denial_set,
@@ -259,11 +263,6 @@ class RoleRegistry:
                 self._roles[alias] = self._roles["developer"]
         if "engineer" in self._roles:
             self._roles["architect"] = self._roles["engineer"]
-        if "reviewer" in self._roles:
-            self._roles["auditor"] = self._roles["reviewer"]
-            self._roles.setdefault("tester", self._roles["reviewer"])
-        if "tester" in self._roles:
-            self._roles["test_engineer"] = self._roles["tester"]
         if "scout" in self._roles:
             self._roles["recon"] = self._roles["scout"]
     def register(self, role: Role) -> None:
@@ -298,7 +297,7 @@ class RoleRegistry:
         return None
 
     def with_type(self, role: Role, type_name: Optional[str]) -> Role:
-        """Attach a type to a role by name (reviewer + 'python' -> reviewer:python); no-op if absent."""
+        """Attach a type to a role by name (judge + 'python' -> judge:python); no-op if absent."""
         if not type_name or role.type_name == type_name:
             return role
         return self.get(f"{role.base_name}:{type_name}") or role
@@ -345,8 +344,8 @@ class RoleRegistry:
             "developer:rust": ("rust", "cargo", "crate"),
             "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
             "engineer": ("architecture", "system design", "spec", "decompose"),
-            "tester": ("verify tests", "run pytest", "check regression"),
-            "reviewer": ("audit code", "check pr", "code review"),
+            "test-engineer": ("verify tests", "run pytest", "check regression"),
+            "judge": ("audit code", "check pr", "code review"),
             "scout": ("recon", "find repo", "locate docs"),
         }
 
@@ -375,11 +374,12 @@ class RoleRegistry:
 _default_registry = RoleRegistry()
 SECRETARY_ROLE = _default_registry.get("secretary") or parse_role_document("---\nname: secretary\ntier: 0\n---\nSecretary")
 VOICE_ROLE = _default_registry.get("voice") or SECRETARY_ROLE
-ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\n---\nEngineer")
+ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\nteam: engineering\n---\nEngineer")
 ARCHITECT_ROLE = _default_registry.get("architect") or ENGINEER_ROLE
-DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\n---\nDeveloper")
+DESIGNER_ROLE = _default_registry.get("designer") or parse_role_document("---\nname: designer\ntier: 1\n---\nDesigner")
+DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\nteam: engineering\n---\nDeveloper")
 BUILDER_ROLE = _default_registry.get("builder") or DEVELOPER_ROLE
 PYTHON_DEVELOPER_ROLE = _default_registry.get("developer:python") or BUILDER_ROLE
-SCOUT_ROLE = _default_registry.get("scout") or parse_role_document("---\nname: scout\ntier: 3\n---\nScout")
-TESTER_ROLE = _default_registry.get("tester") or parse_role_document("---\nname: tester\ntier: 3\n---\nTester")
-REVIEWER_ROLE = _default_registry.get("reviewer") or TESTER_ROLE
+SCOUT_ROLE = _default_registry.get("scout") or parse_role_document("---\nname: scout\ntier: 1\n---\nScout")
+TEST_ENGINEER_ROLE = _default_registry.get("test-engineer") or parse_role_document("---\nname: test-engineer\ntier: 2\nteam: engineering\n---\nTest Engineer")
+JUDGE_ROLE = _default_registry.get("judge") or parse_role_document("---\nname: judge\ntier: 3\n---\nJudge")
