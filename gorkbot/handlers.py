@@ -341,14 +341,20 @@ def create_default_model_provider() -> ModelProvider:
 # -----------------------------------------------------------------------------
 
 class LocalToolRunner:
-    """Registry and executor for local python functions and tools."""
+    """Registry and executor for local python functions and tools (`shell_tools` arm).
+
+    This represents the unconfined/raw-execution hypothesis arm (Axiom 2). Unlike
+    `SandboxToolRunner` (`ast_tools`), paths here resolve directly against the filesystem
+    without traversal denial checks. Note that task hidden tests are held in-memory in
+    `TaskRecord` and injected only post-execution during `run_sandbox_verification`,
+    preventing pre-verification answer-key peeking even under unconfined execution.
+    """
 
     def __init__(self, workspace_root: Optional[Path] = None):
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
         self._tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_defaults()
-
     def register(
         self,
         name: str,
