@@ -683,6 +683,24 @@ def fetch_antigravity_quota(access_token: str, project_id: str) -> dict[str, Any
 # 4. xAI Grok Native Login Flow (RFC 8628 Device Authorization)
 # -----------------------------------------------------------------------------
 
+def _device_poll_disposition(err_body: str, http_code: int) -> str:
+    """Classify one rejected RFC 8628 poll.
+
+    Returns "authorization_pending" or "slow_down" to keep polling, another OAuth error code
+    for a terminal failure, or "" when the body carries no OAuth error and the status is not
+    one the spec uses while waiting — the caller then re-raises the transport error itself.
+    A body that does not parse stays pending on 400/428, since servers send unparseable bodies
+    while authorization is still outstanding.
+    """
+    try:
+        err_type = json.loads(err_body).get("error", "")
+    except Exception:
+        err_type = ""
+    if err_type:
+        return err_type
+    return "authorization_pending" if http_code in (400, 428) else ""
+
+
 def login_xai_grok(
     open_browser: bool = True,
     timeout: float = 120.0,
@@ -756,21 +774,17 @@ def login_xai_grok(
                 print(f"\033[1;32m[xAI Grok Auth]\033[0m Successfully authenticated xAI Grok subscription.")
                 return cred_data
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8")
-            try:
-                err_json = json.loads(err_body)
-                err_type = err_json.get("error", "")
-                if err_type == "authorization_pending":
-                    continue
-                elif err_type == "slow_down":
-                    interval += 5
-                    continue
-                else:
-                    raise RuntimeError(f"xAI Auth Error: {err_type}")
-            except Exception:
-                if e.code == 400 or e.code == 428:
-                    continue
+            # Terminal errors (access_denied, expired_token) arrive as HTTP 400 like the
+            # still-waiting ones, so they must be raised out of the loop rather than polled on.
+            disposition = _device_poll_disposition(e.read().decode("utf-8", errors="replace"), e.code)
+            if disposition == "authorization_pending":
+                continue
+            if disposition == "slow_down":
+                interval += 5
+                continue
+            if not disposition:
                 raise
+            raise RuntimeError(f"xAI Auth Error: {disposition}")
 
     raise TimeoutError(f"xAI Device authorization timed out after {timeout}s.")
 

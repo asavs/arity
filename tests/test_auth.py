@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from arity.auth import (
     AuthConfigurationError,
     TokenStore,
+    _device_poll_disposition,
     generate_pkce_pair,
     login_anthropic,
     login_google_antigravity,
@@ -523,6 +525,59 @@ class TestArityAuth(unittest.TestCase):
 
         saved = self.store.get_credential("anthropic")
         self.assertEqual(saved["clientId"], "synthetic-anthropic-client")
+
+    def test_xai_login_surfaces_terminal_device_error_on_first_rejection(self):
+        device_response = _json_response(
+            {
+                "device_code": "synthetic-device-code",
+                "user_code": "synthetic-user-code",
+                "verification_uri": "https://example.invalid/device",
+                "interval": 0,
+            }
+        )
+        denial = urllib.error.HTTPError(
+            "https://example.invalid/token",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error": "access_denied"}'),
+        )
+        with patch.dict(
+            os.environ,
+            {"ARITY_XAI_CLIENT_ID": "synthetic-xai-client"},
+        ), patch(
+            "arity.auth.urllib.request.urlopen",
+            side_effect=[device_response, denial],
+        ) as mocked_urlopen, patch(
+            "arity.auth.time.sleep",
+        ), patch(
+            "arity.auth.TokenStore",
+            return_value=self.store,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                # Short timeout so a regression cannot stall the suite; the rejection is
+                # still meant to abort the flow long before the deadline is reached.
+                login_xai_grok(open_browser=False, timeout=2.0)
+
+        self.assertNotIsInstance(raised.exception, TimeoutError)
+        self.assertIn("access_denied", str(raised.exception))
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
+    def test_device_poll_disposition_separates_waiting_from_terminal(self):
+        self.assertEqual(
+            _device_poll_disposition('{"error": "authorization_pending"}', 400),
+            "authorization_pending",
+        )
+        self.assertEqual(
+            _device_poll_disposition('{"error": "slow_down"}', 400),
+            "slow_down",
+        )
+        self.assertEqual(
+            _device_poll_disposition('{"error": "access_denied"}', 400),
+            "access_denied",
+        )
+        self.assertEqual(_device_poll_disposition("<html>gateway</html>", 400), "authorization_pending")
+        self.assertEqual(_device_poll_disposition("<html>gateway</html>", 500), "")
 
 
 class TestAuthCli(unittest.TestCase):
