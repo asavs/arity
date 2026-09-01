@@ -511,7 +511,7 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
 
     # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
     elif provider in ("openai", "codex", "codex-direct"):
-        codex_data = creds.get("openai-codex") or store.get_credential("openai-codex") or {}
+        codex_data = creds.get("openai-codex") or store.refresh_if_needed("openai-codex") or store.get_credential("openai-codex") or {}
         token = codex_data.get("access")
         account_id = codex_data.get("accountId") or codex_data.get("account_id")
         if token and account_id:
@@ -523,7 +523,7 @@ def create_wire_model_provider(seat: Any) -> ModelProvider:
 
     # 3. xAI (Grok backend with Grok build fallback)
     elif provider in ("xai", "grok", "grok-direct"):
-        xai_data = creds.get("xai-oauth") or store.get_credential("xai-oauth") or {}
+        xai_data = creds.get("xai-oauth") or store.refresh_if_needed("xai-oauth") or store.get_credential("xai-oauth") or {}
         token = xai_data.get("access")
         if token:
             wire = GrokWireProvider(access_token=token, model=model or "grok-4.5")
