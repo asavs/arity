@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -236,17 +239,18 @@ class RoleRegistry:
             for path in rdir.glob("*.md"):
                 try:
                     self.register(load_role_from_file(path))
-                except Exception:
-                    continue
+                except Exception as exc:
+                    logger.error("Failed to load role definition from %s: %s", path, exc)
+                    raise
         for tdir in self._definition_dirs("types"):
             if not tdir.exists():
                 continue
             for path in tdir.glob("*.md"):
                 try:
                     self.register_type(parse_type_document(path.read_text(encoding="utf-8")))
-                except Exception:
-                    continue
-
+                except Exception as exc:
+                    logger.error("Failed to load type pack definition from %s: %s", path, exc)
+                    raise
         # Setup clean alias mappings to canonical roles
         if "secretary" in self._roles:
             self._roles["voice"] = self._roles["secretary"]

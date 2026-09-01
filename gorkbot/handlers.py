@@ -8,6 +8,10 @@ import json
 import os
 import re
 import shutil
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 import subprocess
 import threading
 import time
@@ -280,9 +284,10 @@ def create_model_provider(seat: Any) -> ModelProvider:
     try:
         from .wire import create_wire_model_provider
         return create_wire_model_provider(seat)
-    except Exception:
-        pass
-
+    except (TypeError, AttributeError):
+        raise
+    except Exception as exc:
+        logger.debug("Wire model provider not created for seat %s: %s", getattr(seat, "id", seat), exc)
     provider = getattr(seat, "provider", "").lower()
     model = getattr(seat, "model", "")
     api_key = getattr(seat, "api_key", None)
@@ -319,9 +324,10 @@ def create_default_model_provider() -> ModelProvider:
                 api_key = None
                 endpoint = ""
             return create_wire_model_provider(DummyGrokSeat())
-    except Exception:
-        pass
-
+    except (TypeError, AttributeError):
+        raise
+    except Exception as exc:
+        logger.debug("Default wire model provider initialization fallback: %s", exc)
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
         return GeminiModelProvider()
     elif shutil.which("codex"):
@@ -517,10 +523,11 @@ class JsonlRecordStore:
                 row = json.loads(line)
                 if all(row.get(k) == v for k, v in filters.items()):
                     results.append(row)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Corrupt line in JSONL record store %s: %s", p, exc)
+                record_data_loss(f"JsonlCorruptLine({kind})", exc)
                 continue
         return results
-
 
 # -----------------------------------------------------------------------------
 # 4. Console Transport (Terminal formatting)

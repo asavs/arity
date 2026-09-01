@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 import re
 import shutil
 import subprocess
@@ -679,9 +683,9 @@ class TerrariumDispatcher:
                         },
                     )
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                logger.warning("Failed to persist terrarium_trial record: %s", exc)
+                record_data_loss("TerrariumTrialRecord", exc)
         return TerrariumCandidateResult(
             candidate_id=candidate_id,
             task_id=task.id,
@@ -824,6 +828,7 @@ class TerrariumDispatcher:
                     if parent != self.base_workspace and parent.is_dir() and not any(parent.iterdir()):
                         parent.rmdir()
             except Exception:
+                # Benign: Best-effort sandbox cleanup; failure leaves a temp folder, never corrupts state.
                 pass
 
     def race(

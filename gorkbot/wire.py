@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 import sys
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 import sqlite3
 import urllib.error
 import urllib.request
@@ -62,9 +65,10 @@ class AntigravityWireProvider:
                 self.access_token = refreshed["access"]
                 if refreshed.get("projectId"):
                     self.project_id = refreshed["projectId"]
-        except Exception:
-            pass
-
+        except (TypeError, AttributeError):
+            raise
+        except Exception as exc:
+            logger.warning("Token auto-refresh failed for account %s: %s", self.account_key, exc)
         endpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
         headers = {
             "Content-Type": "application/json",
@@ -309,9 +313,9 @@ class CodexWireProvider:
                             if usage_raw:
                                 prompt_tokens = int(usage_raw.get("input_tokens", 0) or 0)
                                 completion_tokens = int(usage_raw.get("output_tokens", 0) or 0)
-                    except Exception:
+                    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                        logger.debug("Skipping unparseable SSE line %r: %s", data_str, exc)
                         continue
-
             output_text = "".join(collected_text).strip()
             return ModelCompleted(
                 content=output_text or None,

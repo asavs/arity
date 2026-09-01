@@ -1091,11 +1091,9 @@ def parse_judgement(text: str, key: dict[str, str]) -> dict[str, Any]:
             out["cherry_picks"] = {key[label]: value for label, value in cherry_picks.items()}
             out["parsed"] = True
             break
-        except Exception:
+        except (json.JSONDecodeError, ValueError, KeyError):
             continue
     return out
-
-
 def check_citations(text: str, key: dict[str, str], rep: RaceReport) -> dict[str, Any]:
     """For each 'Candidate X' paragraph, check identifiers against frozen artifacts.
 

@@ -5,6 +5,10 @@ Axiom 9: Standing goes DOWN when a model is caught claiming changes it never mad
 """
 from __future__ import annotations
 
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 import json
 import time
 from dataclasses import dataclass, field
@@ -186,8 +190,9 @@ class Scorecard:
                         },
                     )
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to persist scorecard record: %s", exc)
+                record_data_loss("ScorecardRecord", exc)
 
         return record
 
@@ -251,7 +256,14 @@ class Scorecard:
         """
         if not hasattr(self.store, "query"):
             return
-        for rec in self.store.query("scorecard"):
+        try:
+            records = self.store.query("scorecard")
+        except Exception as exc:
+            logger.warning("Failed to query scorecard records from store: %s", exc)
+            record_data_loss("ScorecardStoreQuery", exc)
+            return
+
+        for rec in records:
             role = rec.get("role", "")
             model = rec.get("model", "")
             if not role or not model:

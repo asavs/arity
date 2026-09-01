@@ -19,8 +19,8 @@ for _s in (sys.stdout, sys.stderr):
             # line_buffering: device-login codes must reach a pipe/background log immediately
             _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except Exception:
+            # Benign: Best-effort console setup at import; failure leaves the stream usable.
             pass
-
 
 def safe_print(*args, **kwargs) -> None:
     """Print with fallback encoding protection to prevent charmap/UnicodeEncodeError on legacy consoles."""
@@ -40,8 +40,9 @@ def safe_print(*args, **kwargs) -> None:
         try:
             print(*args, **kwargs)
         except Exception:
+            # Benign: Last resort. If printing fails twice there is nothing further to do.
             pass
-
+from .diagnostics import get_data_loss_count
 from .composer import CASTING_MODES, SMART
 from .ledger import PRESENCE_TTL_SECONDS, Seat, SeatLedger
 from .orchestrator import ArityOrchestrator
@@ -432,10 +433,9 @@ def handle_auth_command(args: argparse.Namespace) -> int:
                             if gemini_q is not None or claude_q is not None:
                                 g_str = f"{int(gemini_q*100)}%" if gemini_q is not None else "N/A"
                                 c_str = f"{int(claude_q*100)}%" if claude_q is not None else "N/A"
-                                print(f"    - Live Quota: \033[1;34mGemini 3: {g_str}\033[0m | \033[1;35mClaude: {c_str}\033[0m")
                     except Exception:
+                        # Benign: Display-only; the surrounding credential listing still prints.
                         pass
-        print("\033[1;36m=========================================================\033[0m\n")
     elif action == "import":
         print("\n\033[1;36m[Arity Auth]\033[0m Scanning ~/.omp, ~/.codex, and local stores...")
         imported = store.import_all()
@@ -722,6 +722,12 @@ def main() -> int:
         handle_run_command(args)
     else:
         run_demo()
+    loss_count = get_data_loss_count()
+    if loss_count > 0:
+        safe_print(
+            f"\033[1;33m[Warning]\033[0m {loss_count} record(s) could not be written or read during this run.",
+            file=sys.stderr,
+        )
     return 0
 
 if __name__ == "__main__":
