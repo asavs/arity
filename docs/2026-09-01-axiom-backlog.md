@@ -169,6 +169,67 @@ model is actually good at.
 
 ---
 
+## The version-control governor
+
+Proposed 2026-09-01: a staff member whose aptitude is version control, holding the repo on
+behalf of every other model while they work.
+
+**The problem it solves is timing, not partitioning.** On 2026-09-01 seven agents wrote into
+one working tree across three waves. By the time anyone looked, four files carried changes
+from two or three waves interleaved inside the same diff hunks, and the commit structure had
+to be *reconstructed archaeologically* rather than recorded as it happened —
+`scorecard._load_from_store` and `cli.py` could not be split by theme at all without
+hand-editing hunks and risking an intermediate commit that does not import. The branch that
+resulted is chunked by subsystem instead of by unit of work, and no intermediate commit is
+test-verified. A governor committing each territory *at the moment that piece of work is
+coherent* never loses the structure, because it never batches it.
+
+**It also closes an open archivist item.** `TODO.md` wants the closing report structured
+(`files: [...]`) because discrepancy detection is currently regex over prose. A diff is that
+structure, and it is far better evidence of what a kernel did than parsing its prose for
+filenames. The governor produces it as a byproduct of its actual job — Axiom 9's "best
+evidence for what it *did*", for free.
+
+**It gives denial sets their first job with teeth.** Roles declare denials today and
+enforcement is patchy across tool-runner arms (A2-1, A2-2). Here the denial is the design:
+every worker role has git denied, exactly one role has it granted.
+
+**A9 forces it to be a separate role from the archivist.** The governor *acts* — it writes to
+the repository — so it is a participant, and Axiom 9's whole point is that the impartial
+account is not written by the actor. They produce related records and must stay distinct.
+
+- **VC-1 [DECIDE]** Shared tree with enforced territories, or one worktree per agent plus a
+  merge step? Territories are what today's fleets already use by hand, and they are naive and
+  shippable; worktrees are more isolated but hand the governor a real merge policy. Arbitration
+  — deciding merge order and resolving conflicts — is the genuinely hard part and it is a
+  scheduling and authority question, not a version-control one.
+- **VC-2 [DECIDE]** Does the governor gate on tests? A commit that breaks the suite is either
+  refused (the governor becomes a bottleneck, and a serialization point for a parallel fleet)
+  or committed and flagged (history contains known-broken states). Bisectability is the prize
+  on one side; throughput on the other.
+- **VC-3 [DECIDE]** Two accounts in the commit message. A governor that writes the message
+  alone is describing work it did not do — the same defect as A9-3, where the dispatcher
+  synthesizes a report the kernel never gave. The honest shape carries both: the agent's own
+  statement of what it meant, and the governor's record of what changed, separately marked.
+  Decide the format before the first one is written, because commit messages are not
+  rewritable in practice.
+- **VC-4 [DECIDE]** Granularity and naming: a branch per trial, per candidate, or per task?
+  This determines whether a trial's arms can be diffed against each other directly, which
+  would be a genuinely new evidence source — today candidate workspaces are compared by
+  content hash, not by history.
+- **VC-5 [BUILD]** The governor needs its own denial set, and it is the strictest in the
+  system: no force-push, no history rewriting, no rebasing anything shared. A role that can
+  commit is a role that can destroy the record every other axiom depends on.
+- **VC-6 [SEAM]** Git plumbing (subprocess, GitPython, dulwich) and forge mechanics (`gh`,
+  the GitHub API) are commodity — rent them. The owned opinion is narrower: commit at
+  coherence per territory, and the two-account message.
+
+Worth noting what this buys beyond tidiness: a fleet whose work is bisectable is partially
+insured against the risk M-1 exists to address. If a decomposition introduces a subtle defect,
+bisect finds it without a characterization harness having predicted it.
+
+---
+
 ## A0 — The why
 
 Not a work item. It is the acceptance test for every item below: *does this reduce the number
