@@ -274,15 +274,63 @@ float and is called only from the orchestrator path.
 
 - **A3-1 [DONE 2026-09-01]** Casting policy decided: one engine, B filters / A orders, three
   modes, seeded, exploration slot in smart mode.
-- **A3-2 [DECIDE]** The magnitudes. A trial moves a standing ±1.0 from a 10.0 baseline and
-  −2.5 for a discrepancy; those were chosen by feel. Nothing depends on them yet, which makes
-  now the cheap moment. Revisit alongside E-1, since a count changes what a magnitude means.
+- **A3-2 [DONE 2026-09-01 — decided]** **Order by average delta, not running total.** Rank on
+  `(standing − 10.0) / n` rather than on `standing`.
+
+  Under a running total, incumbency is permanent. A model fielded 50 times sits at 60.0; a
+  better model added today sits at 10.0 and needs 50 net successes to overtake, while smart
+  mode grants it one exploration slot per trial and the incumbent climbs throughout. The gap
+  widens faster than exploration closes it, so whichever model accumulates a lead first keeps
+  it — in a field that replaces models every few months, for a system whose one job is
+  tracking which model is best *now*. A3-3 is what made this load-bearing.
+
+  Averaging fixes it at almost no cost: it is a derived function over two numbers already
+  stored, needs no schema change, and existing records replay into it unchanged. 50 successes
+  rates 1.0; three successes also rates 1.0, and the tiebreak becomes *confidence* (n), which
+  is what E-1's counts are for. Thirty successes against twenty failures rates 0.2 and
+  correctly falls behind both. A model with n=0 becomes explicitly **unknown** rather than
+  reading 10.0 and impersonating average — the running total could not distinguish "never
+  tried" from "reliably mediocre."
+
+- **A3-2b [DECIDE — deferred, low stakes]** The discrepancy multiplier. Being caught claiming
+  work never done costs 2.5× an honest failure, so one lie takes two and a half successes to
+  work off. Under averaging the absolute scale cancels, so this is the only magnitude that
+  remains a real judgment rather than a unit. Left at 2.5 by default. Arguments exist for much
+  steeper (a false claim poisons the evidence record itself, not just one trial) and for
+  gentler (a confused model is not a deceptive one).
+
+- **A3-2c [SEAM]** Recency weighting. A standing from six months ago should not count equally
+  with last week's, which averaging does not fix — an average has infinite memory too, it just
+  stops compounding. The right shape is a decayed or windowed estimate, which needs a half-life
+  decision and more machinery than a naive 1.0.0 wants. Deferred deliberately.
 - **A3-3 [BUILD]** Route the front door through the engine. Unblocked by A3-1. Deliberately
   sequenced *after* the engine lands so the behavior change to `arity run` is reviewable on
   its own.
-- **A3-4 [DECIDE]** What invalidates a signature? Any change to arm semantics (A2-2, A2-4)
-  silently severs comparability with every past trial. Do signatures carry a version, or does
-  the record note the break?
+- **A3-4 [DONE 2026-09-01 — decided]** **Stamp records with a ruleset epoch; keys stay clean.**
+  Every scorecard record gains an epoch field. Standings already replay from records, so
+  rebuilding as "epoch N only" is a filter rather than a migration, nothing is discarded, and
+  whether a past change was breaking stays a decision you can revisit instead of one spent at
+  write time. Records written before the field exists are epoch 0.
+
+  Rejected: versioning the key (`v2:builder:gemini:...`). It is self-enforcing, but every bump
+  discards evidence for dimensions the change never touched. Also rejected: doing nothing —
+  the failure there is invisible, which is the worst kind. Tighten the sandbox, watch
+  shell-arm pass rates fall, and the scorecard faithfully attributes the fall to the *models*.
+  Nothing errors; the numbers quietly become wrong and stay wrong, because the evidence that
+  would contradict them was recorded under rules that no longer exist.
+
+  **The accepted risk:** stamping is disciplined by convention, not enforced. Forget to bump
+  and the contamination happens anyway. Mitigated by writing the rule down rather than hoping
+  — a bump is required when any of these changes:
+  1. what an arm is *permitted to do* (A2-2, denial enforcement);
+  2. a dimension's name or identity (A2-4, the `mcp_tools` rename);
+  3. the set of dimensions itself (E-6, adding MCP/CLI);
+  4. the grading criteria — a task's hidden tests, or a type's verify command.
+
+  Point 4 is why this is a *ruleset* epoch rather than a signature version: changing a task's
+  hidden tests contaminates comparability exactly as changing an arm does, through a door the
+  signature never covered. Because standings are pairwise (E-2), a bump can also be scoped to
+  the affected key family rather than applied globally, if the change warrants it.
 - **A3-5 [SEAM]** The closed loop — read release papers and sentiment, discover candidate
   models, A/B them, retrain the policy with no operator. Does not exist. The wiki names it,
   with quota-reset-aware seat selection, as the part that is *yours*.
@@ -372,7 +420,39 @@ effect nothing emits, and `Runtime` cannot execute it.
 
 - **A12-1 [DONE 2026-09-01]** `transition()` is pure. Id generation is an injectable factory
   defaulting to the old expression; determinism is now under test.
-- **A12-2 [DECIDE]** The quiet-failure policy, now with an inventory to decide against:
+- **A12-2 [DONE 2026-09-01 — decided]** **Three classes, three rules. `logging` is the
+  plumbing, not the policy.** Delegated by Asa; decided here.
+
+  Adding `logging` alone fixes nothing: a swallowed exception sent to a logger nobody
+  configured is still silent, and logging is the *wrong* answer for two of the three classes.
+  A programming error should not be logged, it should raise. Data loss in an evidence system
+  should not be a log line nobody reads.
+
+  - **Benign (14 sites)** — stay silent, each gaining a one-line comment saying why. This
+    converts unexplained silence into a documented decision so the next reader need not
+    re-derive it. `logger.debug` at most.
+  - **Hides a bug (16 sites)** — raise. Swallowing a `TypeError` or `AttributeError` never
+    fixes anything; it relocates the crash somewhere less informative or hides it entirely,
+    which is exactly how the peer-consult defect survived unnoticed.
+  - **Hides data loss (12 sites)** — needs a channel that is not the thing that just failed.
+    The friction record cannot serve here: friction is emitted as a `StoreRecord` through
+    `runtime.py:90`, the same swallow, so the reporting mechanism is the failing mechanism.
+    These log **and** increment a run-level counter surfaced in the run's own output
+    ("3 records could not be written"), because nobody reads logs and this is evidence.
+
+  Standard library `logging`, no dependency: `getLogger(__name__)` per module, a `NullHandler`
+  on the package root so the library never configures logging for its host, and `cli.py`
+  attaches a stderr handler. Deliberately the most rip-out-able choice available (A13's male
+  join) — a consumer can attach a handler forwarding anywhere, including into an `Observer`.
+  The `Observer` seam was considered as the destination and rejected: its protocol is about
+  events and effects on the wire, and widening it for internal failure reporting would be a
+  different seam wearing the same name.
+
+  **Accepted cost:** making 16 sites raise will surface bugs. That is the point, but the first
+  runs afterward may fail where things "worked" yesterday — where "worked" meant "failed
+  invisibly."
+
+- **A12-2 (original statement)** The quiet-failure policy, with the inventory to decide against:
   **42** silent handlers across 16 files — 12 that can lose data, 16 that can hide a
   programming error, 14 benign. Two facts that shape the decision: `runtime.py:90` swallows
   the store append for *every* `StoreRecord`, so the scorecard bug fixed on 2026-09-01 was an

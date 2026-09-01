@@ -146,14 +146,22 @@ class SeatLedger:
         return available
 
     def dying_soonest(self, candidates: Optional[list[Seat]] = None, now: Optional[float] = None) -> list[Seat]:
-        """Rank seats by which quota window expires first (Axiom 3)."""
+        """Rank seats by which quota window expires first (Axiom 3).
+
+        A deadline already in the past is not urgency, it is a rollover: `list_available` keeps
+        such a seat precisely because its quota is *presumed restored*, which puts it at the
+        start of a fresh cycle rather than the end of a dying one. It therefore ranks last among
+        quota seats. Without that, `time_to_reset` flooring at 0.0 and `effective_cost` flooring
+        at its minimum would rank the seat likeliest to answer 429 first.
+        """
         curr_time = now if now is not None else time.time()
         pool = candidates if candidates is not None else self.list_available(now=curr_time)
 
-        def sort_key(s: Seat) -> tuple[int, float, float]:
-            kind_order = 0 if s.kind == "quota" else 1
-            reset_in = s.time_to_reset(curr_time) if s.kind == "quota" else 999999.0
-            return (kind_order, reset_in, s.effective_cost(curr_time))
+        def sort_key(s: Seat) -> tuple[int, int, float, float]:
+            if s.kind != "quota":
+                return (1, 0, 999999.0, s.effective_cost(curr_time))
+            elapsed = 1 if s.reset_deadline <= curr_time else 0
+            return (0, elapsed, s.time_to_reset(curr_time), s.effective_cost(curr_time))
 
         return sorted(pool, key=sort_key)
 

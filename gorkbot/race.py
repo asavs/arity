@@ -16,6 +16,11 @@ a skills list uses `/` (keys: model, harness, tools, skills, ctx, name):
 
     --variants "model=gemini-3.6-flash+harness=wire,model=gpt-5.6-sol+harness=cli+skills=pytest-tdd/scout-recon"
 
+`arity race` runs the arms the caller names — a preset or a variant list — and never casts.
+`arity run` names none, so it asks `CastingComposer` for up to `--arity` seats on distinct
+models under `--cast smart|brokie|chaos`, and records the mode and seed with the trial so
+`--cast-seed` can replay it.
+
 Mock mode swaps the model for canned providers with deliberately different behaviour
 (a correct build, a slow build that fails the benchmark, and a liar) so the judge's
 verdicts are visible without spending tokens. Mock runs never touch the real scorecard.
@@ -27,11 +32,12 @@ import hashlib
 import shutil
 import tempfile
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from .archivist import ArchivistEntry, ImpartialArchivist
+from .composer import SMART, CastingComposer, CastingDecision
 from .evidence import (
     ArtifactEvidence,
     CandidateEvidence,
@@ -47,6 +53,7 @@ from .evidence import (
 from .handlers import JsonlRecordStore, default_record_store
 from .ledger import Seat, SeatLedger
 from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
+from .scorecard import Scorecard
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .terrarium import CONTEXT_MODES, CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
@@ -71,6 +78,9 @@ class RaceConfig:
     teardown: Optional[bool] = None  # None -> mock tears down, live keeps
     store_root: Optional[Path] = None
     record_store: Optional[RecordStore] = None
+    # The scorecard the caller already replayed from that same store. Reused by the archivist so
+    # a run that casts on the record does not load and replay it a second time to grade into it.
+    scorecard: Optional[Scorecard] = None
     workspace_root: Optional[Path] = None
     # Review phase: the reviewer role reads a blind bundle of the candidates and ranks them.
     judges: list[str] = field(default_factory=list)  # model names to seat as judges
@@ -81,6 +91,11 @@ class RaceConfig:
     quiet: bool = False  # suppress per-candidate console chatter (run does this unless --verbose)
     # Set by the front door. ``--arity`` is a requested maximum; seat availability may resolve fewer.
     requested_arity: Optional[int] = None
+    # Seats the caller already resolved. ``variants`` still names the arms; a model named there
+    # binds to the first matching seat, so a cast seat must precede other accounts of its model.
+    seats: Optional[list[Seat]] = None
+    # The casting decision behind those seats, recorded so the cast can be replayed.
+    casting: Optional[dict[str, Any]] = None
     # Programmatic callers may supply exact arms; the CLI continues to resolve ``variants``.
     candidate_specs: Optional[list[CandidateSpec]] = None
     # First-class evaluators consume one frozen EvidenceBundle.  Legacy blind reviewer
@@ -88,15 +103,27 @@ class RaceConfig:
     evaluators: list[TrialEvaluator] = field(default_factory=list)
 
 
-def _record_store_for_run(cfg: RaceConfig, tmp_root: Optional[Path]) -> RecordStore:
-    """Resolve one writer through the same configured store seam used by readers."""
-    if cfg.record_store is not None:
-        return cfg.record_store
-    if cfg.store_root is not None:
-        return JsonlRecordStore(root=cfg.store_root)
+def resolve_record_store(
+    record_store: Optional[RecordStore] = None,
+    store_root: Optional[Path] = None,
+    tmp_root: Optional[Path] = None,
+) -> RecordStore:
+    """Resolve one writer through the same configured store seam used by readers.
+
+    The front door resolves it before casting so the evidence the cast reads and the evidence
+    the trial writes are the same store.
+    """
+    if record_store is not None:
+        return record_store
+    if store_root is not None:
+        return JsonlRecordStore(root=store_root)
     if tmp_root is not None:
         return JsonlRecordStore(root=tmp_root / "records")
     return default_record_store()
+
+
+def _record_store_for_run(cfg: RaceConfig, tmp_root: Optional[Path]) -> RecordStore:
+    return resolve_record_store(cfg.record_store, cfg.store_root, tmp_root)
 
 
 @dataclass
@@ -110,6 +137,7 @@ class RaceReport:
     archivist: ImpartialArchivist
     ephemeral: bool
     requested_arity: Optional[int] = None
+    casting: Optional[dict[str, Any]] = None
     notes: list[str] = field(default_factory=list)
     judgements: list[dict[str, Any]] = field(default_factory=list)
     # Phase 2 (conference): the same candidates after talking; audited separately.
@@ -160,6 +188,7 @@ class RaceReport:
                 "requested_max": self.requested_arity,
                 "resolved": len(self.candidates),
             },
+            "casting": self.casting,
             "winner": self.winner.spec.name if self.winner and self.winner.spec else None,
             "winner_signature": self.winner.signature if self.winner else None,
             "winner_is_provisional": bool(
@@ -222,14 +251,23 @@ def placeholder_seats() -> list[Seat]:
 
 
 def live_seats(ledger: Optional[SeatLedger] = None) -> list[Seat]:
-    """Authenticated, unlocked seats, fullest quota first (so a model name resolves to the account that can still pay)."""
+    """Authenticated, unlocked seats, fullest quota first (so a model name resolves to the account that can still pay).
+
+    Presence is the only filter, because this serves variant resolution rather than casting: a
+    model the caller names by hand must bind to the seat that really provides it. An exhausted
+    seat kept here fails honestly on a 429; dropped, the name falls through to an invented
+    ``provider="custom"`` seat and resolves to whatever the default wire is. Casting does its
+    own quota filtering, in ``cast_seats``.
+    """
     ledger = ledger or SeatLedger()
     seats = [s for s in ledger.list_seats() if not s.presence]
     return sorted(seats, key=lambda s: -s.remaining / max(1.0, s.total_allowance))
 
 
-def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int) -> CandidateSpec:
+def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int) -> tuple[CandidateSpec, list[str]]:
+    """One arm from one ``key=value`` group, plus notes about anything it had to invent."""
     kv: dict[str, str] = {}
+    notes: list[str] = []
     for part in spec_str.split("+"):
         if "=" in part:
             k, v = part.split("=", 1)
@@ -238,10 +276,19 @@ def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int
             kv.setdefault("model", part.strip())
     model = kv.get("model")
     seat = next((s for s in seats if model and (s.model == model or s.id == model)), None)
-    if seat is None:
-        seat = seats[idx % len(seats)] if not model else Seat(provider="custom", model=model)
+    if seat is None and not model:
+        seat = seats[idx % len(seats)]
+    elif seat is None:
+        # A model no seat provides still has to run somewhere, but the invented seat names no
+        # provider, so the wire resolves it to its default backend on an ambient key. Say so:
+        # a silent rebinding is indistinguishable from having raced the model that was asked for.
+        seat = Seat(provider="custom", model=model)
+        notes.append(
+            f"no ledger seat provides model '{model}'; racing it on an invented seat with no "
+            "provider binding, which resolves to the default wire backend"
+        )
     skills = [s for s in kv["skills"].split("/") if s] if "skills" in kv else ["pytest-tdd"]
-    return CandidateSpec(
+    spec = CandidateSpec(
         seat=seat,
         name=kv.get("name", spec_str),
         role=role,
@@ -250,6 +297,7 @@ def _parse_custom_variant(spec_str: str, seats: list[Seat], role: Role, idx: int
         skills=skills,
         context=kv.get("ctx", kv.get("context", "accounts")),
     )
+    return spec, notes
 
 
 def resolve_candidates(variants: str, role: Role, seats: list[Seat]) -> tuple[list[CandidateSpec], list[str]]:
@@ -277,7 +325,11 @@ def resolve_candidates(variants: str, role: Role, seats: list[Seat]) -> tuple[li
         specs = [CandidateSpec(seat=first, name=f"{first.model} / ctx={c}", context=c, **fixed) for c in CONTEXT_MODES]
     else:
         parts = [p.strip() for p in variants.split(",") if p.strip()]
-        specs = [_parse_custom_variant(p, seats, role, i) for i, p in enumerate(parts)]
+        specs = []
+        for i, part in enumerate(parts):
+            spec, spec_notes = _parse_custom_variant(part, seats, role, i)
+            specs.append(spec)
+            notes += spec_notes
     if len(specs) < 2:
         notes.append(f"unary trial: {len(specs)} candidate resolved; comparison requires at least two")
     return specs, notes
@@ -708,21 +760,44 @@ def resolve_report(
 # Run
 # -----------------------------------------------------------------------------
 
+def named_task(task_name: Optional[str]) -> Optional[RaceTask]:
+    """The task the caller named, or None when none was. An unknown name is refused, not guessed."""
+    if not task_name:
+        return None
+    race_task = TaskBank().get(task_name)
+    if race_task is None:
+        raise SystemExit(f"unknown task '{task_name}'; see `arity tasks`")
+    return race_task
+
+
+def role_for_trial(
+    role_name: str, race_task: Optional[RaceTask], roles: Optional[RoleRegistry] = None
+) -> tuple[Role, list[str]]:
+    """The role a trial actually scores under: the named role, plus the type its task's tags select.
+
+    The front door casts against this and ``run_race`` grades against it, so the scorecard key
+    the cast reads is the key the trial writes: ``--role developer --task lru_cache`` is
+    ``developer.python:<model>`` on both sides, not ``developer:<model>`` on one.
+    """
+    registry = roles if roles is not None else RoleRegistry()
+    role = registry.get(role_name) or BUILDER_ROLE
+    notes: list[str] = []
+    if race_task is not None:
+        # A task's tags pick the type (python, rust, ...) unless the role already names one.
+        pack = registry.type_for_tags(race_task.tags)
+        if pack and not role.type_name:
+            role = registry.with_type(role, pack.name)
+            notes.append(f"type '{pack.name}' from task tags -> {role.name}")
+    return role, notes
+
+
 def run_race(cfg: RaceConfig) -> RaceReport:
     notes: list[str] = []
     roles = RoleRegistry()
-    role = roles.get(cfg.role) or BUILDER_ROLE
 
-    race_task: Optional[RaceTask] = None
-    if cfg.task_name:
-        race_task = TaskBank().get(cfg.task_name)
-        if race_task is None:
-            raise SystemExit(f"unknown task '{cfg.task_name}'; see `arity tasks`")
-        # A task's tags pick the type (python, rust, ...) unless the role already names one.
-        pack = roles.type_for_tags(race_task.tags)
-        if pack and not role.type_name:
-            role = roles.with_type(role, pack.name)
-            notes.append(f"type '{pack.name}' from task tags -> {role.name}")
+    race_task = named_task(cfg.task_name)
+    role, role_notes = role_for_trial(cfg.role, race_task, roles)
+    notes += role_notes
     type_name = role.type_name or None
     brief = cfg.prompt or (race_task.brief if race_task else "")
     if not brief:
@@ -736,7 +811,10 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         if len(candidates) < 2:
             notes.append("unary trial: 1 candidate resolved; comparison requires at least two")
     else:
-        seats = placeholder_seats() if cfg.mock else live_seats()
+        if cfg.seats is not None:
+            seats = list(cfg.seats)
+        else:
+            seats = placeholder_seats() if cfg.mock else live_seats()
         candidates, c_notes = resolve_candidates(cfg.variants, role, seats)
         notes += c_notes
     if cfg.mock:
@@ -763,7 +841,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
     dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json or cfg.quiet)
-    archivist = ImpartialArchivist(store=store)
+    archivist = ImpartialArchivist(scorecard=cfg.scorecard, store=store)
 
     task = TaskRecord(
         brief=brief,
@@ -786,6 +864,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
             },
             "requested_arity": cfg.requested_arity,
             "resolved_arity": len(candidates),
+            "casting": cfg.casting,
             "arms": [_arm_declaration(candidate) for candidate in candidates],
             "evaluator_ids": [
                 str(getattr(evaluator, "evaluator_id", evaluator.__class__.__name__))
@@ -821,6 +900,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         archivist=archivist,
         ephemeral=ephemeral,
         requested_arity=cfg.requested_arity,
+        casting=cfg.casting,
         notes=notes,
         journal=journal,
     )
@@ -1130,7 +1210,7 @@ def _fmt_tests(tr: Optional[dict[str, Any]]) -> tuple[str, str]:
 
 
 # -----------------------------------------------------------------------------
-# Front door: arity run "<brief>" -> trial with chosen axes -> delivery
+# Front door: arity run "<brief>" -> cast -> trial with chosen axes -> delivery
 # -----------------------------------------------------------------------------
 
 def default_wire_capable(s: Seat) -> bool:
@@ -1143,24 +1223,104 @@ def default_wire_capable(s: Seat) -> bool:
         return False
 
 
-def pick_seats(seats: list[Seat], limit: int, wire_capable: Callable[[Seat], bool] = default_wire_capable) -> list[Seat]:
-    """One seat per model, fullest quota first (seats arrive sorted that way), capped at `limit`.
+def cast_seats(
+    role: Role,
+    brief: str,
+    requested: int,
+    *,
+    ledger: Optional[SeatLedger] = None,
+    scorecard: Optional[Any] = None,
+    mode: str = SMART,
+    seed: Optional[int] = None,
+    wire_capable: Optional[Callable[[Seat], bool]] = default_wire_capable,
+    now: Optional[float] = None,
+) -> tuple[CastingDecision, list[Seat], list[str]]:
+    """Cast up to `requested` distinct models for one trial.
+
+    Returns the decision, the pool it drew from, and notes about anything the cast gave up.
 
     Different models, not different accounts of one model: a run compares as many distinct minds
     as are available, up to the requested maximum.
+
+    Wire capability is an eligibility filter that degrades, not an all-or-nothing pool swap, so
+    it belongs with question B's filtering rather than with the mode's ordering. The cast is
+    made from wire-capable seats; CLI-only seats fill slots that would otherwise go unfilled,
+    and never displace an available wire seat, because a seat that cannot use tools is not
+    interchangeable with one that can.
     """
-    chosen: list[Seat] = []
-    seen: set[str] = set()
-    # Wire-capable seats first (quota order preserved within each pass); CLI-only seats only fill gaps.
-    for pass_wire in (True, False):
-        for s in seats:
-            if s.model in seen or s.remaining <= 0 or wire_capable(s) != pass_wire:
-                continue
-            seen.add(s.model)
-            chosen.append(s)
-            if len(chosen) >= limit:
-                return chosen
-    return chosen
+    ledger = ledger if ledger is not None else SeatLedger()
+    pool = ledger.list_available(now=now)
+    notes: list[str] = []
+
+    def cast_from(seats: list[Seat], count: int) -> CastingDecision:
+        composer = CastingComposer(
+            ledger=SeatLedger(initial_seats=seats, auto_seed=False), scorecard=scorecard
+        )
+        return composer.cast(
+            role, brief, candidates_count=count, now=now,
+            mode=mode, seed=seed, distinct_on="model",
+        )
+
+    if wire_capable is None:
+        return cast_from(pool, requested), pool, notes
+
+    wired = [seat for seat in pool if wire_capable(seat)]
+    wired_ids = {seat.id for seat in wired}
+    cli_only = [seat for seat in pool if seat.id not in wired_ids]
+    if not wired:
+        if cli_only:
+            notes.append(
+                "casting: no wire-capable seat is available, so the whole cast is CLI-only, "
+                "which can only narrate work it cannot do"
+            )
+        return cast_from(pool, requested), pool, notes
+
+    decision = cast_from(wired, requested)
+    filled = len(decision.candidates)
+    seated_models = {seat.model for seat in decision.candidates}
+    fill = [seat for seat in cli_only if seat.model not in seated_models]
+    if filled >= requested or not fill:
+        return decision, pool, notes
+
+    widened = cast_from(fill, requested - filled)
+    candidates = [*decision.candidates, *widened.candidates]
+    notes.append(
+        "casting: widened to CLI-only seat(s) "
+        f"({', '.join(seat.model for seat in widened.candidates)}) for {len(widened.candidates)} "
+        f"slot(s) the {len(seated_models)} wire-capable model(s) could not fill; a CLI-only seat "
+        "can only narrate work it cannot do"
+    )
+    shortfall = None
+    if len(candidates) < requested:
+        shortfall = (
+            f"requested {requested}, satisfied {len(candidates)}: {len(pool)} seat(s) survived "
+            f"question B, holding {len({seat.model for seat in pool})} distinct model value(s)"
+        )
+    return (
+        replace(
+            decision,
+            candidates=candidates,
+            shortfall=shortfall,
+            reason=f"{decision.reason} Widened by {len(widened.candidates)} CLI-only seat(s).",
+        ),
+        pool,
+        notes,
+    )
+
+
+def casting_record(decision: CastingDecision) -> dict[str, Any]:
+    """The cast as a record: what was asked for, what was seated, under which mode and seed."""
+    return {
+        "mode": decision.mode,
+        "seed": decision.seed,
+        "distinct_on": decision.distinct_on,
+        "requested_count": decision.requested_count,
+        "satisfied_count": decision.satisfied_count,
+        "shortfall": decision.shortfall,
+        "exploration_seat": decision.exploration_seat.id if decision.exploration_seat else None,
+        "seats": [seat.id for seat in decision.candidates],
+        "reason": decision.reason,
+    }
 
 
 @dataclass
@@ -1430,19 +1590,43 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
                    tester: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True,
                    evaluators: Optional[list[TrialEvaluator]] = None, store_root: Optional[Path] = None,
-                   workspace_root: Optional[Path] = None) -> tuple[RaceReport, Delivery]:
-    """Run up to the requested number of unique candidates, then deliver the selected result."""
+                   workspace_root: Optional[Path] = None, cast_mode: str = SMART,
+                   cast_seed: Optional[int] = None) -> tuple[RaceReport, Delivery]:
+    """Cast up to the requested number of unique candidates, then deliver the selected result."""
     requested_arity = resolve_arity(candidates, default=3)
-    selected_seats = (
-        placeholder_seats()[:requested_arity]
-        if mock
-        else pick_seats(live_seats(), requested_arity)
-    )
-    # With no authenticated seats, preserve the existing dry-run fallback while still honoring
-    # the requested maximum instead of allowing ``models`` to expand back to all placeholders.
-    variant_seats = selected_seats or placeholder_seats()[:requested_arity]
-    variants = ",".join(f"model={seat.model}" for seat in variant_seats)
-    resolved_arity = len(variant_seats)
+    # The trial attaches the task's type pack before it grades, so the cast has to resolve the
+    # same role: otherwise `--role developer --task lru_cache` casts on `developer:<model>`,
+    # which nothing ever writes, and question A stays pinned at the baseline forever.
+    cast_role, _ = role_for_trial(role, named_task(task_name))
+    cast_notes: list[str] = []
+    # A mock run spends no tokens and must not read the operator's record: no credential probe,
+    # no scorecard, no store, and placeholder seats in place of the ledger.
+    placeholder_ledger = SeatLedger(initial_seats=placeholder_seats(), auto_seed=False)
+    # One store per run: the cast reads the evidence the trial is about to write into, and the
+    # archivist reuses this scorecard rather than replaying the same store a second time.
+    record_store = None if mock else resolve_record_store(store_root=store_root)
+    scorecard = None if mock else Scorecard(store=record_store)
+    try:
+        decision, pool, pool_notes = cast_seats(
+            cast_role, brief, requested_arity,
+            ledger=placeholder_ledger if mock else None,
+            scorecard=scorecard,
+            mode=cast_mode, seed=cast_seed,
+            wire_capable=None if mock else default_wire_capable,
+        )
+    except RuntimeError as exc:
+        cast_notes.append(f"{exc} Using placeholder seats (run `arity auth login`).")
+        decision, pool, pool_notes = cast_seats(
+            cast_role, brief, requested_arity, ledger=placeholder_ledger,
+            mode=cast_mode, seed=cast_seed, wire_capable=None,
+        )
+    cast_notes += pool_notes
+    if decision.shortfall:
+        cast_notes.append(f"casting: {decision.shortfall}")
+    cast = decision.candidates
+    seated = {seat.id for seat in cast}
+    variants = ",".join(f"model={seat.model}" for seat in cast)
+    resolved_arity = len(cast)
     cfg = RaceConfig(
         prompt=brief,
         task_name=task_name,
@@ -1450,20 +1634,27 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
         role=role,
         mock=mock,
         workers=resolved_arity,
-        judges=judges if judges is not None else [seat.model for seat in variant_seats],
+        judges=judges if judges is not None else [seat.model for seat in cast],
         review="tie",
         conference=conference,
         teardown=False,
         quiet=quiet,
         tester=tester,
         requested_arity=requested_arity,
+        # Un-cast seats stay reachable so a named judge need not have raced.
+        seats=[*cast, *(seat for seat in pool if seat.id not in seated)],
+        casting=casting_record(decision),
         evaluators=list(evaluators or ()),
         store_root=store_root,
+        record_store=record_store,
+        scorecard=scorecard,
         workspace_root=workspace_root,
     )
     rep = run_race(cfg)
     actual_arity = len(rep.candidates)
     rep.requested_arity = requested_arity
+    for note in reversed(cast_notes):
+        rep.notes.insert(0, note)
     underfilled = actual_arity < requested_arity
     if underfilled:
         rep.notes.insert(
@@ -1486,10 +1677,17 @@ def render_report(rep: RaceReport, printer: Callable[..., None] = print) -> None
     p = printer
     bold, dim, green, red, yellow, cyan, reset = "\033[1m", "\033[2m", "\033[1;32m", "\033[1;31m", "\033[1;33m", "\033[1;36m", "\033[0m"
 
+    arity = (
+        f"{len(rep.candidates)}/{rep.requested_arity} candidates"
+        if rep.requested_arity
+        else f"{len(rep.candidates)} candidates"
+    )
+    cast = rep.casting or {}
     p(f"\n{cyan}{'=' * 100}{reset}")
     p(f"{bold}Arity trial{reset}  {rep.race_task.name if rep.race_task else 'ad-hoc'}"
-      f"  |  {len(rep.candidates)} candidates  |  hidden tests: {len(rep.task.hidden_tests) or 'none'}"
-      f"  |  {'ephemeral' if rep.ephemeral else 'scorecard: live'}")
+      f"  |  {arity}  |  hidden tests: {len(rep.task.hidden_tests) or 'none'}"
+      f"  |  {'ephemeral' if rep.ephemeral else 'scorecard: live'}"
+      + (f"  |  cast: {cast['mode']} seed {cast['seed']}" if cast else ""))
     p(f"{dim}{rep.task.brief.strip().splitlines()[0][:96]}{reset}")
     for n in rep.notes:
         p(f"{yellow}note:{reset} {n}")
