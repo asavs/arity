@@ -165,7 +165,9 @@ class ArityOrchestrator:
             peer_role = self.roles.resolve(to_peer)
             peer_task = TaskRecord(from_role=target_role.name, to_role=peer_role.name, brief=text_msg)
             peer_casting = self.composer.cast(role=peer_role, task=text_msg, candidates_count=1, now=curr_time)
-            peer_res = self.terrarium.dispatch_single(task=peer_task, seat=peer_casting.primary_seat, role=peer_role)
+            peer_res = self.terrarium.dispatch_single(
+                task=peer_task, candidate_or_seat=peer_casting.primary_seat, role=peer_role
+            )
             return peer_res.output or f"[{peer_role.name} replied with no output]"
 
         tool_runner = SandboxToolRunner(role=target_role, message_router=route_peer_message)
