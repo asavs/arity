@@ -51,6 +51,7 @@ class Role:
     # Host-issued project/history capability. Project role documents cannot
     # self-grant it during discovery.
     research_access: bool = False
+    frozen_evidence: bool = False
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
     system_prompt: str = ""
@@ -138,6 +139,7 @@ def parse_role_document(content: str) -> Role:
     skills = tuple(meta.get("skills", []))
     accepts_types = str(meta.get("accepts_types", "false")).lower() not in ("false", "no", "off", "0")
     research_access = str(meta.get("research_access", "false")).lower() not in ("false", "no", "off", "0")
+    frozen_evidence = str(meta.get("frozen_evidence", "false")).lower() not in ("false", "no", "off", "0")
     allowed_tools = tuple(meta.get("allowed_tools", []))
     denied_tools = tuple(meta.get("denied_tools", []))
     denied_paths = tuple(meta.get("denied_paths", []))
@@ -151,6 +153,7 @@ def parse_role_document(content: str) -> Role:
         skills=skills,
         accepts_types=accepts_types,
         research_access=research_access,
+        frozen_evidence=frozen_evidence,
         allowed_tools=allowed_tools,
         denial_set=DenialSet(
             denied_tools=denied_tools,
@@ -224,6 +227,7 @@ def compose(role: Role, pack: TypePack) -> Role:
         skills=skills,
         accepts_types=role.accepts_types,
         research_access=role.research_access,
+        frozen_evidence=role.frozen_evidence,
         allowed_tools=role.allowed_tools,
         denial_set=role.denial_set,
         system_prompt=prompt,
