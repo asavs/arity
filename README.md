@@ -58,6 +58,12 @@ $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_stat
 7. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
 8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates declared arms, normalized request usage, attributed observations, evidence, reviews, resolutions, and delivery.
 
+Arity's packaged agent model composes a stable personality with a domain type and attachable
+skills—for example, `developer:python` or `test-engineer:rust`. Team membership records
+organizational responsibility without restricting peer messaging. See
+[Personalities, types, skills, and teams](docs/personalities.md) for the shipped roles and their
+handoff boundaries.
+
 ## Quickstart
 
 ### Run a trial
