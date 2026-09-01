@@ -5,6 +5,10 @@ tier: 3
 skills: []
 denied_tools:
   - write_file
+  - run_command
+  - execute_command
+  - fetch_url
+  - web_search
 denied_paths:
   - .ssh
   - id_rsa

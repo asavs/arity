@@ -5,6 +5,9 @@ tier: 2
 team: engineering
 skills:
   - test-engineering
+denied_tools:
+  - fetch_url
+  - web_search
 denied_paths:
   - .ssh
   - id_rsa
