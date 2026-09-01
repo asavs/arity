@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .evidence import EvidenceBundle, Evaluation, Resolution
 from .record_readers import (
     RecordReadLimits,
     RecordReadError,
@@ -30,6 +33,8 @@ MAX_PROJECT_FILE_BYTES = 512 * 1024
 MAX_PROJECT_RESULTS = 50
 MAX_PROJECT_SCAN_FILES = 5_000
 MAX_PROJECT_SCAN_BYTES = 8 * 1024 * 1024
+MAX_PROJECT_READ_OUTPUT_BYTES = 65_536
+MAX_PROJECT_SEARCH_PATTERN_CHARS = 256
 MAX_RECORD_RESULTS = 50
 MAX_RECORD_VALUE_CHARS = 1_000
 MAX_RECORD_COLLECTION_ITEMS = 100
@@ -47,6 +52,7 @@ DEFAULT_RESEARCH_RECORD_LIMITS = RecordReadLimits(
 RESEARCH_RECORD_KINDS = frozenset(
     {
         "archivist_entry",
+        "evidence_bundle",
         "evaluation",
         "human_pick",
         "judgement",
@@ -69,7 +75,9 @@ _BLOCKED_DIRECTORY_NAMES = frozenset(
         ".terrarium",
         ".omp",
         ".hidden_tests",
+        ".hidden-tests",
         "hidden_tests",
+        "hidden-tests",
         ".venv",
         "node_modules",
         "__pycache__",
@@ -104,6 +112,7 @@ _RECORD_PROJECTION_FIELDS: dict[str, frozenset[str]] = {
     "archivist_entry": frozenset(
         {"task_id", "candidate_id", "role", "verdict", "discrepancy"}
     ),
+    "evidence_bundle": frozenset({"task_id", "task_name", "schema_version"}),
     "evaluation": frozenset(
         {"task_id", "evaluation_id", "evidence_hash", "schema_version"}
     ),
@@ -183,6 +192,7 @@ _RECORD_PROJECTION_FIELDS: dict[str, frozenset[str]] = {
 }
 _CONTROLLED_RECORD_STRINGS = frozenset({"role", "status", "source", "verdict"})
 _CONTROLLED_RECORD_STRING = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
+_CANONICAL_TASK_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _KIND_PATTERN = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _FILTER_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 
@@ -210,23 +220,43 @@ def _is_sensitive_relative_path(path: Path, denied_paths: Iterable[str] = ()) ->
         or name.endswith(_BLOCKED_FILE_SUFFIXES)
     ):
         return True
-    # Only declarative public extensions are visible under .arity. Runtime
-    # config, auth, and persistence remain behind dedicated host boundaries.
+    # Project-local Arity definitions are executable configuration, not
+    # research data; all .arity state stays behind dedicated host boundaries.
     if parts and parts[0] == ".arity":
-        if len(parts) >= 2 and parts[1] not in {"roles", "skills"}:
-            return True
+        return True
     return any(str(denied).replace("\\", "/").lower() in normalized for denied in denied_paths if denied)
 
 
-def _neutral_reference(field_name: str, value: str) -> str:
-    digest = hashlib.sha256(f"{field_name}:{value}".encode("utf-8")).hexdigest()[:12]
+def _neutral_reference(reference_key: bytes, field_name: str, value: str) -> str:
+    digest = hmac.new(
+        reference_key,
+        b"arity.research.ref.v1\0"
+        + field_name.encode("utf-8")
+        + b"\0"
+        + value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
     return f"ref-{digest}"
 
 
-def _project_record(kind: str, record: Mapping[str, Any]) -> dict[str, Any]:
+def _project_record(
+    reference_key: bytes, kind: str, record: Mapping[str, Any]
+) -> dict[str, Any]:
     """Positive projection: persisted fields are private unless named here."""
     allowed = _RECORD_PROJECTION_FIELDS[kind]
     projected: dict[str, Any] = {}
+    if kind == "evidence_bundle":
+        task_name = record.get("task_name")
+        if isinstance(task_name, str) and _CANONICAL_TASK_NAME.fullmatch(task_name):
+            projected["task_name"] = task_name
+        candidates = record.get("candidates")
+        if isinstance(candidates, (list, tuple)):
+            projected["candidate_count"] = len(candidates)
+        metadata = record.get("metadata")
+        if isinstance(metadata, Mapping):
+            requested_arity = metadata.get("requested_arity")
+            if type(requested_arity) is int and requested_arity >= 0:
+                projected["requested_arity"] = requested_arity
     for field_name in allowed:
         if field_name not in record:
             continue
@@ -234,10 +264,14 @@ def _project_record(kind: str, record: Mapping[str, Any]) -> dict[str, Any]:
         output_name = _RECORD_REFERENCE_FIELDS.get(field_name, field_name)
         if field_name in _RECORD_REFERENCE_FIELDS:
             if isinstance(value, str) and value:
-                projected[output_name] = _neutral_reference(field_name, value)
+                projected[output_name] = _neutral_reference(
+                    reference_key, field_name, value
+                )
             continue
         if field_name == "picked":
             projected["selection_recorded"] = isinstance(value, str) and bool(value)
+            continue
+        if field_name == "task_name":
             continue
         if field_name in _CONTROLLED_RECORD_STRINGS:
             if isinstance(value, str) and _CONTROLLED_RECORD_STRING.fullmatch(value):
@@ -254,22 +288,63 @@ def _project_record(kind: str, record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _resolved_task_ids(reader: Any) -> set[str]:
+    """Return only task ids whose persisted evidence lifecycle validates."""
     try:
+        bundle_rows = reader.query("evidence_bundle")
+        evaluation_rows = reader.query("evaluation")
         resolutions = reader.query("resolution")
     except RecordReadError:
         return set()
+
+    bundles: dict[tuple[str, str], EvidenceBundle] = {}
+    for record in bundle_rows:
+        if not isinstance(record, Mapping):
+            continue
+        try:
+            bundle = EvidenceBundle.from_dict(record)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if bundle.task_id:
+            bundles[(bundle.task_id, bundle.evidence_hash)] = bundle
+
+    evaluations: dict[tuple[str, str], Evaluation] = {}
+    for record in evaluation_rows:
+        if not isinstance(record, Mapping):
+            continue
+        task_id = record.get("task_id")
+        evidence_hash = record.get("evidence_hash")
+        if not isinstance(task_id, str) or not isinstance(evidence_hash, str):
+            continue
+        bundle = bundles.get((task_id, evidence_hash))
+        if bundle is None:
+            continue
+        try:
+            evaluation = Evaluation.from_dict(bundle, record)
+        except (KeyError, TypeError, ValueError):
+            continue
+        evaluations[(task_id, evaluation.evaluation_id)] = evaluation
+
     completed: set[str] = set()
     for record in resolutions:
         if not isinstance(record, Mapping):
             continue
-        status = str(record.get("status", "")).lower()
-        source = str(record.get("source", "")).lower()
-        if status not in {"resolved", "completed", "complete"} and (
-            source in {"", "unresolved"} or record.get("candidate_id") is None
-        ):
-            continue
         task_id = record.get("task_id")
-        if isinstance(task_id, str) and task_id:
+        evidence_hash = record.get("evidence_hash")
+        if not isinstance(task_id, str) or not isinstance(evidence_hash, str):
+            continue
+        bundle = bundles.get((task_id, evidence_hash))
+        if bundle is None:
+            continue
+        try:
+            resolution = Resolution.from_dict(record)
+            referenced = tuple(
+                evaluations[(task_id, evaluation_id)]
+                for evaluation_id in resolution.evaluation_ids
+            )
+            resolution.validate(bundle, referenced)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if resolution.resolved:
             completed.add(task_id)
     return completed
 
@@ -289,12 +364,37 @@ class ResearchScope:
     record_limits: RecordReadLimits = field(
         default_factory=lambda: DEFAULT_RESEARCH_RECORD_LIMITS
     )
+    personalities: frozenset[str] = field(
+        default=frozenset({"scout"}), kw_only=True
+    )
+    _reference_key: bytes = field(
+        default_factory=lambda: secrets.token_bytes(32),
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
 
     def __post_init__(self) -> None:
         root = Path(self.project_root).resolve()
         if not root.is_dir():
             raise ResearchAccessError(f"research project root is not a directory: {root}")
+        broad_roots = {Path(root.anchor).resolve(), Path.home().resolve()}
+        if root in broad_roots:
+            raise ResearchAccessError(
+                "research project root must be a specific project, not a filesystem or home root"
+            )
         object.__setattr__(self, "project_root", root)
+        if type(self._reference_key) is not bytes or len(self._reference_key) != 32:
+            raise ResearchAccessError("research reference key must contain 32 random bytes")
+        if not self.personalities or any(
+            not isinstance(name, str) or not name.strip() for name in self.personalities
+        ):
+            raise ResearchAccessError("research personalities must be nonblank names")
+        object.__setattr__(
+            self,
+            "personalities",
+            frozenset(name.lower().strip() for name in self.personalities),
+        )
         if self.work_root is not None:
             work_root = Path(self.work_root).resolve()
             if not work_root.is_dir():
@@ -311,11 +411,31 @@ class ResearchScope:
     @classmethod
     def configured(cls, project_root: Path | str | None = None) -> "ResearchScope":
         """Build the default scope from the active project and Arity store config."""
-        return cls(project_root=Path(project_root) if project_root is not None else Path.cwd())
+        if project_root is not None:
+            return cls(project_root=Path(project_root))
+        start = Path.cwd().resolve()
+        broad_roots = {Path(start.anchor).resolve(), Path.home().resolve()}
+        discovered = next(
+            (
+                candidate
+                for candidate in (start, *start.parents)
+                if candidate not in broad_roots
+                and (
+                    (candidate / "pyproject.toml").is_file()
+                    or (candidate / ".git").exists()
+                )
+            ),
+            None,
+        )
+        return cls(project_root=discovered or start)
 
     def with_work_root(self, work_root: Path | str) -> "ResearchScope":
         """Bind one requester's exact workspace without widening the project root."""
         return replace(self, work_root=Path(work_root))
+
+    def grants(self, personality_name: str) -> bool:
+        """Whether this host-issued scope names a personality as its recipient."""
+        return personality_name.lower().strip() in self.personalities
 
     def _selected_root(self, scope: str) -> Path:
         if scope == "project":
@@ -325,6 +445,22 @@ class ResearchScope:
         if scope == "work":
             raise ResearchAccessError("no requesting work root is configured")
         raise ResearchAccessError("scope must be 'project' or 'work'")
+
+    def _is_record_storage_path(self, target: Path) -> bool:
+        """Hide the configured store and SQLite companions from raw project reads."""
+        assert self.record_spec is not None
+        store_path = self.record_spec.path.resolve()
+        if self.record_spec.backend == "jsonl":
+            try:
+                target.resolve().relative_to(store_path)
+                return True
+            except ValueError:
+                return False
+        resolved = target.resolve()
+        return resolved == store_path or (
+            resolved.parent == store_path.parent
+            and resolved.name.startswith(store_path.name + "-")
+        )
 
     def _resolve(
         self,
@@ -344,7 +480,7 @@ class ResearchScope:
             relative = target.relative_to(selected_root)
         except ValueError as exc:
             raise ResearchAccessError("project path escapes the configured research root") from exc
-        if _is_sensitive_relative_path(relative, denied_paths):
+        if self._is_record_storage_path(target) or _is_sensitive_relative_path(relative, denied_paths):
             raise ResearchAccessError(f"project path is outside the research surface: {relative.as_posix()}")
         return target, relative
 
@@ -381,7 +517,13 @@ class ResearchScope:
             for line_number, line in enumerate(selected, start=start)
         )
         suffix = "\n[limit capped]" if requested > capped else ""
-        return f"{heading}\n{body or '(no lines in range)'}{suffix}"
+        rendered = f"{heading}\n{body or '(no lines in range)'}{suffix}"
+        encoded = rendered.encode("utf-8")
+        if len(encoded) <= MAX_PROJECT_READ_OUTPUT_BYTES:
+            return rendered
+        marker = "\n[output capped]"
+        budget = MAX_PROJECT_READ_OUTPUT_BYTES - len(marker.encode("utf-8"))
+        return encoded[:budget].decode("utf-8", errors="ignore") + marker
 
     def _visible_files(
         self,
@@ -406,7 +548,11 @@ class ResearchScope:
                             relative_dir = (directory_path / name).resolve().relative_to(selected_root)
                         except (OSError, ValueError):
                             continue
-                        if not _is_sensitive_relative_path(relative_dir, denied_paths):
+                        resolved_dir = (directory_path / name).resolve()
+                        if (
+                            not self._is_record_storage_path(resolved_dir)
+                            and not _is_sensitive_relative_path(relative_dir, denied_paths)
+                        ):
                             kept_dirs.append(name)
                     dir_names[:] = kept_dirs
                     for name in file_names:
@@ -423,7 +569,11 @@ class ResearchScope:
                 relative = resolved.relative_to(selected_root)
             except (OSError, ValueError):
                 continue
-            if not resolved.is_file() or _is_sensitive_relative_path(relative, denied_paths):
+            if (
+                not resolved.is_file()
+                or self._is_record_storage_path(resolved)
+                or _is_sensitive_relative_path(relative, denied_paths)
+            ):
                 continue
             if glob and not fnmatch.fnmatch(relative.as_posix(), glob):
                 continue
@@ -459,13 +609,18 @@ class ResearchScope:
         *,
         denied_paths: Iterable[str] = (),
     ) -> str:
-        """Search bounded project text and return exact file/line matches."""
+        """Search bounded project text for literal alternatives."""
         if not isinstance(pattern, str) or not pattern:
-            raise ResearchAccessError("search pattern must be a nonblank regex")
-        try:
-            regex = re.compile(pattern, re.IGNORECASE)
-        except re.error as exc:
-            raise ResearchAccessError(f"invalid search regex: {exc}") from exc
+            raise ResearchAccessError("search pattern must be nonblank text")
+        if len(pattern) > MAX_PROJECT_SEARCH_PATTERN_CHARS:
+            raise ResearchAccessError(
+                f"search pattern exceeds {MAX_PROJECT_SEARCH_PATTERN_CHARS} characters"
+            )
+        alternatives = tuple(
+            part.casefold() for part in pattern.split("|") if part
+        )
+        if not alternatives:
+            raise ResearchAccessError("search pattern must include literal text")
         requested = _positive_int(limit, label="limit")
         capped = min(requested, MAX_PROJECT_RESULTS)
         matches: list[str] = []
@@ -485,7 +640,8 @@ class ResearchScope:
             except OSError:
                 continue
             for line_number, line in enumerate(lines, start=1):
-                if regex.search(line):
+                folded = line.casefold()
+                if any(alternative in folded for alternative in alternatives):
                     excerpt = line.strip()
                     if len(excerpt) > 300:
                         excerpt = excerpt[:300] + "..."
@@ -515,10 +671,17 @@ class ResearchScope:
             )
         selected_filters = dict(filters or {})
         projected_filter_fields = {
-            ("selection_recorded" if field == "picked" else field)
+            (
+                _RECORD_REFERENCE_FIELDS[field]
+                if field in _RECORD_REFERENCE_FIELDS
+                else "selection_recorded" if field == "picked" else field
+            )
             for field in _RECORD_PROJECTION_FIELDS[kind]
-            if field not in _RECORD_REFERENCE_FIELDS
         }
+        if kind == "evidence_bundle":
+            projected_filter_fields.update(
+                {"candidate_count", "requested_arity"}
+            )
         if len(selected_filters) > 8 or any(
             not isinstance(key, str) or _FILTER_KEY_PATTERN.fullmatch(key) is None
             for key in selected_filters
@@ -527,7 +690,13 @@ class ResearchScope:
         if any(key not in projected_filter_fields for key in selected_filters):
             raise ResearchAccessError("record filters may use only public projected fields")
         for key, value in selected_filters.items():
-            if key in _CONTROLLED_RECORD_STRINGS:
+            if key in _RECORD_REFERENCE_FIELDS.values():
+                if not isinstance(value, str) or re.fullmatch(r"ref-[0-9a-f]{12}", value) is None:
+                    raise ResearchAccessError("record reference filters must use neutral projected refs")
+            elif key == "task_name":
+                if not isinstance(value, str) or _CANONICAL_TASK_NAME.fullmatch(value) is None:
+                    raise ResearchAccessError("task_name filters require a canonical task name")
+            elif key in _CONTROLLED_RECORD_STRINGS:
                 if not isinstance(value, str) or _CONTROLLED_RECORD_STRING.fullmatch(value) is None:
                     raise ResearchAccessError("record string filters must be controlled identifiers")
             elif type(value) not in {bool, int, float}:
@@ -559,9 +728,9 @@ class ResearchScope:
             if status in {"active", "in_progress", "in-progress", "pending", "running", "started", "unresolved"}:
                 continue
             task_id = record.get("task_id")
-            if isinstance(task_id, str) and task_id not in completed_ids:
+            if not isinstance(task_id, str) or task_id not in completed_ids:
                 continue
-            safe_record = _project_record(kind, record)
+            safe_record = _project_record(self._reference_key, kind, record)
             if any(
                 type(safe_record.get(key)) is not type(value) or safe_record.get(key) != value
                 for key, value in selected_filters.items()

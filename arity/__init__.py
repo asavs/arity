@@ -101,6 +101,7 @@ from .record_readers import (
     configured_store_spec,
     open_record_reader,
 )
+from .research import ResearchAccessError, ResearchScope
 from .seams import (
     ModelProvider,
     Observer,

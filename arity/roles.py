@@ -52,6 +52,10 @@ class Role:
     # self-grant it during discovery.
     research_access: bool = False
     frozen_evidence: bool = False
+    # Programmatic and packaged roles are host-trusted. Discovery marks
+    # project/home definitions untrusted so they cannot act as privileged
+    # research requesters or replace a privileged core personality.
+    trusted_definition: bool = field(default=True, kw_only=True, repr=False)
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
     system_prompt: str = ""
@@ -164,10 +168,16 @@ def parse_role_document(content: str) -> Role:
     )
 
 
-def load_role_from_file(path: Path, *, allow_research_access: bool = False) -> Role:
+def load_role_from_file(
+    path: Path,
+    *,
+    allow_research_access: bool = False,
+    trusted_definition: bool = False,
+) -> Role:
     """Load a Role instance from a markdown document."""
     content = path.read_text(encoding="utf-8")
     role = parse_role_document(content)
+    role = replace(role, trusted_definition=trusted_definition)
     if role.research_access and not allow_research_access:
         role = replace(role, research_access=False)
     return role
@@ -228,6 +238,7 @@ def compose(role: Role, pack: TypePack) -> Role:
         accepts_types=role.accepts_types,
         research_access=role.research_access,
         frozen_evidence=role.frozen_evidence,
+        trusted_definition=role.trusted_definition,
         allowed_tools=role.allowed_tools,
         denial_set=role.denial_set,
         system_prompt=prompt,
@@ -267,6 +278,7 @@ class RoleRegistry:
                         load_role_from_file(
                             path,
                             allow_research_access=directory_index == 0,
+                            trusted_definition=directory_index == 0,
                         )
                     )
                 except Exception:

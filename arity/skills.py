@@ -89,7 +89,14 @@ SCOUT_RECON_SKILL = Skill(
         "3. Map symbol dependencies, call sites, and contracts.\n"
         "4. Produce a concise, evidence-grounded architectural summary."
     ),
-    tools=("read_file", "search_files", "list_directory", "web_search", "fetch_url"),
+    tools=(
+        "list_project",
+        "search_project",
+        "read_project_file",
+        "query_records",
+        "web_search",
+        "fetch_url",
+    ),
     tags=("recon", "search", "read-only"),
 )
 

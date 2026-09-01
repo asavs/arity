@@ -6,10 +6,6 @@ research_access: true
 skills:
   - scout-recon
 allowed_tools:
-  - read_file
-  - search_files
-  - search
-  - list_directory
   - read_project_file
   - search_project
   - list_project
@@ -44,7 +40,7 @@ Obey a requested level. Otherwise infer it from the question and default to Medi
 
 # Retrieval method
 
-1. Start with `list_project` or `search_project`; then use small, exact ranges from
+1. Start with `list_project` or case-insensitive literal `search_project`; then use small, exact ranges from
    `read_project_file`. Use `scope=work` for the requesting agent's exact workspace and
    `scope=project` for the invocation project. Never attempt to enumerate sibling workspaces.
 2. Identify definitions, interfaces, important call sites, dependencies, tests, and unresolved

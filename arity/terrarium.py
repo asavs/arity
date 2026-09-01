@@ -28,6 +28,7 @@ from .handlers import (
     create_model_provider,
 )
 from .tools import MessageDeliveryError, SandboxToolRunner, create_mcp_tool_runner
+from .research import ResearchScope
 from .ledger import Seat, SeatLedger
 from .roles import Role, RoleRegistry, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
@@ -113,11 +114,33 @@ def normalize_harness(obj: Any) -> str:
     return {"codex": "cli", "claude": "cli"}.get(raw, raw)
 
 
+def _provider_has_cli_owned_tools(provider: Any) -> bool:
+    """Inspect provider/fallback graphs without looping on hostile cycles."""
+    pending = [provider]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if hasattr(current, "cwd"):
+            return True
+        for attribute in ("primary", "fallback"):
+            child = getattr(current, attribute, None)
+            if child is not None:
+                pending.append(child)
+        alternates = getattr(current, "alternates", ())
+        if isinstance(alternates, (list, tuple)):
+            pending.extend(alternates)
+    return False
+
+
 def skill_names(skills: list[Any]) -> list[str]:
     return [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in skills]
 
 
 CONTEXT_MODES = ("fresh", "accounts", "fork")
+_USE_CONFIGURED_RESEARCH_SCOPE = object()
 
 
 @dataclass(frozen=True)
@@ -385,6 +408,7 @@ class TerrariumDispatcher:
         model_factory: Optional[Callable[[Seat], ModelProvider]] = None,
         quiet: bool = False,
         roles: Optional[RoleRegistry] = None,
+        research_scope: Optional[ResearchScope] = None,
     ):
         self.ledger = ledger
         self.store = store or default_record_store()
@@ -394,6 +418,7 @@ class TerrariumDispatcher:
         self._model_factory = model_factory or self._default_model_factory
         self.quiet = quiet  # suppress per-candidate console chatter (machine-readable output modes)
         self.roles = roles if roles is not None else RoleRegistry()
+        self.research_scope = research_scope or ResearchScope.configured()
 
     def _default_model_factory(self, seat: Seat) -> ModelProvider:
         return create_model_provider(seat)
@@ -428,6 +453,7 @@ class TerrariumDispatcher:
         peer_letter: Optional[str] = None,
         peer_messages_open: bool = True,
         usage_context: Optional[UsageRecordingContext] = None,
+        research_scope: ResearchScope | None | object = _USE_CONFIGURED_RESEARCH_SCOPE,
     ) -> TerrariumCandidateResult:
         """Run a single candidate kernel in an isolated sandbox with multidimensional seams.
 
@@ -438,6 +464,30 @@ class TerrariumDispatcher:
         spec = self._resolve_candidate_spec(candidate_or_seat, role)
         seat = spec.seat
         actual_role = spec.role or role or PYTHON_DEVELOPER_ROLE
+        available_research_scope = (
+            self.research_scope
+            if research_scope is _USE_CONFIGURED_RESEARCH_SCOPE
+            else research_scope
+        )
+        if actual_role.base_name == "scout" and not actual_role.trusted_definition:
+            raise ValueError(
+                "Untrusted Scout overrides cannot execute without an explicit trust workflow"
+            )
+        effective_research_scope = (
+            available_research_scope
+            if isinstance(available_research_scope, ResearchScope)
+            and actual_role.trusted_definition
+            and actual_role.research_access
+            and available_research_scope.grants(actual_role.base_name)
+            else None
+        )
+        if (
+            effective_research_scope is not None
+            and bool(task.metadata.get("research_forbidden"))
+        ):
+            raise MessageDeliveryError(
+                "This task's frozen or untrusted provenance forbids expanding its evidence."
+            )
 
         start_time = time.time()
         # Seat ids like "google:asa:gemini-3.6-flash" are not valid directory names on Windows.
@@ -472,6 +522,20 @@ class TerrariumDispatcher:
                 skills_used=skills_used,
             )
 
+        if effective_research_scope is not None and not (
+            spec.tool_runner_type in ("sandbox", "ast", "native")
+            or spec.tool_runner_type is SandboxToolRunner
+        ):
+            raise ValueError(
+                "Research personalities require Arity's sealed sandbox research runner"
+            )
+        if effective_research_scope is not None and spec.harness in (
+            "cli", "codex", "claude", "omp"
+        ):
+            raise ValueError(
+                "Research personalities cannot use CLI/OMP harnesses whose tools bypass Arity"
+            )
+
         # 1. Peer message router for cross-kernel delegation
         def route_peer_message(to_peer: str, text_msg: str) -> str:
             target = to_peer.strip()
@@ -498,12 +562,43 @@ class TerrariumDispatcher:
                 raise MessageDeliveryError(
                     f"Unknown message recipient '{to_peer}'. Registered personalities: {known}."
                 )
+            target_research_scope = (
+                available_research_scope.with_work_root(workspace)
+                if isinstance(available_research_scope, ResearchScope)
+                and target_peer.trusted_definition
+                and target_peer.research_access
+                and available_research_scope.grants(target_peer.base_name)
+                else None
+            )
+            research_forbidden = bool(task.metadata.get("research_forbidden")) or (
+                actual_role.frozen_evidence
+                or actual_role.base_name == "judge"
+                or not actual_role.trusted_definition
+            )
+            if research_forbidden and target_peer.research_access:
+                if not actual_role.trusted_definition:
+                    raise MessageDeliveryError(
+                        "Untrusted personality overrides cannot invoke privileged Scout research."
+                    )
+                raise MessageDeliveryError(
+                    "Frozen-evidence personalities cannot ask Scout to expand the evidence bundle."
+                )
+            inherited_exclusions = task.metadata.get("research_excluded_ids", ())
+            if not isinstance(inherited_exclusions, (list, tuple, set, frozenset)):
+                inherited_exclusions = ()
             peer_task = TaskRecord(
                 from_role=actual_role.name if hasattr(actual_role, 'name') else str(actual_role),
                 to_role=target_peer.name,
                 brief=text_msg,
                 depth=task.depth + 1,
                 max_depth=task.max_depth,
+                metadata={
+                    "research_forbidden": research_forbidden,
+                    "research_excluded_ids": [
+                        task.id,
+                        *(str(value) for value in inherited_exclusions),
+                    ]
+                },
             )
             peer_spec = CandidateSpec(
                 seat=seat,
@@ -515,16 +610,29 @@ class TerrariumDispatcher:
                 task=peer_task,
                 candidate_or_seat=peer_spec,
                 usage_context=usage_context,
+                research_scope=(
+                    target_research_scope
+                    if target_research_scope is not None
+                    else available_research_scope
+                    if target_peer.trusted_definition and not research_forbidden
+                    else None
+                ),
             )
             return peer_res.output or f"[{target_peer.name} replied with no output]"
 
         # 2. Setup Tool Runner Axis (Sandbox / AST vs. MCP vs. Shell vs. Custom)
         if spec.tool_runner_type in ("sandbox", "ast", "native") or spec.tool_runner_type is SandboxToolRunner:
+            excluded_record_ids = [task.id]
+            inherited_exclusions = task.metadata.get("research_excluded_ids", ())
+            if isinstance(inherited_exclusions, (list, tuple, set, frozenset)):
+                excluded_record_ids.extend(str(value) for value in inherited_exclusions)
             tool_runner = SandboxToolRunner(
                 workspace_root=workspace,
                 role=actual_role,
                 message_router=route_peer_message,
                 role_registry=self.roles,
+                research_scope=effective_research_scope,
+                excluded_record_ids=tuple(excluded_record_ids),
             )
         elif spec.tool_runner_type in ("mcp", "mcp_tools") or spec.tool_runner_type is create_mcp_tool_runner:
             tool_runner = create_mcp_tool_runner(workspace_root=workspace, role=actual_role)
@@ -543,6 +651,8 @@ class TerrariumDispatcher:
                 role=actual_role,
                 message_router=route_peer_message,
                 role_registry=self.roles,
+                research_scope=effective_research_scope,
+                excluded_record_ids=(task.id,),
             )
 
         # 3. Setup Brief Compiler & Skills Axis (+ Context Axis: what the child inherits)
@@ -578,6 +688,13 @@ class TerrariumDispatcher:
             # the record instead of filing it under "wire". (A wire that later falls back is handled below.)
             if hasattr(model_provider, "cwd") and not hasattr(model_provider, "primary"):  # a bare CLI, no wire
                 harness_name = f"cli:{getattr(model_provider, 'harness', 'omp')}"
+
+        if effective_research_scope is not None and _provider_has_cli_owned_tools(
+            model_provider
+        ):
+            raise ValueError(
+                "Research personalities cannot run through CLI-owned tools or CLI fallbacks"
+            )
 
         # Any CLI harness in the chain (bare, or a wire's fallback) must act inside this sandbox.
         # TODO(kernel): a CLI's own tools still bypass the role's denial set; sandboxing by cwd is
