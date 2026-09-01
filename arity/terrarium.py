@@ -29,7 +29,7 @@ from .handlers import (
 )
 from .tools import SandboxToolRunner, create_mcp_tool_runner
 from .ledger import Seat, SeatLedger
-from .roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
+from .roles import Role, RoleRegistry, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
 from .seams import ModelProvider, RecordStore, ToolRunner
 from .tiers import BriefCompiler, CompiledBrief, PredecessorAccounts
@@ -383,6 +383,7 @@ class TerrariumDispatcher:
         base_workspace: Optional[Path] = None,
         model_factory: Optional[Callable[[Seat], ModelProvider]] = None,
         quiet: bool = False,
+        roles: Optional[RoleRegistry] = None,
     ):
         self.ledger = ledger
         self.store = store or default_record_store()
@@ -391,6 +392,7 @@ class TerrariumDispatcher:
         self.base_workspace.mkdir(parents=True, exist_ok=True)
         self._model_factory = model_factory or self._default_model_factory
         self.quiet = quiet  # suppress per-candidate console chatter (machine-readable output modes)
+        self.roles = roles if roles is not None else RoleRegistry()
 
     def _default_model_factory(self, seat: Seat) -> ModelProvider:
         return create_model_provider(seat)
@@ -481,9 +483,10 @@ class TerrariumDispatcher:
                 return f"Queued for {letter}; delivered at the start of their next round."
             if task.depth + 1 >= task.max_depth:
                 return f"Error: Maximum message hop limit ({task.max_depth}) reached."
-            from .roles import RoleRegistry
-            roles = RoleRegistry()
-            target_peer = roles.resolve(to_peer)
+            target_peer = self.roles.get(to_peer)
+            if target_peer is None:
+                known = ", ".join(role.name for role in self.roles.list_roles())
+                return f"Error: Unknown message recipient '{to_peer}'. Registered personalities: {known}."
             peer_task = TaskRecord(
                 from_role=actual_role.name if hasattr(actual_role, 'name') else str(actual_role),
                 to_role=target_peer.name,
@@ -508,7 +511,12 @@ class TerrariumDispatcher:
 
         # 2. Setup Tool Runner Axis (Sandbox / AST vs. MCP vs. Shell vs. Custom)
         if spec.tool_runner_type in ("sandbox", "ast", "native") or spec.tool_runner_type is SandboxToolRunner:
-            tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
+            tool_runner = SandboxToolRunner(
+                workspace_root=workspace,
+                role=actual_role,
+                message_router=route_peer_message,
+                role_registry=self.roles,
+            )
         elif spec.tool_runner_type in ("mcp", "mcp_tools") or spec.tool_runner_type is create_mcp_tool_runner:
             tool_runner = create_mcp_tool_runner(workspace_root=workspace, role=actual_role)
         elif spec.tool_runner_type in ("shell", "local", "shell_tools") or spec.tool_runner_type is LocalToolRunner:
@@ -521,7 +529,12 @@ class TerrariumDispatcher:
             except TypeError:
                 tool_runner = spec.tool_runner_type(workspace)
         else:
-            tool_runner = SandboxToolRunner(workspace_root=workspace, role=actual_role, message_router=route_peer_message)
+            tool_runner = SandboxToolRunner(
+                workspace_root=workspace,
+                role=actual_role,
+                message_router=route_peer_message,
+                role_registry=self.roles,
+            )
 
         # 3. Setup Brief Compiler & Skills Axis (+ Context Axis: what the child inherits)
         compiled_brief = self.compiler.assemble(

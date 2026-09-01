@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from ._version import USER_AGENT
 from .configuration import get_config_value
-from .roles import Role
+from .roles import Role, RoleRegistry
 from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
 
@@ -28,6 +28,12 @@ class PathTraversalError(Exception):
 
 class SyntaxValidationError(Exception):
     """Raised when written code fails syntax parsing."""
+    pass
+
+
+class UnknownMessageRecipientError(ValueError):
+    """Raised when ``message`` names neither the user nor a registered personality."""
+
     pass
 
 
@@ -52,12 +58,14 @@ class SandboxToolRunner(ToolRunner):
         timeout: int = 30,
         custom_tools: Optional[dict[str, Callable[..., str]]] = None,
         message_router: Optional[Callable[[str, str], str]] = None,
+        role_registry: Optional[RoleRegistry] = None,
     ):
         self.workspace_root = (Path(workspace_root) if workspace_root else Path.cwd()).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.role = role
         self.timeout = timeout
         self.message_router = message_router
+        self.role_registry = role_registry if role_registry is not None else RoleRegistry()
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_default_tools()
@@ -168,6 +176,13 @@ class SandboxToolRunner(ToolRunner):
                 call_id=effect.call_id,
                 tool_name=effect.name,
                 output=f"Syntax Error: {str(e)}",
+                is_error=True,
+            )
+        except UnknownMessageRecipientError as e:
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output=f"Message Error: {str(e)}",
                 is_error=True,
             )
         except Exception as e:
@@ -423,19 +438,36 @@ class SandboxToolRunner(ToolRunner):
             target = to.lower().strip()
             if target in ("user", "human", "asa"):
                 return f"[Delivered to Asa]: {text}"
+            if target.startswith("peer:"):
+                if self.message_router:
+                    return self.message_router(target, text)
+                raise UnknownMessageRecipientError(
+                    f"Conference recipient '{target}' is unavailable outside a peer conference."
+                )
+            recipient = self.role_registry.get(target)
+            if recipient is None:
+                known = ", ".join(role.name for role in self.role_registry.list_roles())
+                raise UnknownMessageRecipientError(
+                    f"Unknown message recipient '{target}'. Registered personalities: {known}."
+                )
             if self.message_router:
-                return self.message_router(target, text)
-            return f"[Message queued for {target}]: {text}"
+                return self.message_router(recipient.name, text)
+            return f"[Message queued for {recipient.name}]: {text}"
+
+        registered = ", ".join(role.name for role in self.role_registry.list_roles())
 
         self.register(
             name="message",
-            description="Send a message to the user ('user') or consult a peer agent ('scout', 'engineer', 'python_developer', 'reviewer').",
+            description=(
+                "Send a message to the user ('user') or any registered personality by exact name. "
+                f"Registered personalities: {registered}. Typed forms such as role:python are also accepted."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient: 'user' to message Asa, or peer role (e.g. 'scout', 'engineer', 'python_developer', 'reviewer')",
+                        "description": "Recipient: 'user', an exact registered personality name, a typed role:type form, or peer:<letter> during a conference",
                     },
                     "text": {
                         "type": "string",
