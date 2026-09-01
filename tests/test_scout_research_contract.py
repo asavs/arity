@@ -1316,6 +1316,57 @@ def test_minimal_forged_resolution_cannot_unlock_same_task_history(
         assert private not in result.output
 
 
+def test_evidence_projection_requires_the_exact_resolved_bundle(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "records.sqlite"
+    writer = SqliteRecordStore(database)
+    resolved_bundle, _ = _append_valid_resolution(
+        writer,
+        task_id="shared-task",
+        candidate_id="resolved-candidate",
+    )
+    alternate_bundle = EvidenceBundle.create(
+        trial_id="alternate-trial",
+        task_id=resolved_bundle.task_id,
+        task_name="unresolved-alternate",
+        brief="UNRESOLVED_ALTERNATE_EVIDENCE",
+        candidates=resolved_bundle.candidates,
+        metadata={"requested_arity": 999},
+    )
+    writer.append(StoreRecord(
+        kind="evidence_bundle",
+        record=alternate_bundle.to_dict(),
+    ))
+    writer.close()
+    registry = RoleRegistry()
+    runner = SandboxToolRunner(
+        workspace_root=tmp_path / "isolated",
+        role=registry.get("scout"),
+        role_registry=registry,
+        research_scope=_research_scope(
+            tmp_path / "project",
+            record_spec=StoreSpec("sqlite", database),
+        ),
+    )
+
+    result = _execute(
+        runner,
+        "query_records",
+        kind="evidence_bundle",
+        filters={},
+        limit=10,
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.output)
+    assert payload["count"] == len(payload["records"]) == 1
+    assert payload["records"][0]["candidate_count"] == 1
+    assert "unresolved-alternate" not in result.output
+    assert "UNRESOLVED_ALTERNATE_EVIDENCE" not in result.output
+    assert "999" not in result.output
+
+
 def test_scout_records_accept_neutral_cross_kind_refs_but_raw_ids_have_no_oracle(
     tmp_path: Path,
 ) -> None:
