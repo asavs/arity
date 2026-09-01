@@ -295,5 +295,35 @@ class TestArchivistAndScorecard(unittest.TestCase):
         self.assertEqual(self.scorecard.least_observed([wire, socket, tmux]), wire)
 
 
+    def test_average_delta_ranks_performance_over_accumulated_incumbency(self):
+        # Axiom 3 / A3-2:
+        # Model A: 50 trials, 50 successes -> avg delta +1.0, n=50
+        # Model B: 3 trials, 3 successes -> avg delta +1.0, n=3
+        # Model C: 50 trials, 30 successes, 20 failures -> avg delta +0.2, n=50
+        # Model D: 0 trials -> avg delta None (unknown)
+        # Model E: 10 trials, 10 failures -> avg delta -1.0, n=10
+        for i in range(50):
+            self.scorecard.record_verdict("builder", "model-a", f"t_a_{i}", "success")
+        for i in range(3):
+            self.scorecard.record_verdict("builder", "model-b", f"t_b_{i}", "success")
+        for i in range(30):
+            self.scorecard.record_verdict("builder", "model-c", f"t_c_win_{i}", "success")
+        for i in range(20):
+            self.scorecard.record_verdict("builder", "model-c", f"t_c_loss_{i}", "failed")
+        for i in range(10):
+            self.scorecard.record_verdict("builder", "model-e", f"t_e_{i}", "failed")
+
+        self.assertAlmostEqual(self.scorecard.get_average_delta("builder", "model-a"), 1.0)
+        self.assertAlmostEqual(self.scorecard.get_average_delta("builder", "model-b"), 1.0)
+        self.assertAlmostEqual(self.scorecard.get_average_delta("builder", "model-c"), 0.2)
+        self.assertIsNone(self.scorecard.get_average_delta("builder", "model-d"))
+        self.assertAlmostEqual(self.scorecard.get_average_delta("builder", "model-e"), -1.0)
+
+        # Ranking: Model B (+1.0 avg, n=3) beats Model C (+0.2 avg, n=50) despite Model C
+        # having a higher running total (20.0 pts vs 13.0 pts).
+        ranked = self.scorecard.rank_models("builder")
+        models_order = [m[0] for m in ranked]
+        self.assertEqual(models_order, ["model-a", "model-b", "model-c", "model-e"])
+
 if __name__ == "__main__":
     unittest.main()

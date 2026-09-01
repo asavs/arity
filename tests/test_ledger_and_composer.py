@@ -636,5 +636,27 @@ class TestPresenceLockPersistence(unittest.TestCase):
         self.assertEqual(ledger.read_presence_locks(now=self.now), {})
 
 
+class TestAntiIncumbencyAptitude(unittest.TestCase):
+    def test_smart_mode_prefers_high_win_rate_newcomer_over_high_volume_mediocre_incumbent(self):
+        # Incumbent: 50 trials, 30 wins, 20 losses -> standing 20.0, avg delta +0.2, n=50
+        # Newcomer: 3 trials, 3 wins, 0 losses -> standing 13.0, avg delta +1.0, n=3
+        card = Scorecard(store=_NullStore())
+        for i in range(30):
+            card.record_verdict(role=BUILDER_ROLE.name, model="incumbent-model", task_id=f"win_{i}", verdict="success")
+        for i in range(20):
+            card.record_verdict(role=BUILDER_ROLE.name, model="incumbent-model", task_id=f"loss_{i}", verdict="failed")
+        for i in range(3):
+            card.record_verdict(role=BUILDER_ROLE.name, model="newcomer-model", task_id=f"new_{i}", verdict="success")
+
+        seats = [
+            Seat(id="seat-incumbent", provider="openai", model="incumbent-model", kind="metered_api", base_price_per_m=1.0),
+            Seat(id="seat-newcomer", provider="openai", model="newcomer-model", kind="metered_api", base_price_per_m=1.0),
+        ]
+        ledger = SeatLedger(initial_seats=seats, auto_seed=False)
+        composer = CastingComposer(ledger=ledger, scorecard=card)
+
+        decision = composer.cast(BUILDER_ROLE, "Build an API", candidates_count=1, mode=SMART)
+        self.assertEqual(decision.primary_seat.id, "seat-newcomer")
+
 if __name__ == "__main__":
     unittest.main()

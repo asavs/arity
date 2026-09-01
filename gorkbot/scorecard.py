@@ -103,13 +103,22 @@ class Scorecard:
         if model is None:
             return self._observations.get(role_or_key.lower(), 0)
         return self._observations.get(self._key(_role_key(role_or_key), model), 0)
+    def get_average_delta(self, role_or_key: str, model: Optional[str] = None) -> Optional[float]:
+        """Average score delta per observation: (standing - 10.0) / n (Axiom 3, A3-2).
+
+        Returns None if n == 0 (no observations recorded; explicitly unknown).
+        """
+        n = self.get_observations(role_or_key, model)
+        if n == 0:
+            return None
+        standing = self.get_standing(role_or_key, model)
+        return (standing - 10.0) / n
 
     def least_observed(self, keys: list[str]) -> Optional[str]:
         """The key with the fewest observations; ties broken by sorted key order, never dict order."""
         if not keys:
             return None
         return min(sorted(keys), key=self.get_observations)
-
     def record_verdict(
         self,
         role: str,
@@ -183,26 +192,36 @@ class Scorecard:
         return record
 
     def rank_models(self, role: str) -> list[tuple[str, float]]:
-        """Return models ranked by standing for a given role (descending)."""
+        """Return models ranked by average delta for a given role (descending, A3-2).
+
+        Ordering: (average_delta, observations) descending. Models with no observations
+        rate as 0.0 delta with 0 confidence, ranking behind net-positive models and ahead
+        of net-negative models.
+        """
         prefix = f"{role.lower()}:"
         models = []
         for key, score in self._standings.items():
             if key.startswith(prefix) and key.count(":") == 1:
                 model_name = key[len(prefix):]
-                models.append((model_name, score))
-        return sorted(models, key=lambda x: x[1], reverse=True)
+                n = self._observations.get(key, 0)
+                avg = (score - 10.0) / n if n > 0 else 0.0
+                models.append((model_name, score, avg, n))
+        models.sort(key=lambda x: (x[2], x[3]), reverse=True)
+        return [(m[0], m[1]) for m in models]
 
     def rank_combinations(self, role: Optional[str] = None) -> list[tuple[str, float]]:
-        """Return multi-dimensional combination signatures ranked by standing (descending)."""
+        """Return multi-dimensional combination signatures ranked by average delta (descending, A3-2)."""
         combos = []
         for key, score in self._standings.items():
             # Combinations contain 3 or more segments (e.g. role:model:harness:tools)
             if key.count(":") >= 3:
                 if role and not key.startswith(f"{role.lower()}:"):
                     continue
-                combos.append((key, score))
-        return sorted(combos, key=lambda x: x[1], reverse=True)
-
+                n = self._observations.get(key, 0)
+                avg = (score - 10.0) / n if n > 0 else 0.0
+                combos.append((key, score, avg, n))
+        combos.sort(key=lambda x: (x[2], x[3]), reverse=True)
+        return [(c[0], c[1]) for c in combos]
     def get_summary(self) -> str:
         """Return a formatted summary of top-rated models and combinations."""
         if not self._standings:

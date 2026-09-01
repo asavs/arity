@@ -96,14 +96,34 @@ class CastingComposer:
     # -- Question A: who is good at this? ------------------------------------------------
 
     def _aptitude(self, role: Role, seat: Seat) -> float:
-        """Evidence for this model in this role, plus the role's skill deltas. Inferred."""
-        if not (self.scorecard and hasattr(self.scorecard, "get_standing")):
-            return BASELINE_STANDING
-        standing = self.scorecard.get_standing(role.name, seat.model)
-        for sk in getattr(role, "skills", ()) or ():
-            standing += self.scorecard.get_standing(f"skill:{sk}", seat.model) - BASELINE_STANDING
-        return standing
+        """Evidence for this model in this role, plus the role's skill deltas. Inferred.
 
+        Under Axiom 3 / A3-2, aptitude ranks by average delta per observation rather than
+        accumulated running total, so a long-running incumbent does not permanently lock out
+        newer, better models.
+        """
+        if not self.scorecard:
+            return BASELINE_STANDING
+        if hasattr(self.scorecard, "get_average_delta"):
+            delta = self.scorecard.get_average_delta(role.name, seat.model)
+            total_delta = delta if delta is not None else 0.0
+            for sk in getattr(role, "skills", ()) or ():
+                sk_delta = self.scorecard.get_average_delta(f"skill:{sk}", seat.model)
+                if sk_delta is not None:
+                    total_delta += sk_delta
+            return BASELINE_STANDING + total_delta
+        if hasattr(self.scorecard, "get_standing"):
+            standing = self.scorecard.get_standing(role.name, seat.model)
+            for sk in getattr(role, "skills", ()) or ():
+                standing += self.scorecard.get_standing(f"skill:{sk}", seat.model) - BASELINE_STANDING
+            return standing
+        return BASELINE_STANDING
+
+    def _observations(self, role: Role, seat: Seat) -> int:
+        """How many verdicts have scored this model in this role (confidence tiebreak)."""
+        if not (self.scorecard and hasattr(self.scorecard, "get_observations")):
+            return 0
+        return self.scorecard.get_observations(role.name, seat.model)
     def _evidence_key(self, role: Role, seat: Seat) -> str:
         """The scorecard key whose observation count says how much is known about this seat."""
         key_name = getattr(role, "key_name", None) or role.name.replace(":", ".")
@@ -236,13 +256,18 @@ class CastingComposer:
         # break falls to seat id rather than to ledger insertion order.
         base = sorted(pool, key=lambda s: s.id or "")
         aptitude = {s.id: self._aptitude(role, s) for s in base}
+        observations = {s.id: self._observations(role, s) for s in base}
 
         if mode == SMART:
-            # Economics is already the tiebreak because sorted() is stable.
-            ordered = sorted(self._economic_order(base, curr_time), key=lambda s: -aptitude[s.id])
+            # High average delta first; ties broken by observation count (confidence),
+            # then by economics (because sorted() is stable).
+            ordered = sorted(
+                self._economic_order(base, curr_time),
+                key=lambda s: (-aptitude[s.id], -observations[s.id]),
+            )
         elif mode == BROKIE:
             ordered = self._economic_order(
-                sorted(base, key=lambda s: -aptitude[s.id]), curr_time
+                sorted(base, key=lambda s: (-aptitude[s.id], -observations[s.id])), curr_time
             )
         else:
             ordered = list(base)
