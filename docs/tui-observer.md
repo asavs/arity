@@ -228,8 +228,8 @@ precedes inference.
 There is no fire, warmth, hit-rate, or ticking cache bar. Arity persists normalized
 candidate-provider request start/observation times, outcome,
 prompt/output/cache-read/cache-write measurements with their bases, and a recorded
-retention-policy hint. Invalid provider results retain a safe failed attempt. Tester
-and judge model calls do not yet cross this recording boundary. The pure cache
+retention-policy hint. Invalid provider results retain a safe failed attempt. Test Engineer
+and Judge model calls do not yet cross this recording boundary. The pure cache
 projector exposes closed `confirmed`, `estimated`, `elapsed`, `unknown`, and
 `unsupported` states. The terminal deliberately renders timed values as a stable
 `respond by HH:MM:SS | prior activity confirmed|estimated | eligibility only` line;

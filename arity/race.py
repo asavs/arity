@@ -78,7 +78,7 @@ class RaceConfig:
     workers: int = 4
     mock: bool = False
     as_json: bool = False
-    tester: bool = False
+    test_engineer: bool = False
     teardown: Optional[bool] = None  # None -> mock tears down, live keeps
     store_root: Optional[Path] = None
     record_store: Optional[RecordStore] = None
@@ -94,8 +94,8 @@ class RaceConfig:
     requested_arity: Optional[int] = None
     # Programmatic callers may supply exact arms; the CLI continues to resolve ``variants``.
     candidate_specs: Optional[list[CandidateSpec]] = None
-    # First-class evaluators consume one frozen EvidenceBundle.  Legacy blind reviewer
-    # candidates remain available through ``judges`` and are normalized into Evaluations.
+    # First-class evaluators consume one frozen EvidenceBundle. Blind Judge candidates
+    # remain available through ``judges`` and are normalized into Evaluations.
     evaluators: list[TrialEvaluator] = field(default_factory=list)
 
 
@@ -900,22 +900,22 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     trial_usage_contexts = _usage_recording_contexts(
         candidates, journal, phase="trial"
     )
-    tester_spec: Optional[CandidateSpec] = None
-    if cfg.tester:
-        tester_seat = candidates[0].seat
-        tester_spec = CandidateSpec(seat=tester_seat, name="test-engineer", role=roles.with_type(TEST_ENGINEER_ROLE, type_name),
-                                    harness="wire", tool_runner_type="sandbox", skills=["test-engineering"])
+    test_engineer_spec: Optional[CandidateSpec] = None
+    if cfg.test_engineer:
+        test_engineer_seat = candidates[0].seat
+        test_engineer_spec = CandidateSpec(seat=test_engineer_seat, name="test-engineer", role=roles.with_type(TEST_ENGINEER_ROLE, type_name),
+                                           harness="wire", tool_runner_type="sandbox", skills=["test-engineering"])
         if cfg.mock:
-            tester_spec.custom_model_provider = ScriptedProvider(
-                {"test_hidden_by_tester.py": OWN_TEST}, "Wrote test_hidden_by_tester.py.", "test-engineer")
+            test_engineer_spec.custom_model_provider = ScriptedProvider(
+                {"test_hidden_by_test_engineer.py": OWN_TEST}, "Wrote test_hidden_by_test_engineer.py.", "test-engineer")
     elif not task.hidden_tests:
-        notes.append("no hidden tests: candidates are graded only on tests they wrote themselves (use --task or --tester)")
+        notes.append("no hidden tests: candidates are graded only on tests they wrote themselves (use --task or --test-engineer)")
 
     teardown = cfg.teardown if cfg.teardown is not None else ephemeral
     # Review must read the sandboxes, so it runs before any teardown.
     winner, results, entries = dispatcher.race(
         task=task, candidates=candidates, test_command=cfg.test_command, max_workers=cfg.workers,
-        archivist=archivist, tester=tester_spec, teardown=False,
+        archivist=archivist, test_engineer=test_engineer_spec, teardown=False,
         usage_contexts=trial_usage_contexts,
     )
     report = RaceReport(
@@ -993,7 +993,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
                         report,
                         evaluator_id=evaluator_id,
                         status="missing",
-                        error="no matching reviewer seat completed",
+                        error="no matching Judge seat completed",
                     )
     elif has_evaluators and not facts_tie:
         notes.append("review skipped: the facts already separated the candidates (use --review always to force)")
@@ -1001,7 +1001,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     resolve_report(report, expected_evaluator_ids=tuple(expected_evaluator_ids))
 
     if teardown:
-        dispatcher.teardown(results + ([results[0].tester_result] if results and results[0].tester_result else []))
+        dispatcher.teardown(results + ([results[0].test_engineer_result] if results and results[0].test_engineer_result else []))
     if tmp_root and teardown:
         shutil.rmtree(tmp_root, ignore_errors=True)
     return report
@@ -1329,7 +1329,7 @@ def human_pick(
         a = (e.axes if e else {}) or {}
         printer(f"  [{i}] {names[r.candidate_id]}: loc={a.get('loc', '-')} tests={a.get('test_count', '-')} "
                 f"tokens={r.tokens_used:,} {r.duration_seconds:.0f}s  "
-                f"(preferred by {', '.join(firsts.get(r.candidate_id, [])) or 'no decisive reviewer'})")
+                f"(preferred by {', '.join(firsts.get(r.candidate_id, [])) or 'no decisive Judge'})")
         printer(f"      {(r.output or '').strip().splitlines()[0][:110] if (r.output or '').strip() else '(no closing report)'}")
     try:
         answer = ask("Which do you prefer? [number, or blank to leave unresolved] ").strip()
@@ -1566,7 +1566,7 @@ def _deliver_once(rep: RaceReport, out_dir: Optional[Path] = None, final: Any = 
 
 def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "developer:python",
                    candidates: Optional[int] = None, judges: Optional[list[str]] = None, conference: int = 0,
-                   tester: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
+                   test_engineer: bool = False, out_dir: Optional[Path] = None, mock: bool = False, ask: Callable[[str], str] = input,
                    printer: Callable[..., None] = print, interactive: bool = True, quiet: bool = True,
                    evaluators: Optional[list[TrialEvaluator]] = None, store_root: Optional[Path] = None,
                    workspace_root: Optional[Path] = None) -> tuple[RaceReport, Delivery]:
@@ -1594,7 +1594,7 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
         conference=conference,
         teardown=False,
         quiet=quiet,
-        tester=tester,
+        test_engineer=test_engineer,
         requested_arity=requested_arity,
         evaluators=list(evaluators or ()),
         store_root=store_root,
