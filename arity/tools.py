@@ -6,6 +6,7 @@ Axiom 12: Tool runners are pluggable seams (MCP, native Rust, local sandbox).
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from typing import Any, Callable, Optional
 
 from ._version import USER_AGENT
 from .configuration import get_config_value
+from .research import ResearchScope
 from .roles import Role, RoleRegistry
 from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
@@ -43,6 +45,25 @@ class UnknownMessageRecipientError(MessageDeliveryError):
     pass
 
 
+# A research scope is a host-issued capability.  Its runner remains read-only
+# even if an untrusted project overrides a role document and removes denials.
+RESEARCH_RUNNER_TOOLS = frozenset(
+    {
+        "fetch_url",
+        "list_directory",
+        "list_project",
+        "message",
+        "query_records",
+        "read_file",
+        "read_project_file",
+        "search",
+        "search_files",
+        "search_project",
+        "web_search",
+    }
+)
+
+
 def resolve_sandbox_path(workspace_root: Path, relative_path: str) -> Path:
     """Resolve and enforce that the path stays strictly inside workspace_root."""
     resolved_root = workspace_root.resolve()
@@ -65,6 +86,8 @@ class SandboxToolRunner(ToolRunner):
         custom_tools: Optional[dict[str, Callable[..., str]]] = None,
         message_router: Optional[Callable[[str, str], str]] = None,
         role_registry: Optional[RoleRegistry] = None,
+        research_scope: Optional[ResearchScope] = None,
+        excluded_record_ids: tuple[str, ...] = (),
     ):
         self.workspace_root = (Path(workspace_root) if workspace_root else Path.cwd()).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -72,10 +95,16 @@ class SandboxToolRunner(ToolRunner):
         self.timeout = timeout
         self.message_router = message_router
         self.role_registry = role_registry if role_registry is not None else RoleRegistry()
+        self.research_scope = research_scope
+        self.excluded_record_ids = tuple(excluded_record_ids)
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_default_tools()
+        if self.research_scope is not None:
+            self._register_research_tools()
         if custom_tools:
+            if self.research_scope is not None:
+                raise ValueError("research runners do not accept custom tool overrides")
             for name, func in custom_tools.items():
                 self._custom_tools[name] = func
 
@@ -99,17 +128,24 @@ class SandboxToolRunner(ToolRunner):
 
     def get_schemas(self) -> list[dict[str, Any]]:
         """Return tool schemas filtered by role permissions if role is assigned."""
-        if not self.role:
-            return list(self._schemas)
         filtered = []
         for s in self._schemas:
             fn_name = s.get("function", {}).get("name", "")
-            if self.role.can_use_tool(fn_name):
+            if self.research_scope is not None and fn_name not in RESEARCH_RUNNER_TOOLS:
+                continue
+            if self.role is None or self.role.can_use_tool(fn_name):
                 filtered.append(s)
         return filtered
 
     def execute(self, effect: ExecuteTool) -> ToolCompleted:
         """Execute a tool call with strict security, syntax validation, and timeouts."""
+        if self.research_scope is not None and effect.name not in RESEARCH_RUNNER_TOOLS:
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output=f"Security Denial: research runners cannot execute tool '{effect.name}'",
+                is_error=True,
+            )
         # 1. Role denial check
         if self.role and not self.role.can_use_tool(effect.name):
             return ToolCompleted(
@@ -362,6 +398,46 @@ class SandboxToolRunner(ToolRunner):
         def fetch_url(url: str, timeout: int = 15) -> str:
             import urllib.request
             from html.parser import HTMLParser
+            from urllib.parse import urlsplit, urlunsplit
+
+            def validate_public_url(candidate: str) -> str:
+                try:
+                    parsed = urlsplit(candidate)
+                    port = parsed.port
+                except ValueError as exc:
+                    raise ValueError("URL is malformed") from exc
+                if parsed.scheme.lower() not in {"http", "https"}:
+                    raise ValueError("Only HTTP and HTTPS URLs may be fetched")
+                if parsed.username is not None or parsed.password is not None:
+                    raise ValueError("URLs containing credentials may not be fetched")
+                hostname = (parsed.hostname or "").rstrip(".").lower()
+                if not hostname:
+                    raise ValueError("URL must include a public hostname")
+                if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
+                    raise ValueError("Local network URLs may not be fetched")
+                if hostname in {"metadata.google.internal", "metadata.azure.internal"}:
+                    raise ValueError("Cloud metadata URLs may not be fetched")
+                try:
+                    address = ipaddress.ip_address(hostname)
+                except ValueError:
+                    address = None
+                if address is not None and not address.is_global:
+                    raise ValueError("Non-public network URLs may not be fetched")
+                if address is None and "." not in hostname:
+                    raise ValueError("Single-label network hosts may not be fetched")
+                # Drop fragments, which are never sent to the server and can hide
+                # credential-like material in logs and error strings.
+                netloc = hostname if port is None else f"{hostname}:{port}"
+                return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", parsed.query, ""))
+
+            safe_url = validate_public_url(url)
+
+            class PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    safe_redirect = validate_public_url(newurl)
+                    return super().redirect_request(req, fp, code, msg, headers, safe_redirect)
+
+            opener = urllib.request.build_opener(PublicOnlyRedirectHandler())
 
             class SimpleHTMLTextExtractor(HTMLParser):
                 def __init__(self):
@@ -391,12 +467,17 @@ class SandboxToolRunner(ToolRunner):
                 "Accept-Language": "en-US,en;q=0.9",
             }
             limit = 8000
+            byte_limit = 256 * 1024
 
             def direct() -> tuple[str, str]:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                req = urllib.request.Request(safe_url, headers=headers)
+                with opener.open(req, timeout=timeout) as resp:
+                    validate_public_url(resp.geturl())
                     content_type = resp.headers.get("Content-Type", "")
-                    raw = resp.read().decode("utf-8", errors="replace")
+                    raw = resp.read(byte_limit + 1)
+                    if len(raw) > byte_limit:
+                        raw = raw[:byte_limit]
+                    raw = raw.decode("utf-8", errors="replace")
                 if "text/html" not in content_type:
                     return raw[:limit], "direct"
                 parser = SimpleHTMLTextExtractor()
@@ -410,9 +491,12 @@ class SandboxToolRunner(ToolRunner):
             # Reader proxy renders JS shells into markdown. TODO(scout): swap for Firecrawl/TinyFish or a
             # headless browser in a VM when pricing pages need clicks; a reader is enough for text.
             def via_reader() -> tuple[str, str]:
-                req = urllib.request.Request(f"https://r.jina.ai/{url}", headers={**headers, "Accept": "text/markdown, text/plain"})
-                with urllib.request.urlopen(req, timeout=timeout + 15) as resp:
-                    return resp.read().decode("utf-8", errors="replace"), "reader"
+                proxy_url = f"https://r.jina.ai/{safe_url}"
+                req = urllib.request.Request(proxy_url, headers={**headers, "Accept": "text/markdown, text/plain"})
+                with opener.open(req, timeout=timeout + 15) as resp:
+                    validate_public_url(resp.geturl())
+                    raw = resp.read(byte_limit + 1)
+                    return raw[:byte_limit].decode("utf-8", errors="replace"), "reader"
 
             errors: list[str] = []
             for attempt in (direct, via_reader):
@@ -425,7 +509,7 @@ class SandboxToolRunner(ToolRunner):
                     errors.append("direct: page is a JS shell or sign-in wall")
                     continue
                 return f"[fetched via {how}] {text[:limit]}"
-            return f"Error fetching URL '{url}': " + " | ".join(errors)
+            return "Error fetching the requested URL: " + " | ".join(errors)
 
         self.register(
             name="fetch_url",
@@ -502,6 +586,112 @@ class SandboxToolRunner(ToolRunner):
                 "required": ["to", "text"],
             },
             func=message_tool,
+        )
+
+    def _register_research_tools(self) -> None:
+        """Attach a separately scoped project/history surface to a research runner."""
+        assert self.research_scope is not None
+        denied_paths = self.role.denial_set.denied_paths if self.role is not None else ()
+
+        def read_project_file(
+            path: str, offset: int = 1, limit: int = 100, scope: str = "project"
+        ) -> str:
+            return self.research_scope.read_project_file(
+                path, offset, limit, scope, denied_paths=denied_paths
+            )
+
+        self.register(
+            name="read_project_file",
+            description="Read one bounded line range from a file in the configured research project.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project-relative file path"},
+                    "offset": {"type": "integer", "description": "1-based first line", "default": 1},
+                    "limit": {"type": "integer", "description": "Requested line count (capped)", "default": 100},
+                    "scope": {"type": "string", "enum": ["project", "work"], "description": "Invocation project or requesting workspace", "default": "project"},
+                },
+                "required": ["path"],
+            },
+            func=read_project_file,
+        )
+
+        def list_project(
+            path: str = ".", glob: str = "*", limit: int = 50, scope: str = "project"
+        ) -> str:
+            return self.research_scope.list_project(
+                path, glob, limit, scope, denied_paths=denied_paths
+            )
+
+        self.register(
+            name="list_project",
+            description="Find files by glob under the configured research project, with hard result caps.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project-relative starting directory", "default": "."},
+                    "glob": {"type": "string", "description": "File glob such as **/*.py", "default": "*"},
+                    "limit": {"type": "integer", "description": "Requested result count (capped)", "default": 50},
+                    "scope": {"type": "string", "enum": ["project", "work"], "description": "Invocation project or requesting workspace", "default": "project"},
+                },
+            },
+            func=list_project,
+        )
+
+        def search_project(
+            pattern: str,
+            path: str = ".",
+            glob: str = "*",
+            limit: int = 50,
+            scope: str = "project",
+        ) -> str:
+            return self.research_scope.search_project(
+                pattern, path, glob, limit, scope, denied_paths=denied_paths
+            )
+
+        self.register(
+            name="search_project",
+            description="Search project text by regex and return bounded file:line excerpts.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex to search"},
+                    "path": {"type": "string", "description": "Project-relative starting path", "default": "."},
+                    "glob": {"type": "string", "description": "File glob such as **/*.py", "default": "*"},
+                    "limit": {"type": "integer", "description": "Requested match count (capped)", "default": 50},
+                    "scope": {"type": "string", "enum": ["project", "work"], "description": "Invocation project or requesting workspace", "default": "project"},
+                },
+                "required": ["pattern"],
+            },
+            func=search_project,
+        )
+
+        def query_records(
+            kind: str, filters: Optional[dict[str, Any]] = None, limit: int = 20
+        ) -> str:
+            return self.research_scope.query_records(
+                kind,
+                filters,
+                limit,
+                excluded_ids=self.excluded_record_ids,
+            )
+
+        self.register(
+            name="query_records",
+            description=(
+                "Query a bounded, sanitized projection of completed Arity history. "
+                "This is not SQL and never exposes live trial bodies or store paths."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "Allowlisted record kind"},
+                    "filters": {"type": "object", "description": "Up to eight exact top-level filters", "default": {}},
+                    "limit": {"type": "integer", "description": "Requested record count (capped)", "default": 20},
+                },
+                "required": ["kind"],
+            },
+            func=query_records,
         )
 
 # -----------------------------------------------------------------------------
