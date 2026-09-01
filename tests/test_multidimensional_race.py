@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from arity.archivist import ArchivistEntry, ImpartialArchivist
 from arity.handlers import JsonlRecordStore, LocalToolRunner
 from arity.ledger import Seat, SeatLedger
-from arity.roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE, REVIEWER_ROLE
+from arity.roles import BUILDER_ROLE, PYTHON_DEVELOPER_ROLE, Role
 from arity.scorecard import Scorecard, ScorecardRecord
 from arity.skills import FIRECRAWL_SKILL, PYTEST_TDD_SKILL, Skill
 from arity.terrarium import (
