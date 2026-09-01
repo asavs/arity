@@ -545,8 +545,11 @@ class SandboxToolRunner(ToolRunner):
                     raw = resp.read(byte_limit + 1)
                     return raw[:byte_limit].decode("utf-8", errors="replace"), "reader"
 
+            # Query strings often carry signed URLs or API tokens. They may go
+            # only to the validated origin, never to the third-party reader.
+            attempts = (direct,) if urlsplit(safe_url).query else (direct, via_reader)
             errors: list[str] = []
-            for attempt in (direct, via_reader):
+            for attempt in attempts:
                 try:
                     text, how = attempt()
                 except ResearchAccessError:
