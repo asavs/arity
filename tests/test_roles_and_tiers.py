@@ -6,7 +6,7 @@ import unittest
 from arity.roles import (
     ARCHITECT_ROLE,
     BUILDER_ROLE,
-    REVIEWER_ROLE,
+    JUDGE_ROLE,
     VOICE_ROLE,
     DenialSet,
     Role,
@@ -32,12 +32,12 @@ class TestRolesAndDenialSets(unittest.TestCase):
         # Semantic resolution
         builder = self.registry.resolve("implement a new database schema")
         self.assertEqual(builder.name, "developer:python")
-        reviewer = self.registry.resolve("audit code and check PR")
-        self.assertEqual(reviewer.name, "reviewer")
+        judge = self.registry.resolve("audit code and check PR")
+        self.assertEqual(judge.name, "judge")
     def test_denial_set_tool_enforcement(self):
-        # Reviewer is denied write_file
-        self.assertFalse(REVIEWER_ROLE.can_use_tool("write_file"))
-        self.assertTrue(REVIEWER_ROLE.can_use_tool("read_file"))
+        # Judge is denied write_file
+        self.assertFalse(JUDGE_ROLE.can_use_tool("write_file"))
+        self.assertTrue(JUDGE_ROLE.can_use_tool("read_file"))
 
         # Builder can use write_file, read_file, run_command
         self.assertTrue(BUILDER_ROLE.can_use_tool("write_file"))
@@ -55,9 +55,9 @@ class TestRolesAndDenialSets(unittest.TestCase):
             {"type": "function", "function": {"name": "read_file"}},
             {"type": "function", "function": {"name": "write_file"}},
         ]
-        filtered_reviewer = self.registry.filter_tools(REVIEWER_ROLE, tools)
-        self.assertEqual(len(filtered_reviewer), 1)
-        self.assertEqual(filtered_reviewer[0]["function"]["name"], "read_file")
+        filtered_judge = self.registry.filter_tools(JUDGE_ROLE, tools)
+        self.assertEqual(len(filtered_judge), 1)
+        self.assertEqual(filtered_judge[0]["function"]["name"], "read_file")
 
 class TestTiersAndBriefCompiler(unittest.TestCase):
     def setUp(self):

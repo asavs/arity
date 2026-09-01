@@ -6,7 +6,6 @@ from arity.roles import (
     PYTHON_DEVELOPER_ROLE,
     SCOUT_ROLE,
     SECRETARY_ROLE,
-    TESTER_ROLE,
     RoleRegistry,
 )
 from arity.scorecard import Scorecard

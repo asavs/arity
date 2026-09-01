@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from arity.roles import BUILDER_ROLE, REVIEWER_ROLE
+from arity.roles import BUILDER_ROLE, JUDGE_ROLE
 from arity.tools import (
     McpToolAdapter,
     PathTraversalError,
@@ -71,11 +71,11 @@ class TestSandboxToolRunner(unittest.TestCase):
         self.assertTrue((self.ws / "good.py").exists())
 
     def test_role_denial_enforcement_in_runner(self):
-        # Reviewer role is denied write_file
-        reviewer_runner = SandboxToolRunner(workspace_root=self.ws, role=REVIEWER_ROLE)
-        res = reviewer_runner.execute(
+        # Judge role is denied write_file
+        judge_runner = SandboxToolRunner(workspace_root=self.ws, role=JUDGE_ROLE)
+        res = judge_runner.execute(
             ExecuteTool(
-                call_id="call_rev_write",
+                call_id="call_judge_write",
                 name="write_file",
                 arguments={"path": "test.txt", "content": "hello"},
             )

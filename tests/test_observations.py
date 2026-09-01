@@ -126,7 +126,7 @@ def test_model_observations_preserve_completed_failed_and_missing_attempts(
 ) -> None:
     observation = Observation(
         observer_kind="model",
-        observer_id="reviewer.kernel",
+        observer_id="judge.kernel",
         observer_version="v1",
         observed_at=2,
         phase="review",
