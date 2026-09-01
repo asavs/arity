@@ -496,6 +496,9 @@ class TerrariumDispatcher:
             raise ValueError(
                 "Untrusted Scout overrides cannot execute without an explicit trust workflow"
             )
+        sealed_research_personality = (
+            actual_role.trusted_definition and actual_role.research_access
+        )
         effective_research_scope = (
             available_research_scope
             if isinstance(available_research_scope, ResearchScope)
@@ -545,14 +548,14 @@ class TerrariumDispatcher:
                 skills_used=skills_used,
             )
 
-        if effective_research_scope is not None and not (
+        if sealed_research_personality and not (
             spec.tool_runner_type in ("sandbox", "ast", "native")
             or spec.tool_runner_type is SandboxToolRunner
         ):
             raise ValueError(
                 "Research personalities require Arity's sealed sandbox research runner"
             )
-        if effective_research_scope is not None and spec.harness in (
+        if sealed_research_personality and spec.harness in (
             "cli", "codex", "claude", "omp"
         ):
             raise ValueError(
@@ -712,7 +715,7 @@ class TerrariumDispatcher:
             if hasattr(model_provider, "cwd") and not hasattr(model_provider, "primary"):  # a bare CLI, no wire
                 harness_name = f"cli:{getattr(model_provider, 'harness', 'omp')}"
 
-        if effective_research_scope is not None and _provider_has_cli_owned_tools(
+        if sealed_research_personality and _provider_has_cli_owned_tools(
             model_provider
         ):
             raise ValueError(
