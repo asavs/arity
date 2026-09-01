@@ -68,13 +68,13 @@ PYTEST_TDD_SKILL = Skill(
 
 TEST_ENGINEERING_SKILL = Skill(
     name="test-engineering",
-    description="Author hidden acceptance tests for a task before any implementation exists.",
+    description="Build independent, repeatable evidence for objective tests and measured evaluations.",
     instructions=(
-        "1. Derive one test per observable promise in the brief; name tests after the promise.\n"
-        "2. Cover the contract, the edge cases, and the failure modes; skip implementation details.\n"
-        "3. Turn performance adjectives into a benchmark test with an explicit time budget.\n"
-        "4. Declare the expected module and class/function names in a docstring at the top of the file.\n"
-        "5. Write only `test_*.py` files; never an implementation or a stub."
+        "1. Derive one check or measure per observable promise in the brief and name it after the promise.\n"
+        "2. Cover contracts, edge cases, failure modes, regressions, and plausible confounds without coupling to implementation details.\n"
+        "3. Use crisp pass/fail oracles where possible; use calibrated rubrics, graders, and human review where quality must be measured.\n"
+        "4. Turn performance adjectives into explicit budgets and report uncertainty for non-deterministic evidence.\n"
+        "5. Implement only the test or evaluation apparatus, never the artifact being evaluated."
     ),
     tools=("write_file", "read_file", "run_command"),
     tags=("testing", "acceptance", "hidden-tests"),

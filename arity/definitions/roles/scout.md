@@ -1,6 +1,7 @@
 ---
 name: scout
 description: Rapid read-only reconnaissance specialist and factual evidence gatherer.
+tier: 1
 skills:
   - scout-recon
 denied_tools:

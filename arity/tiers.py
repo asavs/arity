@@ -18,9 +18,9 @@ from .roles import Role, VOICE_ROLE
 class TierLevel(IntEnum):
     """Distance from Asa (Axiom 8)."""
     TIER_0 = 0  # Secretary: knows personal context, biograph, switchboard
-    TIER_1 = 1  # Lead Engineer & Scout: project context, roadmap, general web/repo intelligence
-    TIER_2 = 2  # Python Developer: sandboxed implementation scope
-    TIER_3 = 3  # Reviewer: code auditor and regression verifier
+    TIER_1 = 1  # Engineer & Designer peers: project context and roadmap
+    TIER_2 = 2  # Engineering specialists: bounded implementation and evidence work
+    TIER_3 = 3  # Leaf workers such as read-only judges
 class BriefRefusalError(Exception):
     """Raised when an assembled brief violates a role's denial set."""
     pass
@@ -125,15 +125,15 @@ class BriefCompiler:
                     layers.append(skills_section)
 
             # Layer 3: Context by Role Profile (Axiom 8)
-            rname = role.name.lower()
-            if rname in ("secretary", "voice"):
+            rname = role.base_name.lower()
+            if rname == "secretary":
                 scorecard_txt = ""
                 if self.scorecard and hasattr(self.scorecard, "get_summary"):
                     scorecard_txt = f"\n\n# Live Model Ratings & Scorecard Standings (Axiom 9)\n{self.scorecard.get_summary()}"
                 layers.append(f"# Personal Context\n{self.tier0_context}\n\n# Project Context\n{self.tier1_context}{scorecard_txt}")
-            elif rname in ("engineer", "scout", "architect", "recon"):
+            elif role.tier == TierLevel.TIER_1:
                 layers.append(f"# Project Context\n{self.tier1_context}")
-            else:  # python_developer, reviewer, builder, etc.
+            else:
                 layers.append(f"# Operational Scope ({role.name})\nYou are a focused teammate. Execute your task cleanly and verify thoroughly.")
 
             # Layer 4: Predecessor Accounts (Axiom 9)
