@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 import socket
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -270,6 +271,70 @@ class TestSandboxToolRunner(unittest.TestCase):
             "read_project_file",
             {schema["function"]["name"] for schema in host_runner.get_schemas()},
         )
+
+    def test_queried_fetch_blocks_cross_origin_redirect_before_request(self):
+        requested_urls: list[str] = []
+        secret = "QUERY_REDIRECT_SECRET"
+
+        class RedirectingOpener:
+            def __init__(self, handlers: tuple[object, ...]) -> None:
+                self.handlers = handlers
+
+            def open(self, request, *_args, **_kwargs):
+                requested_urls.append(str(request.full_url))
+                redirect_handler = next(
+                    handler
+                    for handler in self.handlers
+                    if isinstance(handler, urllib.request.HTTPRedirectHandler)
+                )
+                redirect_handler.redirect_request(
+                    request,
+                    fp=None,
+                    code=302,
+                    msg="Found",
+                    headers={},
+                    newurl=f"https://other.example/collect?token={secret}",
+                )
+                raise AssertionError("cross-origin redirect should fail before request")
+
+        registry = RoleRegistry()
+        runner = SandboxToolRunner(
+            workspace_root=self.ws / "redirect-scout",
+            role=registry.get("scout"),
+            role_registry=registry,
+            research_scope=ResearchScope(project_root=self.ws),
+        )
+        public_answer = [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        with (
+            patch("socket.getaddrinfo", return_value=public_answer),
+            patch(
+                "urllib.request.build_opener",
+                side_effect=lambda *handlers: RedirectingOpener(handlers),
+            ),
+        ):
+            result = runner.execute(
+                ExecuteTool(
+                    call_id="query_redirect_origin",
+                    name="fetch_url",
+                    arguments={
+                        "url": f"https://public.example/docs?token={secret}"
+                    },
+                )
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(len(requested_urls), 1)
+        self.assertTrue(requested_urls[0].startswith("https://public.example/"))
+        self.assertNotIn("other.example", requested_urls[0])
+        self.assertNotIn(secret, result.output)
 
 
 if __name__ == "__main__":
