@@ -51,12 +51,13 @@ $$\text{transition}(\text{state}, \text{event}) \longrightarrow (\text{new\_stat
 
 1. **`ModelProvider`** (`arity.seams.ModelProvider`): Protocol for model routing (OpenRouter, LiteLLM, vLLM, direct stdlib `urllib`).
 2. **`ToolRunner`** (`arity.seams.ToolRunner`): Protocol for tool execution (MCP, local Python functions, Docker/WSL sandboxes).
-3. **`RecordStore`** (`arity.seams.RecordStore`): Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
-4. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
-5. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
-6. **`ContextAdapter`** (`arity.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
-7. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
-8. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Persists ordered lifecycle events through any `RecordStore`; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
+3. **`RecordReader`** (`arity.seams.RecordReader`): Protocol for query-only record access; the declared reader type of `inspect_trial`/`inspect_trials` and the seam behind inspection front-ends (TUIs, GUIs, dashboards).
+4. **`RecordStore`** (`arity.seams.RecordStore`): `RecordReader` plus append — Protocol for persistence (JSONL, SQLite, Vector DBs, audit logs).
+5. **`Transport`** (`arity.seams.Transport`): Protocol for user/channel I/O (CLI, Discord, Slack, SMS).
+6. **`Observer`** (`arity.seams.Observer`): Protocol for event/effect telemetry and evaluation monitoring.
+7. **`ContextAdapter`** (`arity.terrarium.ContextAdapter`): A named, testable transformation applied at the context boundary before a candidate runtime starts.
+8. **`TrialEvaluator`** (`arity.evidence.TrialEvaluator`): Evaluates an immutable `EvidenceBundle`; alternate evaluators can run later without rerunning candidate harnesses.
+9. **`TrialJournal`** (`arity.trial_events.TrialJournal`): Not a Protocol — a concrete class that composes the `RecordStore` seam, persisting ordered lifecycle events through any store; `replay_trial` validates the declared arms, evidence, reviews, resolutions, and delivery.
 
 ## Quickstart
 

@@ -3,6 +3,11 @@
 Open items, roughly in the order they matter. Use the repository's GitHub issue tracker for
 external reports; this file remains the maintainer's near-term roadmap.
 
+Longer horizon, cut by axiom rather than by subsystem:
+[docs/2026-09-01-axiom-backlog.md](docs/2026-09-01-axiom-backlog.md). Items there are tagged
+`[DECIDE]` (blocked on a judgment only the maintainer can make), `[BUILD]`, or `[SEAM]`
+(a join where existing software may win; researched after 1.0.0, not before).
+
 ## Cost and casting
 - [ ] **Pre-flight casting.** Estimate a task's cost from `trial_axes` history for the signature and skip
       seats whose remaining quota cannot cover it, instead of attempting and rotating at zero usage.
@@ -66,5 +71,7 @@ external reports; this file remains the maintainer's near-term roadmap.
       not enforcement - the wiki's answer is a leaf user that cannot see the repo.
 - [ ] Provider replay compatibility is its own fragility axis (Gemini thought signatures, Claude tool ids and
       empty parts). Consider a per-provider replay test that round-trips one tool call.
-- [ ] Existing test suite writes into the real `.arity/records` in places (`test_terrarium.py` etc.);
-      point them at temp stores like the race tests do.
+- [x] Existing test suite writes into the real `.arity/records` in places; `test_terrarium.py` was the
+      only one, and now passes a temp store. An audit of every `default_record_store()` caller found no
+      other write-side offender. Registry-discovery tests in `test_race_runner.py` still *read* the user's
+      real `~/.arity` overrides — same non-hermeticity, read side, still open.
