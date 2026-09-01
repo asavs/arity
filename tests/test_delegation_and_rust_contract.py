@@ -507,6 +507,7 @@ def test_replacing_a_base_role_invalidates_typed_roles_and_retained_aliases() ->
         name="developer",
         description="Replacement developer authority.",
         team="engineering",
+        accepts_types=True,
         system_prompt=replacement_marker,
         denial_set=DenialSet(denied_tools=("write_file",)),
     ))
