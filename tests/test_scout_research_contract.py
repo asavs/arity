@@ -21,7 +21,7 @@ from arity.evidence import CandidateEvidence, EvidenceBundle, Resolution, resolv
 from arity.ledger import Seat, SeatLedger
 from arity.orchestrator import ArityOrchestrator
 from arity.record_readers import RecordCorruption, RecordReadLimits, StoreSpec
-from arity.roles import RoleRegistry
+from arity.roles import Role, RoleRegistry
 from arity.stores.sqlite import SqliteRecordStore
 from arity.terrarium import CandidateSpec, TaskRecord, TerrariumDispatcher
 from arity.tools import SandboxToolRunner, create_mcp_tool_runner
@@ -564,9 +564,46 @@ def test_project_role_override_cannot_relax_scouts_host_security_envelope(
     overridden = registry.get("scout")
     assert overridden is not None
     assert "Hostile repository override" in overridden.description
+    assert overridden.research_access is False
+    assert overridden.trusted_definition is False
+    tool_side_effects: list[str] = []
+
+    with pytest.raises(
+        ValueError,
+        match="(?i)untrusted|trusted.*research|trusted definition|host-issued",
+    ):
+        SandboxToolRunner(
+            workspace_root=tmp_path / "isolated",
+            role=overridden,
+            role_registry=registry,
+            research_scope=_research_scope(project),
+            custom_tools={
+                "execute_command": lambda **_kwargs: tool_side_effects.append("ran") or "pwned"
+            },
+        )
+
+    assert tool_side_effects == []
+    assert auth.read_text(encoding="utf-8") == "HOST_AUTH_SECRET"
+    assert not (tmp_path / "isolated" / "host-pwned.txt").exists()
+
+
+def test_trusted_programmatic_research_role_accepts_matching_host_grant(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "public.txt").write_text("PUBLIC_RESEARCH_SENTINEL", encoding="utf-8")
+    trusted = Role(
+        name="scout",
+        description="Host-created trusted research personality.",
+        research_access=True,
+        trusted_definition=True,
+    )
+    registry = RoleRegistry(initial_roles=[trusted])
+
     runner = SandboxToolRunner(
         workspace_root=tmp_path / "isolated",
-        role=overridden,
+        role=trusted,
         role_registry=registry,
         research_scope=_research_scope(project),
     )
@@ -575,19 +612,11 @@ def test_project_role_override_cannot_relax_scouts_host_security_envelope(
         for schema in runner.get_schemas()
     }
 
+    assert PROJECT_TOOLS | WEB_TOOLS <= schemas
     assert {"write_file", "run_command", "execute_command"}.isdisjoint(schemas)
-    for tool_name, arguments in (
-        ("write_file", {"path": "host-pwned.txt", "content": "pwned"}),
-        ("run_command", {"command": "echo pwned"}),
-        ("execute_command", {"command": "echo pwned"}),
-    ):
-        denied = _execute(runner, tool_name, **arguments)
-        assert denied.is_error is True
-        assert "Security Denial" in denied.output
-    denied_auth = _execute(runner, "read_project_file", path=".arity/auth.json")
-    assert denied_auth.is_error is True
-    assert "HOST_AUTH_SECRET" not in denied_auth.output
-    assert not (tmp_path / "isolated" / "host-pwned.txt").exists()
+    read = _execute(runner, "read_project_file", path="public.txt", offset=1, limit=5)
+    assert read.is_error is False
+    assert "PUBLIC_RESEARCH_SENTINEL" in read.output
 
 
 @pytest.mark.parametrize("override_source", ("project", "home"))
@@ -2193,6 +2222,22 @@ class _FallbackNodeMustNotRun(_UnsafeHarnessMustNotRun):
         self.fallback = fallback
 
 
+class _ScopeLessScoutSchemaProbe:
+    def __init__(self) -> None:
+        self.calls: list[CallModel] = []
+
+    def call(self, effect: CallModel) -> ModelCompleted:
+        self.calls.append(effect)
+        names = _tool_names(effect)
+        assert PROJECT_TOOLS.isdisjoint(names)
+        assert WEB_TOOLS.isdisjoint(names)
+        assert {"write_file", "run_command", "execute_command"}.isdisjoint(names)
+        return ModelCompleted(
+            content="Scope-less Scout remained inside the native sealed runner.",
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
+        )
+
+
 def _assert_scout_dispatch_rejected(
     dispatcher: TerrariumDispatcher,
     spec: CandidateSpec,
@@ -2355,6 +2400,112 @@ def test_scout_rejects_nested_cli_fallback_graphs_without_looping_on_cycles(
         provider,
     )
     assert middle.calls == 0
+
+
+@pytest.mark.parametrize(
+    "unsafe_axis",
+    ("cli", "omp", "mcp", "shell", "custom", "cli-fallback"),
+)
+def test_explicitly_scopeless_scout_still_rejects_unsealed_execution_axes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_axis: str,
+) -> None:
+    registry = RoleRegistry()
+    scout = registry.get("scout")
+    assert scout is not None
+    assert scout.research_access is True
+    assert scout.trusted_definition is True
+    seat = Seat(provider="test", model="scripted")
+    provider = _UnsafeHarnessMustNotRun()
+    construction_side_effects: list[str] = []
+
+    def cli_provider(**_kwargs: Any) -> _UnsafeHarnessMustNotRun:
+        construction_side_effects.append("cli-provider")
+        return provider
+
+    def omp_provider(**_kwargs: Any) -> _UnsafeHarnessMustNotRun:
+        construction_side_effects.append("omp-provider")
+        return provider
+
+    def unsafe_tool_runner(*_args: Any, **_kwargs: Any) -> Any:
+        construction_side_effects.append("tool-runner")
+        raise AssertionError("unsealed tool runner must not be constructed")
+
+    monkeypatch.setattr("arity.terrarium.CLIModelProvider", cli_provider)
+    monkeypatch.setattr("arity.terrarium.OMPModelProvider", omp_provider)
+    harness: Any = "wire"
+    tool_runner_type: Any = "sandbox"
+    custom_provider: Any = provider
+    if unsafe_axis in {"cli", "omp"}:
+        harness = unsafe_axis
+        custom_provider = None
+    elif unsafe_axis in {"mcp", "shell"}:
+        tool_runner_type = unsafe_axis
+    elif unsafe_axis == "custom":
+        tool_runner_type = unsafe_tool_runner
+    else:
+        provider.fallback = CLIModelProvider(harness="codex", model="scripted")
+
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        roles=registry,
+        model_factory=lambda _seat: provider,
+        research_scope=_research_scope(tmp_path / "project"),
+        quiet=True,
+    )
+
+    with pytest.raises(ValueError, match="(?i)scout|research|sealed"):
+        dispatcher.dispatch_single(
+            task=TaskRecord(brief="Attempt to remove Scout's sealed execution boundary."),
+            candidate_or_seat=CandidateSpec(
+                seat=seat,
+                role=scout,
+                harness=harness,
+                tool_runner_type=tool_runner_type,
+                custom_model_provider=custom_provider,
+            ),
+            run_verification=False,
+            research_scope=None,
+        )
+    assert provider.calls == 0
+    assert construction_side_effects == []
+
+
+def test_explicitly_scopeless_scout_can_use_only_native_sealed_runner(
+    tmp_path: Path,
+) -> None:
+    registry = RoleRegistry()
+    scout = registry.get("scout")
+    assert scout is not None
+    seat = Seat(provider="test", model="scripted")
+    provider = _ScopeLessScoutSchemaProbe()
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=JsonlRecordStore(tmp_path / "records"),
+        base_workspace=tmp_path / "terrarium",
+        roles=registry,
+        research_scope=_research_scope(tmp_path / "project"),
+        quiet=True,
+    )
+
+    result = dispatcher.dispatch_single(
+        task=TaskRecord(brief="Work only inside your isolated child workspace."),
+        candidate_or_seat=CandidateSpec(
+            seat=seat,
+            role=scout,
+            harness="wire",
+            tool_runner_type="sandbox",
+            custom_model_provider=provider,
+        ),
+        run_verification=False,
+        research_scope=None,
+    )
+
+    assert result.status == "completed"
+    assert len(provider.calls) == 1
 
 
 def test_runtime_rejects_judge_initiated_scout_research(tmp_path: Path) -> None:
