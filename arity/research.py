@@ -287,14 +287,33 @@ def _project_record(
     return projected
 
 
-def _resolved_task_ids(reader: Any) -> set[str]:
-    """Return only task ids whose persisted evidence lifecycle validates."""
-    try:
-        bundle_rows = reader.query("evidence_bundle")
-        evaluation_rows = reader.query("evaluation")
-        resolutions = reader.query("resolution")
-    except RecordReadError:
-        return set()
+@dataclass(frozen=True)
+class _ValidatedResearchHistory:
+    """Content-addressed records that participate in a valid final resolution."""
+
+    bundles: Mapping[tuple[str, str], EvidenceBundle]
+    evaluations: Mapping[tuple[str, str], Evaluation]
+    resolved_bundle_keys: frozenset[tuple[str, str]]
+    resolution_keys: frozenset[tuple[str, str]]
+
+    @property
+    def resolved_task_ids(self) -> frozenset[str]:
+        return frozenset(task_id for task_id, _ in self.resolved_bundle_keys)
+
+    def candidate_ids(self, task_id: str) -> frozenset[str]:
+        return frozenset(
+            candidate.candidate_id
+            for key, bundle in self.bundles.items()
+            if key in self.resolved_bundle_keys and key[0] == task_id
+            for candidate in bundle.candidates
+        )
+
+
+def _validated_history(reader: Any) -> _ValidatedResearchHistory:
+    """Validate persisted evidence, evaluations, and final resolutions."""
+    bundle_rows = reader.query("evidence_bundle")
+    evaluation_rows = reader.query("evaluation")
+    resolutions = reader.query("resolution")
 
     bundles: dict[tuple[str, str], EvidenceBundle] = {}
     for record in bundle_rows:
@@ -324,7 +343,8 @@ def _resolved_task_ids(reader: Any) -> set[str]:
             continue
         evaluations[(task_id, evaluation.evaluation_id)] = evaluation
 
-    completed: set[str] = set()
+    resolved_bundle_keys: set[tuple[str, str]] = set()
+    resolution_keys: set[tuple[str, str]] = set()
     for record in resolutions:
         if not isinstance(record, Mapping):
             continue
@@ -345,8 +365,77 @@ def _resolved_task_ids(reader: Any) -> set[str]:
         except (KeyError, TypeError, ValueError):
             continue
         if resolution.resolved:
-            completed.add(task_id)
-    return completed
+            resolved_bundle_keys.add((task_id, evidence_hash))
+            resolution_keys.add((task_id, resolution.resolution_id))
+    return _ValidatedResearchHistory(
+        bundles=bundles,
+        evaluations=evaluations,
+        resolved_bundle_keys=frozenset(resolved_bundle_keys),
+        resolution_keys=frozenset(resolution_keys),
+    )
+
+
+def _belongs_to_validated_history(
+    history: _ValidatedResearchHistory,
+    kind: str,
+    record: Mapping[str, Any],
+) -> bool:
+    """Require projected lifecycle records to match the validated object exactly."""
+    task_id = record.get("task_id")
+    if not isinstance(task_id, str) or task_id not in history.resolved_task_ids:
+        return False
+
+    if kind == "evidence_bundle":
+        try:
+            bundle = EvidenceBundle.from_dict(record)
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (task_id, bundle.evidence_hash) in history.resolved_bundle_keys
+
+    if kind == "evaluation":
+        evidence_hash = record.get("evidence_hash")
+        if not isinstance(evidence_hash, str):
+            return False
+        bundle = history.bundles.get((task_id, evidence_hash))
+        if bundle is None or (task_id, evidence_hash) not in history.resolved_bundle_keys:
+            return False
+        try:
+            evaluation = Evaluation.from_dict(bundle, record)
+        except (KeyError, TypeError, ValueError):
+            return False
+        return history.evaluations.get((task_id, evaluation.evaluation_id)) == evaluation
+
+    if kind == "resolution":
+        try:
+            resolution = Resolution.from_dict(record)
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            (task_id, resolution.evidence_hash) in history.resolved_bundle_keys
+            and (task_id, resolution.resolution_id) in history.resolution_keys
+        )
+
+    evidence_hash = record.get("evidence_hash")
+    if kind in {"human_pick", "judgement"} and (
+        not isinstance(evidence_hash, str)
+        or (task_id, evidence_hash) not in history.resolved_bundle_keys
+    ):
+        return False
+
+    candidate_id = record.get("candidate_id")
+    if kind in {"archivist_entry", "terrarium_trial", "trial_axes"} and (
+        not isinstance(candidate_id, str)
+        or candidate_id not in history.candidate_ids(task_id)
+    ):
+        return False
+    if kind == "human_pick":
+        picked = record.get("picked")
+        if picked is not None and (
+            not isinstance(picked, str)
+            or picked not in history.candidate_ids(task_id)
+        ):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -715,7 +804,7 @@ class ResearchScope:
         assert self.record_spec is not None
         try:
             with open_record_reader(self.record_spec, limits=self.record_limits) as reader:
-                completed_ids = _resolved_task_ids(reader)
+                history = _validated_history(reader)
                 records = reader.query(kind)
         except (OSError, RecordReadError) as exc:
             raise ResearchAccessError("record history is unavailable") from exc
@@ -735,8 +824,7 @@ class ResearchScope:
             status = str(record.get("status", "")).lower()
             if status in {"active", "in_progress", "in-progress", "pending", "running", "started", "unresolved"}:
                 continue
-            task_id = record.get("task_id")
-            if not isinstance(task_id, str) or task_id not in completed_ids:
+            if not _belongs_to_validated_history(history, kind, record):
                 continue
             safe_record = _project_record(self._reference_key, kind, record)
             if any(
