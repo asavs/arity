@@ -32,8 +32,8 @@ class TestRolesAndDenialSets(unittest.TestCase):
         # Semantic resolution
         builder = self.registry.resolve("implement a new database schema")
         self.assertEqual(builder.name, "developer:python")
-        judge = self.registry.resolve("audit code and check PR")
-        self.assertEqual(judge.name, "judge")
+        test_engineer = self.registry.resolve("audit code and check PR")
+        self.assertEqual(test_engineer.name, "test-engineer")
     def test_denial_set_tool_enforcement(self):
         # Judge is denied write_file
         self.assertFalse(JUDGE_ROLE.can_use_tool("write_file"))

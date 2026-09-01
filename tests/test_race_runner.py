@@ -394,12 +394,16 @@ class TestTypePacks(unittest.TestCase):
         self.assertEqual(reg.get("developer:python"), dev)  # cached, same object
         self.assertIsNone(reg.get("developer:cobol"))
 
-    def test_same_pack_attaches_to_test_engineer_and_judge(self):
+    def test_test_engineer_shares_language_packs_while_judge_remains_base(self):
         reg = RoleRegistry()
-        self.assertEqual(reg.get("judge:python").skills, reg.get("developer:python").skills)
-        self.assertEqual(reg.get("test-engineer:python").type_name, "python")
-        self.assertEqual(reg.with_type(reg.get("judge"), "rust").name, "judge:rust")
-        self.assertEqual(reg.with_type(reg.get("judge"), None).name, "judge")
+        developer = reg.get("developer:python")
+        test_engineer = reg.get("test-engineer:python")
+        judge = reg.get("judge")
+        self.assertEqual(test_engineer.type_name, "python")
+        self.assertEqual(test_engineer.verify, developer.verify)
+        self.assertIsNone(reg.get("judge:python"))
+        self.assertIs(reg.with_type(judge, "rust"), judge)
+        self.assertIs(reg.with_type(judge, None), judge)
         self.assertIsNone(reg.get("tester:python"))
         self.assertIsNone(reg.get("reviewer:python"))
 
@@ -415,7 +419,7 @@ class TestTypePacks(unittest.TestCase):
         self.assertEqual(rust.verify["hidden_dir"], "tests")
         self.assertTrue(rust.verify["test_command"].startswith("cargo test"))
 
-    def test_race_on_a_task_uses_typed_roles_for_builder_test_engineer_and_judge(self):
+    def test_race_on_a_task_uses_typed_roles_for_builder_and_test_engineer(self):
         with TemporaryDirectory() as d:
             rep = run_race(RaceConfig(task_name="lru_cache", mock=True, role="developer", test_engineer=True,
                                       judges=["gpt-5.6-sol"], review="always", workspace_root=Path(d) / "ws"))
