@@ -17,13 +17,13 @@ Defined elsewhere. Each is expressed in terms of types declared in its own modul
 it stays beside them; hosting it here would mean importing those modules, and two of
 them already import this one.
 
-    ContextAdapter (gorkbot.terrarium)
+    ContextAdapter (arity.terrarium)
         One named, testable transform applied to a ContextEnvelope just before a
         candidate runtime starts.
-    TrialEvaluator (gorkbot.evidence)
+    TrialEvaluator (arity.evidence)
         Turns a frozen EvidenceBundle into an Evaluation, so alternate evaluators can
         run later without rerunning the candidate harnesses.
-    TrialJournal (gorkbot.trial_events)
+    TrialJournal (arity.trial_events)
         A concrete class rather than a Protocol: persists ordered lifecycle events
         through any RecordStore, from which replay_trial reconstructs the trial.
 """

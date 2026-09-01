@@ -7,7 +7,7 @@ import io
 import unittest
 from unittest.mock import MagicMock, patch
 
-from gorkbot.cli import PROVIDER_ALIASES, handle_auth_command
+from arity.cli import PROVIDER_ALIASES, handle_auth_command
 
 LOGIN_FUNCTIONS = (
     "login_google_antigravity",
@@ -23,10 +23,10 @@ def _run_auth(**namespace):
     logins = {name: MagicMock() for name in LOGIN_FUNCTIONS}
     with contextlib.ExitStack() as stack:
         # handle_auth_command imports from .auth inside the function, so the patches
-        # must land on gorkbot.auth rather than on gorkbot.cli.
-        stack.enter_context(patch("gorkbot.auth.TokenStore", return_value=store))
+        # must land on arity.auth rather than on arity.cli.
+        stack.enter_context(patch("arity.auth.TokenStore", return_value=store))
         for name, fn in logins.items():
-            stack.enter_context(patch(f"gorkbot.auth.{name}", fn))
+            stack.enter_context(patch(f"arity.auth.{name}", fn))
         stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
         code = handle_auth_command(argparse.Namespace(**namespace))

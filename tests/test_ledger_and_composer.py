@@ -1,4 +1,4 @@
-"""Tests for gorkbot seat ledger and casting composer."""
+"""Tests for arity seat ledger and casting composer."""
 from __future__ import annotations
 
 import shutil
@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gorkbot import cache_economics
-from gorkbot.composer import BROKIE, CASTING_MODES, CHAOS, SMART, CastingComposer
-from gorkbot.ledger import PRESENCE_TTL_SECONDS, Seat, SeatLedger
-from gorkbot.roles import BUILDER_ROLE, VOICE_ROLE
-from gorkbot.scorecard import Scorecard
+from arity import cache_economics
+from arity.composer import BROKIE, CASTING_MODES, CHAOS, SMART, CastingComposer
+from arity.ledger import PRESENCE_TTL_SECONDS, Seat, SeatLedger
+from arity.roles import BUILDER_ROLE, VOICE_ROLE
+from arity.scorecard import Scorecard
 
 
 class _NullStore:

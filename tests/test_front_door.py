@@ -1,4 +1,4 @@
-"""Tests for gorkbot run: casting the seats, delivery, the secretary's question on a judge split."""
+"""Tests for arity run: casting the seats, delivery, the secretary's question on a judge split."""
 from __future__ import annotations
 
 import sys
@@ -9,11 +9,11 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import gorkbot.race as race
-from gorkbot.composer import CHAOS, SMART, CastingDecision
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.race import cast_seats, deliver, judges_split, run_front_door
+import arity.race as race
+from arity.composer import CHAOS, SMART, CastingDecision
+from arity.ledger import Seat, SeatLedger
+from arity.roles import BUILDER_ROLE
+from arity.race import cast_seats, deliver, judges_split, run_front_door
 
 
 class TestCastSeats(unittest.TestCase):
@@ -233,9 +233,9 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertIs(seen["scorecard"], cfg.scorecard)
 
     def test_the_trial_reuses_the_scorecard_the_cast_already_replayed(self):
-        from gorkbot.handlers import JsonlRecordStore
-        from gorkbot.race import RaceConfig, run_race
-        from gorkbot.scorecard import Scorecard
+        from arity.handlers import JsonlRecordStore
+        from arity.race import RaceConfig, run_race
+        from arity.scorecard import Scorecard
         with TemporaryDirectory() as d:
             root = Path(d)
             card = Scorecard(store=JsonlRecordStore(root=root / "records"))
@@ -259,7 +259,7 @@ class TestRunFrontDoor(unittest.TestCase):
 
     def test_cast_seed_and_mode_reach_the_front_door_from_the_cli(self):
         # P6: chaos records a seed so the cast can be replayed; without a flag it could not be.
-        import gorkbot.cli as cli
+        import arity.cli as cli
         rep = SimpleNamespace(judgements=[], notes=[], to_dict=lambda: {})
         delivery = SimpleNamespace(answer=None, files=[], receipt="r", to_dict=lambda: {})
         argv = ["arity", "run", "brief", "--mock", "--cast", "chaos", "--cast-seed", "4242"]
@@ -272,7 +272,7 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertEqual(front.call_args.kwargs["cast_mode"], CHAOS)
 
     def test_an_unseeded_run_leaves_the_cast_seed_unset(self):
-        import gorkbot.cli as cli
+        import arity.cli as cli
         rep = SimpleNamespace(judgements=[], notes=[], to_dict=lambda: {})
         delivery = SimpleNamespace(answer=None, files=[], receipt="r", to_dict=lambda: {})
         with (
@@ -284,12 +284,12 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertEqual(front.call_args.kwargs["cast_mode"], SMART)
 
     def test_answer_only_delivery_writes_answer_md(self):
-        from gorkbot.race import RaceReport
-        from gorkbot.terrarium import TaskRecord, TerrariumCandidateResult, State
-        from gorkbot.archivist import ImpartialArchivist
-        from gorkbot.handlers import JsonlRecordStore
-        from gorkbot.roles import BUILDER_ROLE
-        from gorkbot.race import placeholder_seats, CandidateSpec
+        from arity.race import RaceReport
+        from arity.terrarium import TaskRecord, TerrariumCandidateResult, State
+        from arity.archivist import ImpartialArchivist
+        from arity.handlers import JsonlRecordStore
+        from arity.roles import BUILDER_ROLE
+        from arity.race import placeholder_seats, CandidateSpec
         with TemporaryDirectory() as d:
             ws = Path(d) / "empty"; ws.mkdir()
             spec = CandidateSpec(seat=placeholder_seats()[0], name="scout-a", role=BUILDER_ROLE)
@@ -304,8 +304,8 @@ class TestRunFrontDoor(unittest.TestCase):
             self.assertIn("no hidden tests", delivery.receipt)
 
     def test_review_always_cannot_override_unique_facts(self):
-        from gorkbot.evidence import ResolutionKind
-        from gorkbot.race import RaceConfig, run_race, ScriptedProvider
+        from arity.evidence import ResolutionKind
+        from arity.race import RaceConfig, run_race, ScriptedProvider
         # Two judges that disagree: one says A, the other says B.
         answers = iter(['{"order": ["A", "B", "C"], "ties": []}', '{"order": ["B", "A", "C"], "ties": []}'])
         cfg = RaceConfig(task_name="lru_cache", mock=True, judges=["gpt-5.6-sol", "claude-3-7-sonnet"], review="always",

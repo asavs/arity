@@ -1,11 +1,11 @@
-"""Tests for gorkbot pulse engine, economic keepalives, and quota harvesting."""
+"""Tests for arity pulse engine, economic keepalives, and quota harvesting."""
 from __future__ import annotations
 
 import unittest
 
-from gorkbot import cache_economics
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.pulse import CacheEconomics, CadenceModel, PulseEngine
+from arity import cache_economics
+from arity.ledger import Seat, SeatLedger
+from arity.pulse import CacheEconomics, CadenceModel, PulseEngine
 
 
 class TestPulseEngine(unittest.TestCase):
@@ -96,7 +96,7 @@ class TestAxiom7Table(unittest.TestCase):
     """The wiki's Axiom 7 table, held to by the code that prices from it."""
 
     def test_cold_cost_reproduces_the_published_penalty_column(self):
-        # gorkbot/.wiki/axioms.md, Axiom 7: cold-vs-warm penalty on a 100k prefix.
+        # arity/.wiki/axioms.md, Axiom 7: cold-vs-warm penalty on a 100k prefix.
         published = {
             "anthropic": 0.90,
             "openai": 0.36,

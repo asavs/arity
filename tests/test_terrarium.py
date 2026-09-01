@@ -1,4 +1,4 @@
-"""Tests for gorkbot terrarium and multi-kernel parallel execution."""
+"""Tests for arity terrarium and multi-kernel parallel execution."""
 from __future__ import annotations
 
 import json
@@ -6,18 +6,18 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot import terrarium
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.roles import BUILDER_ROLE
-from gorkbot.terrarium import (
+from arity import terrarium
+from arity.handlers import JsonlRecordStore
+from arity.ledger import Seat, SeatLedger
+from arity.roles import BUILDER_ROLE
+from arity.terrarium import (
     CandidateSpec,
     TaskRecord,
     TerrariumCandidateResult,
     TerrariumDispatcher,
 )
-from gorkbot.tools import USER_DELIVERY_MARKER
-from gorkbot.types import CallModel, ExecuteTool, ModelCompleted, ToolCompleted
+from arity.tools import USER_DELIVERY_MARKER
+from arity.types import CallModel, ExecuteTool, ModelCompleted, ToolCompleted
 
 
 class AlienToolRunner:
@@ -95,7 +95,7 @@ class TestTerrariumDispatcher(unittest.TestCase):
         self.tmpdir = TemporaryDirectory()
         self.base_ws = Path(self.tmpdir.name)
         # Without an explicit store the dispatcher defaults to the real cwd-relative
-        # .gorkbot/records, and running this file would write into the developer's own store.
+        # .arity/records, and running this file would write into the developer's own store.
         self.store = JsonlRecordStore(self.base_ws / "records")
 
         self.seat_a = Seat(

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from gorkbot.evidence import ArtifactEvidence, CandidateEvidence, Evaluation, EvidenceBundle, resolve_bundle
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.trial_events import (
+from arity.evidence import ArtifactEvidence, CandidateEvidence, Evaluation, EvidenceBundle, resolve_bundle
+from arity.handlers import JsonlRecordStore
+from arity.stores.sqlite import SqliteRecordStore
+from arity.trial_events import (
     TrialEvent,
     TrialJournal,
     UnsupportedTrialEventSchema,

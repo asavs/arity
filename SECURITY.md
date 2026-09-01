@@ -26,8 +26,7 @@ boundary.
 
 ### Credentials
 
-Provider credentials are stored as plaintext JSON in `~/.gorkbot/auth.json`. Arity does not
-encrypt this file or put it in an operating-system credential store. Its protection is the
+Provider credentials are stored as plaintext JSON in `~/.arity/auth.json`. Arity does not
 access control provided by the current user's filesystem. Do not use a shared account or copy
 that file into logs, bug reports, backups with broader access, or a repository. Revoke tokens
 if the file may have been disclosed.

@@ -1,4 +1,4 @@
-"""Unit tests for gorkbot auth module (TokenStore, PKCE, token refresh, and auto-import)."""
+"""Unit tests for arity auth module (TokenStore, PKCE, token refresh, and auto-import)."""
 import contextlib
 import io
 import json
@@ -12,7 +12,7 @@ import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from gorkbot.auth import (
+from arity.auth import (
     AuthConfigurationError,
     TokenStore,
     _device_poll_disposition,
@@ -25,7 +25,7 @@ from gorkbot.auth import (
     refresh_openai_token,
     refresh_xai_token,
 )
-from gorkbot.cli import main as cli_main
+from arity.cli import main as cli_main
 
 
 def _json_response(payload):
@@ -68,7 +68,7 @@ def _loopback_server(callback_path):
     return SyntheticLoopbackServer
 
 
-class TestGorkbotAuth(unittest.TestCase):
+class TestArityAuth(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.auth_file = Path(self.tmp_dir.name) / "auth.json"
@@ -101,7 +101,7 @@ class TestGorkbotAuth(unittest.TestCase):
 
     def test_save_atomically_replaces_file_and_cleans_temporary_file(self):
         real_replace = os.replace
-        with patch("gorkbot.auth.os.replace", wraps=real_replace) as mocked_replace:
+        with patch("arity.auth.os.replace", wraps=real_replace) as mocked_replace:
             self.store.save_credential("mock-provider", {"access": "test-access"})
 
         mocked_replace.assert_called_once()
@@ -112,7 +112,7 @@ class TestGorkbotAuth(unittest.TestCase):
         self.store.save_credential("first-provider", {"access": "first-test-access"})
         original = self.auth_file.read_bytes()
 
-        with patch("gorkbot.auth.os.replace", side_effect=OSError("test replace failure")):
+        with patch("arity.auth.os.replace", side_effect=OSError("test replace failure")):
             with self.assertRaises(OSError):
                 self.store.save_credential(
                     "second-provider",
@@ -124,7 +124,7 @@ class TestGorkbotAuth(unittest.TestCase):
 
     def test_cleanup_failure_does_not_mask_replace_failure(self):
         with patch(
-            "gorkbot.auth.os.replace",
+            "arity.auth.os.replace",
             side_effect=OSError("synthetic replace failure"),
         ), patch.object(
             Path,
@@ -244,7 +244,7 @@ class TestGorkbotAuth(unittest.TestCase):
         }
 
         with patch(
-            "gorkbot.auth.refresh_google_antigravity_token",
+            "arity.auth.refresh_google_antigravity_token",
             return_value=refreshed,
         ) as mocked_refresh:
             result = self.store.refresh_if_needed("google-antigravity:test-account")
@@ -341,25 +341,25 @@ class TestGorkbotAuth(unittest.TestCase):
 
         with patch.dict(os.environ, missing_configuration):
             with patch.dict(os.environ, configured), patch(
-                "gorkbot.auth.generate_pkce_pair",
+                "arity.auth.generate_pkce_pair",
                 return_value=("synthetic-verifier", "synthetic-challenge"),
             ), patch(
-                "gorkbot.auth.secrets.token_urlsafe",
+                "arity.auth.secrets.token_urlsafe",
                 return_value="synthetic-state",
             ), patch(
-                "gorkbot.auth.http.server.HTTPServer",
+                "arity.auth.http.server.HTTPServer",
                 _loopback_server("/oauth-callback"),
             ), patch(
-                "gorkbot.auth.threading.Thread",
+                "arity.auth.threading.Thread",
                 _ImmediateThread,
             ), patch(
-                "gorkbot.auth.urllib.request.urlopen",
+                "arity.auth.urllib.request.urlopen",
                 side_effect=[token_response, user_response],
             ), patch(
-                "gorkbot.auth.discover_and_onboard_antigravity_project",
+                "arity.auth.discover_and_onboard_antigravity_project",
                 return_value="synthetic-project",
             ), patch(
-                "gorkbot.auth.TokenStore",
+                "arity.auth.TokenStore",
                 return_value=self.store,
             ):
                 login_google_antigravity(open_browser=False)
@@ -375,7 +375,7 @@ class TestGorkbotAuth(unittest.TestCase):
                 "projectId": "synthetic-project",
             }
             with patch(
-                "gorkbot.auth.refresh_google_antigravity_token",
+                "arity.auth.refresh_google_antigravity_token",
                 return_value=refreshed,
             ) as mocked_refresh:
                 result = self.store.refresh_if_needed("google-antigravity")
@@ -401,22 +401,22 @@ class TestGorkbotAuth(unittest.TestCase):
                 os.environ,
                 {"ARITY_OPENAI_CLIENT_ID": "synthetic-openai-client"},
             ), patch(
-                "gorkbot.auth.generate_pkce_pair",
+                "arity.auth.generate_pkce_pair",
                 return_value=("synthetic-verifier", "synthetic-challenge"),
             ), patch(
-                "gorkbot.auth.secrets.token_urlsafe",
+                "arity.auth.secrets.token_urlsafe",
                 return_value="synthetic-state",
             ), patch(
-                "gorkbot.auth.http.server.HTTPServer",
+                "arity.auth.http.server.HTTPServer",
                 _loopback_server("/callback"),
             ), patch(
-                "gorkbot.auth.threading.Thread",
+                "arity.auth.threading.Thread",
                 _ImmediateThread,
             ), patch(
-                "gorkbot.auth.urllib.request.urlopen",
+                "arity.auth.urllib.request.urlopen",
                 return_value=token_response,
             ), patch(
-                "gorkbot.auth.TokenStore",
+                "arity.auth.TokenStore",
                 return_value=self.store,
             ):
                 login_openai_codex(open_browser=False)
@@ -429,7 +429,7 @@ class TestGorkbotAuth(unittest.TestCase):
                 "expires": 1789000000000,
             }
             with patch(
-                "gorkbot.auth.refresh_openai_token",
+                "arity.auth.refresh_openai_token",
                 return_value=refreshed,
             ) as mocked_refresh:
                 result = self.store.refresh_if_needed("openai-codex")
@@ -461,12 +461,12 @@ class TestGorkbotAuth(unittest.TestCase):
                 os.environ,
                 {"ARITY_XAI_CLIENT_ID": "synthetic-xai-client"},
             ), patch(
-                "gorkbot.auth.urllib.request.urlopen",
+                "arity.auth.urllib.request.urlopen",
                 side_effect=[device_response, token_response],
             ), patch(
-                "gorkbot.auth.time.sleep",
+                "arity.auth.time.sleep",
             ), patch(
-                "gorkbot.auth.TokenStore",
+                "arity.auth.TokenStore",
                 return_value=self.store,
             ):
                 login_xai_grok(open_browser=False)
@@ -479,7 +479,7 @@ class TestGorkbotAuth(unittest.TestCase):
                 "expires": 1789000000000,
             }
             with patch(
-                "gorkbot.auth.refresh_xai_token",
+                "arity.auth.refresh_xai_token",
                 return_value=refreshed,
             ) as mocked_refresh:
                 result = self.store.refresh_if_needed("xai-oauth")
@@ -503,22 +503,22 @@ class TestGorkbotAuth(unittest.TestCase):
             os.environ,
             {"ARITY_ANTHROPIC_CLIENT_ID": "synthetic-anthropic-client"},
         ), patch(
-            "gorkbot.auth.generate_pkce_pair",
+            "arity.auth.generate_pkce_pair",
             return_value=("synthetic-verifier", "synthetic-challenge"),
         ), patch(
-            "gorkbot.auth.secrets.token_urlsafe",
+            "arity.auth.secrets.token_urlsafe",
             return_value="synthetic-state",
         ), patch(
-            "gorkbot.auth.http.server.HTTPServer",
+            "arity.auth.http.server.HTTPServer",
             _loopback_server("/callback"),
         ), patch(
-            "gorkbot.auth.threading.Thread",
+            "arity.auth.threading.Thread",
             _ImmediateThread,
         ), patch(
-            "gorkbot.auth.urllib.request.urlopen",
+            "arity.auth.urllib.request.urlopen",
             return_value=token_response,
         ), patch(
-            "gorkbot.auth.TokenStore",
+            "arity.auth.TokenStore",
             return_value=self.store,
         ):
             login_anthropic(open_browser=False)
@@ -546,12 +546,12 @@ class TestGorkbotAuth(unittest.TestCase):
             os.environ,
             {"ARITY_XAI_CLIENT_ID": "synthetic-xai-client"},
         ), patch(
-            "gorkbot.auth.urllib.request.urlopen",
+            "arity.auth.urllib.request.urlopen",
             side_effect=[device_response, denial],
         ) as mocked_urlopen, patch(
-            "gorkbot.auth.time.sleep",
+            "arity.auth.time.sleep",
         ), patch(
-            "gorkbot.auth.TokenStore",
+            "arity.auth.TokenStore",
             return_value=self.store,
         ):
             with self.assertRaises(RuntimeError) as raised:
@@ -630,7 +630,7 @@ class TestAuthCli(unittest.TestCase):
             "argv",
             ["arity", "auth", "login", "google"],
         ), patch(
-            "gorkbot.auth.login_google_antigravity",
+            "arity.auth.login_google_antigravity",
             return_value={"access": "synthetic-access"},
         ) as mocked_login:
             return_code = cli_main()

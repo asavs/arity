@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from gorkbot.handlers import JsonlRecordStore, default_record_store
-from gorkbot.record_readers import (
+from arity.handlers import JsonlRecordStore, default_record_store
+from arity.record_readers import (
     JsonlRecordReader,
     RecordChanged,
     RecordCorruption,
@@ -18,8 +18,8 @@ from gorkbot.record_readers import (
     configured_store_spec,
     open_record_reader,
 )
-from gorkbot.stores.sqlite import SqliteRecordStore
-from gorkbot.types import StoreRecord
+from arity.stores.sqlite import SqliteRecordStore
+from arity.types import StoreRecord
 
 
 def _snapshot(path: Path) -> tuple[bytes, int]:
@@ -42,7 +42,7 @@ def test_configured_store_spec_is_shared_with_the_writable_default(
     spec = configured_store_spec()
     store = default_record_store()
 
-    assert spec == StoreSpec("sqlite", Path(".gorkbot/records.db"))
+    assert spec == StoreSpec("sqlite", Path(".arity/records.db"))
     assert isinstance(store, SqliteRecordStore)
     assert store.path == spec.path
     store.close()
@@ -50,7 +50,7 @@ def test_configured_store_spec_is_shared_with_the_writable_default(
     monkeypatch.setenv("ARITY_STORE", "jsonl")
     spec = configured_store_spec()
     store = default_record_store()
-    assert spec == StoreSpec("jsonl", Path(".gorkbot/records"))
+    assert spec == StoreSpec("jsonl", Path(".arity/records"))
     assert isinstance(store, JsonlRecordStore)
     assert store.root == spec.path
 
@@ -123,7 +123,7 @@ def test_sqlite_reader_never_opens_the_no_wal_source(
     writer.close()
     scratch = tmp_path / "private-snapshots"
     scratch.mkdir()
-    monkeypatch.setattr("gorkbot.record_readers.tempfile.tempdir", str(scratch))
+    monkeypatch.setattr("arity.record_readers.tempfile.tempdir", str(scratch))
     opened: list[str] = []
     original_connect = sqlite3.connect
 
@@ -345,7 +345,7 @@ def test_reader_types_json_recursion_failures_as_corruption(
     def recurse(_encoded: str | bytes) -> object:
         raise RecursionError("too deep for test")
 
-    monkeypatch.setattr("gorkbot.record_readers._strict_json_loads", recurse)
+    monkeypatch.setattr("arity.record_readers._strict_json_loads", recurse)
     if backend == "jsonl":
         root = tmp_path / "records"
         root.mkdir()
@@ -466,7 +466,7 @@ def test_sqlite_wal_is_read_from_private_snapshot_without_source_mutation(
 ) -> None:
     scratch = tmp_path / "private-snapshots"
     scratch.mkdir()
-    monkeypatch.setattr("gorkbot.record_readers.tempfile.tempdir", str(scratch))
+    monkeypatch.setattr("arity.record_readers.tempfile.tempdir", str(scratch))
 
     writer_path = tmp_path / "writer.db"
     writer = sqlite3.connect(writer_path)

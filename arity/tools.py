@@ -460,11 +460,11 @@ class SandboxToolRunner(ToolRunner):
 # -----------------------------------------------------------------------------
 
 def get_config_value(key: str) -> Optional[str]:
-    """Resolve an environment or active ``.gorkbot/config.json`` setting."""
+    """Resolve an environment or active ``.arity/config.json`` setting."""
     val = os.environ.get(key)
     if val:
         return val
-    for p in (Path(".gorkbot/config.json"), Path.home() / ".gorkbot" / "config.json"):
+    for p in (Path(".arity/config.json"), Path.home() / ".arity" / "config.json"):
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -493,7 +493,7 @@ def resolve_arity(explicit: Optional[int] = None, *, default: int = 1) -> int:
     """Resolve the requested maximum arity: explicit, ``ARITY``, compatibility fallback, default."""
     if explicit is not None:
         return positive_int(explicit, name="arity")
-    for key in ("ARITY", "GORKBOT_CONCURRENCY"):
+    for key in ("ARITY", "ARITY"):
         configured = get_config_value(key)
         if configured is not None:
             label = key if key == "ARITY" else f"{key} (legacy)"

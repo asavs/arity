@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from gorkbot.stores.sqlite import SqliteRecordStore
+from arity.stores.sqlite import SqliteRecordStore
 
 
 @dataclass

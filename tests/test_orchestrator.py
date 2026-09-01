@@ -1,4 +1,4 @@
-"""Tests for gorkbot master orchestrator and end-to-end multi-part integration."""
+"""Tests for arity master orchestrator and end-to-end multi-part integration."""
 from __future__ import annotations
 
 import unittest
@@ -6,14 +6,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import create_autospec, patch
 
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.ledger import Seat, SeatLedger
-from gorkbot.orchestrator import GorkbotOrchestrator
-from gorkbot.terrarium import TerrariumCandidateResult
-from gorkbot.types import CallModel, ModelCompleted, State
+from arity.handlers import JsonlRecordStore
+from arity.ledger import Seat, SeatLedger
+from arity.orchestrator import ArityOrchestrator
+from arity.terrarium import TerrariumCandidateResult
+from arity.types import CallModel, ModelCompleted, State
 
 
-class TestGorkbotOrchestrator(unittest.TestCase):
+class TestArityOrchestrator(unittest.TestCase):
     def setUp(self):
         self.tmpdir = TemporaryDirectory()
         self.ws = Path(self.tmpdir.name)
@@ -81,7 +81,7 @@ class TestGorkbotOrchestrator(unittest.TestCase):
 
             return MockBuilderProvider()
 
-        orchestrator = GorkbotOrchestrator(
+        orchestrator = ArityOrchestrator(
             ledger=self.ledger,
             store=self.store,
             base_workspace=self.ws / "terrarium",
@@ -145,7 +145,7 @@ class TestGorkbotOrchestrator(unittest.TestCase):
             def execute(self, effect):
                 raise AssertionError("no tool execution expected on this path")
 
-        orchestrator = GorkbotOrchestrator(
+        orchestrator = ArityOrchestrator(
             ledger=self.ledger,
             store=self.store,
             base_workspace=self.ws / "terrarium",
@@ -171,7 +171,7 @@ class TestGorkbotOrchestrator(unittest.TestCase):
             orchestrator.terrarium.dispatch_single, side_effect=fake_dispatch
         )
 
-        with patch("gorkbot.orchestrator.SandboxToolRunner", RouterCapturingToolRunner):
+        with patch("arity.orchestrator.SandboxToolRunner", RouterCapturingToolRunner):
             orchestrator.handle_message(
                 user_text="hello, who is on the staff today?",
                 sender="Asa",

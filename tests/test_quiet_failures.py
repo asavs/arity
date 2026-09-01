@@ -6,18 +6,18 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from gorkbot.archivist import ImpartialArchivist
-from gorkbot.diagnostics import get_data_loss_count, get_data_loss_reasons, record_data_loss, reset_data_loss_count
-from gorkbot.ledger import Seat
-from gorkbot.handlers import JsonlRecordStore
-from gorkbot.roles import BUILDER_ROLE, RoleRegistry
-from gorkbot.runtime import Runtime
-from gorkbot.scorecard import Scorecard
-from gorkbot.seams import Observer, RecordStore
-from gorkbot.tasks import TaskBank
-from gorkbot.terrarium import TerrariumCandidateResult
-from gorkbot.transports import RedphoneInbox
-from gorkbot.types import EmitMessage, Event, State, Status, StoreRecord, UserMessage
+from arity.archivist import ImpartialArchivist
+from arity.diagnostics import get_data_loss_count, get_data_loss_reasons, record_data_loss, reset_data_loss_count
+from arity.ledger import Seat
+from arity.handlers import JsonlRecordStore
+from arity.roles import BUILDER_ROLE, RoleRegistry
+from arity.runtime import Runtime
+from arity.scorecard import Scorecard
+from arity.seams import Observer, RecordStore
+from arity.tasks import TaskBank
+from arity.terrarium import TerrariumCandidateResult
+from arity.transports import RedphoneInbox
+from arity.types import EmitMessage, Event, State, Status, StoreRecord, UserMessage
 
 
 class _FailingStore:
