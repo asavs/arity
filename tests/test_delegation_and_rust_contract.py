@@ -8,6 +8,7 @@ from pathlib import Path
 from arity.handlers import JsonlRecordStore
 from arity.ledger import Seat, SeatLedger
 from arity.orchestrator import ArityOrchestrator
+from arity.research import ResearchScope
 from arity.roles import DenialSet, Role, RoleRegistry
 from arity.skills import Skill
 from arity.terrarium import (
@@ -458,7 +459,9 @@ def test_default_sandbox_research_tools_follow_personality_authority(
 ) -> None:
     registry = RoleRegistry()
 
-    def tools_for(role_name: str) -> set[str]:
+    def tools_for(
+        role_name: str, research_scope: ResearchScope | None = None
+    ) -> set[str]:
         role = registry.get(role_name)
         assert role is not None
         return {
@@ -467,11 +470,26 @@ def test_default_sandbox_research_tools_follow_personality_authority(
                 workspace_root=tmp_path / role_name,
                 role=role,
                 role_registry=registry,
+                research_scope=research_scope,
             ).get_schemas()
         }
 
     scout_tools = tools_for("scout")
-    assert {"web_search", "fetch_url", "message"} <= scout_tools
+    assert "message" in scout_tools
+    assert {"web_search", "fetch_url"}.isdisjoint(scout_tools)
+
+    scoped_scout_tools = tools_for(
+        "scout", ResearchScope(project_root=tmp_path)
+    )
+    assert {
+        "web_search",
+        "fetch_url",
+        "read_project_file",
+        "search_project",
+        "list_project",
+        "query_records",
+        "message",
+    } <= scoped_scout_tools
 
     for role_name in ("test-engineer", "judge"):
         role_tools = tools_for(role_name)

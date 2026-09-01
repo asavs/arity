@@ -97,10 +97,14 @@ class SandboxToolRunner(ToolRunner):
         if (
             self.research_scope is not None
             and self.role is not None
-            and not self.research_scope.grants(self.role.base_name)
+            and (
+                not self.role.trusted_definition
+                or not self.role.research_access
+                or not self.research_scope.grants(self.role.base_name)
+            )
         ):
             raise ValueError(
-                "research scope does not grant this personality access"
+                "research scope requires a trusted, research-enabled personality grant"
             )
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
