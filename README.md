@@ -64,6 +64,28 @@ organizational responsibility without restricting peer messaging. See
 [Personalities, types, skills, and teams](docs/personalities.md) for the shipped roles and their
 handoff boundaries.
 
+## Research delegation
+
+Arity's packaged Secretary, Designer, Engineer, Developer, and Test Engineer delegate substantive
+codebase discovery, completed-record lookup, and live or version-sensitive web research to Scout.
+Scout returns a compressed factual packet; the requesting personality keeps responsibility for
+every design, engineering, testing, and briefing decision. Judge is the deliberate exception: its
+evidence is frozen, so it cannot ask Scout directly or transitively to expand that evidence.
+
+When Scout is delegated, the host-issued capability exposes two named filesystem roots: the
+invocation project and the exact requesting agent workspace. A non-delegated scope can omit the
+work root. Reads are relative, bounded, and path-filtered; scope validation refuses a filesystem
+root or the user's home directory for either root. Record research is a separate, positive
+allowlist over validated completed history, not full replay and not the `watch` view model. Raw
+record identifiers are replaced with keyed, scope-local neutral references so related rows can be
+correlated without exposing the stored identifiers.
+
+This is an application-level sealed runner, not an OS sandbox. It rejects write and command tools,
+custom or non-sandbox tool-runner axes, and CLI/OMP model harnesses or fallback graphs whose own
+tools would bypass Arity. A trusted role marked for research remains sealed even when it has no
+active scope. Web retrieval remains an outbound side effect. See
+[SECURITY.md](SECURITY.md#scout-research-capability) for the exact boundary and residual risks.
+
 ## Quickstart
 
 ### Run a trial
@@ -171,9 +193,10 @@ deliberately; reauthenticate instead of copying credential files.
 
 Arity is designed for a trusted single-user workstation. It is not an OS sandbox or a
 multi-tenant security boundary: model-directed tools, `LocalToolRunner`, and CLI harnesses may
-execute with the current user's permissions. Credentials and full trial replay data also
-require careful handling. Read [SECURITY.md](SECURITY.md) before using Arity with credentials,
-untrusted tasks, or external content.
+execute with the current user's permissions. The bounded Scout runner and direct Tier-0 provider
+checks reduce application-level reach but do not change that trust model. Credentials and full
+trial replay data also require careful handling. Read [SECURITY.md](SECURITY.md) before using Arity
+with credentials, untrusted tasks, or external content.
 
 ## License
 
