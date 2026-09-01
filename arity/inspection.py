@@ -412,6 +412,7 @@ def _inspect_records(
         try:
             TrialEvent.from_dict(record)
         except UnsupportedTrialEventSchema:
+            # Benign: Validate every common envelope field even when schema is from future.
             pass
         except (
             AttributeError,

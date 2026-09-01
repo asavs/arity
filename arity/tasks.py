@@ -10,6 +10,9 @@ Active local banks in `.arity/tasks/` and `~/.arity/tasks/` override packaged ta
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -106,8 +109,11 @@ class TaskBank:
             for tdir in sorted(p for p in d.iterdir() if p.is_dir()):
                 try:
                     task = load_task_dir(tdir)
-                except Exception:
-                    continue
+                except (TypeError, AttributeError):
+                    raise
+                except Exception as exc:
+                    logger.error("Failed to load task from %s: %s", tdir, exc)
+                    raise
                 self._tasks[task.name.lower()] = task
 
     def get(self, name: str) -> Optional[RaceTask]:

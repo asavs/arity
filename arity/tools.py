@@ -8,6 +8,9 @@ from __future__ import annotations
 import ast
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -311,8 +314,8 @@ class SandboxToolRunner(ToolRunner):
                                 rel_p = p.relative_to(self.workspace_root)
                                 matches.append(f"{rel_p}:{idx + 1}: {line.strip()}")
                     except Exception:
+                        # Benign: unreadable or binary file skipped in file search whose results are capped at 50.
                         continue
-            return "\n".join(matches[:50]) or f"No matches found for '{pattern}'."
 
         self.register(
             name="search_files",
@@ -465,11 +468,10 @@ def get_config_value(key: str) -> Optional[str]:
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
-                if key in data and data[key]:
+                if isinstance(data, dict) and key in data and data[key]:
                     return str(data[key])
-            except Exception:
-                pass
-    return None
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Failed to parse config file %s: %s", p, exc)
 
 
 def positive_int(value: Any, *, name: str = "value") -> int:

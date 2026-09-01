@@ -5,7 +5,11 @@ to the injected seam handlers (Model, Tools, Store, Transport, Observers).
 """
 from __future__ import annotations
 
+import logging
 import queue
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 from typing import Callable, Optional
 
 from .handlers import (
@@ -65,9 +69,10 @@ class Runtime:
         for obs in self.observers:
             try:
                 obs.on_event(state, event)
-            except Exception:
-                pass
-
+            except Exception as exc:
+                logger.warning("Observer %r failed on event %r: %s", obs, event, exc)
+                if isinstance(exc, (TypeError, AttributeError)):
+                    raise
         # 2. I/O-free state transition
         new_state, effects = transition(state, event, new_id=self.new_id)
 
@@ -76,9 +81,10 @@ class Runtime:
             for obs in self.observers:
                 try:
                     obs.on_effect(new_state, effect)
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    logger.warning("Observer %r failed on effect %r: %s", obs, effect, exc)
+                    if isinstance(exc, (TypeError, AttributeError)):
+                        raise
         # 4. Dispatch effects to seam handlers and collect resulting events
         new_events: list[Event] = []
 
@@ -87,16 +93,16 @@ class Runtime:
             if isinstance(effect, StoreRecord):
                 try:
                     self.store.append(effect)
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    logger.warning("Failed to store record (%s): %s", effect.kind, exc)
+                    record_data_loss(f"StoreRecord({effect.kind})", exc)
             # Effect: Emit a message to transport
             elif isinstance(effect, EmitMessage):
                 try:
                     self.transport.emit(effect)
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    logger.warning("Failed to emit message to transport: %s", exc)
+                    record_data_loss("EmitMessage", exc)
             # Effect: Execute a tool
             elif isinstance(effect, ExecuteTool):
                 result_event = self.tools.execute(effect)

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import os
 import re
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,9 +194,9 @@ class ImpartialArchivist:
                         },
                     )
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                logger.warning("Failed to persist archivist_entry: %s", exc)
+                record_data_loss("ArchivistEntry", exc)
         return ArchivistEntry(
             task_id=task_id,
             candidate_id=candidate_id,
@@ -240,9 +244,9 @@ class ImpartialArchivist:
                 try:
                     self.store.append(StoreRecord(kind="trial_axes", record={
                         "task_id": r.task_id, "candidate_id": r.candidate_id, "signature": e.signature, **e.axes}))
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    logger.warning("Failed to persist trial_axes: %s", exc)
+                    record_data_loss("TrialAxes", exc)
         def order_key(item: tuple[TerrariumCandidateResult, ArchivistEntry, float]):
             r, e, _ = item
             a = e.axes
@@ -365,13 +369,14 @@ class ImpartialArchivist:
                 continue
             try:
                 src = p.read_text(encoding="utf-8")
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to read Python file %s as UTF-8: %s", p, exc)
+                record_data_loss(f"CodeAxesRead({p.name})", exc)
+                out["compile_ok"] = False
                 continue
             is_test = p.name.startswith("test_") or p.name.endswith("_test.py")
             out["py_files"] += 1
             out["test_files"] += int(is_test)
-            out["loc"] += sum(1 for l in src.splitlines() if l.strip() and not l.strip().startswith("#"))
-            out["type_ignores"] += src.count("type: ignore")
             try:
                 tree = ast.parse(src)
             except SyntaxError:

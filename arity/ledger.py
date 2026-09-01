@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -107,6 +110,7 @@ class SeatLedger:
             if fresh.get("access") and fresh.get("projectId"):
                 return fetch_antigravity_quota(fresh["access"], fresh["projectId"]) or {}
         except Exception:
+            # Benign: Optional live probe with documented fallback to defaults.
             pass
         return {}
 
@@ -185,11 +189,11 @@ class SeatLedger:
             try:
                 expiry = float(expires)
             except (TypeError, ValueError):
+                # Benign: Narrow guard ignoring malformed timestamp in presence lock.
                 continue
             if expiry > curr_time:
                 locks[str(seat_id)] = expiry
         return locks
-
     def set_presence(self, seat_id: str, is_present: bool, now: Optional[float] = None) -> bool:
         """Set or release human presence on a seat, and record it for other processes.
 
@@ -222,72 +226,92 @@ class SeatLedger:
         now = time.time()
         default_reset = now + 86400.0  # 24h from now
 
+        store = None
         try:
             from .auth import TokenStore
             store = TokenStore()
+        except (TypeError, AttributeError):
+            raise
+        except Exception as exc:
+            logger.warning("Failed to initialize TokenStore during ledger seed: %s", exc)
 
-            # 1. Google Antigravity: one seat per (account, model). The backend keeps two
-            #    separate quotas - Gemini, and Claude+GPT-OSS - so a Gemini 429 says nothing
-            #    about Claude. Seed each seat's `remaining` from the live quota when reachable.
-            agy_accounts = store.get_all_for_provider("google-antigravity")
-            for key, acc in agy_accounts:
-                email = acc.get("email", "")
-                quota = self._antigravity_quota(store, key, acc)
-                for model, wire_name in ANTIGRAVITY_MODELS.items():
-                    q = quota.get(wire_name) or {}
-                    fraction = q.get("remainingFraction")
-                    reset = _parse_iso(q.get("resetTime")) or default_reset
-                    seat = Seat(
-                        provider="google",
-                        model=model,
-                        harness="omp",
-                        account=email,
-                        reset_deadline=reset,
+        if store:
+            # 1. Google Antigravity
+            try:
+                agy_accounts = store.get_all_for_provider("google-antigravity")
+                for key, acc in agy_accounts:
+                    email = acc.get("email", "")
+                    quota = self._antigravity_quota(store, key, acc)
+                    for model, wire_name in ANTIGRAVITY_MODELS.items():
+                        q = quota.get(wire_name) or {}
+                        fraction = q.get("remainingFraction")
+                        reset = _parse_iso(q.get("resetTime")) or default_reset
+                        seat = Seat(
+                            provider="google",
+                            model=model,
+                            harness="omp",
+                            account=email,
+                            reset_deadline=reset,
+                        )
+                        if fraction is not None:
+                            seat.remaining = seat.total_allowance * float(fraction)
+                        elif quota:
+                            seat.remaining = 0.0
+                        self.register(seat)
+            except (TypeError, AttributeError):
+                raise
+            except Exception as exc:
+                logger.warning("Failed mounting Google seats: %s", exc)
+
+            # 2. OpenAI
+            try:
+                codex_creds = store.get_credential("openai-codex")
+                if codex_creds:
+                    self.register(
+                        Seat(
+                            provider="openai",
+                            model="gpt-5.6-sol",
+                            harness="codex",
+                            reset_deadline=default_reset,
+                        )
                     )
-                    if fraction is not None:
-                        seat.remaining = seat.total_allowance * float(fraction)
-                    elif quota:
-                        # Endpoint answered but omitted this model: it is exhausted.
-                        seat.remaining = 0.0
-                    self.register(seat)
+            except (TypeError, AttributeError):
+                raise
+            except Exception as exc:
+                logger.warning("Failed mounting OpenAI seats: %s", exc)
 
-            # 2. OpenAI (ChatGPT backend with Codex CLI fallback)
-            codex_creds = store.get_credential("openai-codex")
-            if codex_creds:
-                self.register(
-                    Seat(
-                        provider="openai",
-                        model="gpt-5.6-sol",
-                        harness="codex",
-                        reset_deadline=default_reset,
+            # 3. xAI
+            try:
+                xai_creds = store.get_credential("xai-oauth")
+                if xai_creds:
+                    self.register(
+                        Seat(
+                            provider="xai",
+                            model="grok-4.5",
+                            harness="grok",
+                            reset_deadline=default_reset,
+                        )
                     )
-                )
+            except (TypeError, AttributeError):
+                raise
+            except Exception as exc:
+                logger.warning("Failed mounting xAI seats: %s", exc)
 
-            # 3. xAI (Grok backend with Grok build fallback)
-            xai_creds = store.get_credential("xai-oauth")
-            if xai_creds:
-                self.register(
-                    Seat(
-                        provider="xai",
-                        model="grok-4.5",
-                        harness="grok",
-                        reset_deadline=default_reset,
+            # 4. Anthropic
+            try:
+                if shutil.which("claude") or store.get_credential("anthropic"):
+                    self.register(
+                        Seat(
+                            provider="anthropic",
+                            model="claude-3-7-sonnet",
+                            harness="claude",
+                            reset_deadline=default_reset,
+                        )
                     )
-                )
-
-            # 4. Anthropic (Claude Code harness)
-            if shutil.which("claude") or store.get_credential("anthropic"):
-                self.register(
-                    Seat(
-                        provider="anthropic",
-                        model="claude-3-7-sonnet",
-                        harness="claude",
-                        reset_deadline=default_reset,
-                    )
-                )
-        except Exception:
-            pass
-
+            except (TypeError, AttributeError):
+                raise
+            except Exception as exc:
+                logger.warning("Failed mounting Anthropic seats: %s", exc)
         # 5. Fallback CLI Harnesses if not already mounted
         if shutil.which("codex") and "openai:gpt-5.6-sol" not in self._seats:
             self.register(

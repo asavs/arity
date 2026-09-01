@@ -8,6 +8,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -130,8 +133,9 @@ class SkillRegistry:
                             tags=("installed",),
                         )
                     )
-                except Exception:
-                    continue
+                except Exception as exc:
+                    logger.error("Failed to load skill from %s: %s", path, exc)
+                    raise
 
     def install(
         self,

@@ -5,9 +5,16 @@ What exists here: `RedphoneInbox`, a per-instance dict of channel name to a list
 `Transport` that records every outgoing `EmitMessage` and hands it to a caller-supplied
 callback whose default does nothing. Both run entirely inside the calling process. No
 code in this module opens a socket, serves an address, or contacts a carrier.
+"""
+from __future__ import annotations
 
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
+
+"""
 Stated intent, not built:
-
 Axiom 6 — the front door is a phone: voice calls, SMS/MMS, images, and URLs arriving on
 a rented number. There is no carrier or voice transport; the only way a message enters
 `RedphoneInbox` is an in-process call to `post`.
@@ -16,8 +23,7 @@ Axiom 10 — the red phone is a public address, not an alarm (`redphone.com/asas
 public inbox anyone can post a problem to, with bots triaging and escalating by email.
 No address is served to anyone outside the process and there is no escalation path.
 """
-from __future__ import annotations
-
+# imports already at top
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -91,9 +97,9 @@ class RedphoneInbox:
                         },
                     )
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                logger.warning("Failed to persist redphone_message: %s", exc)
+                record_data_loss("RedphoneMessage", exc)
         return msg
 
     def drain(self, channel: str) -> list[RedphoneMessage]:

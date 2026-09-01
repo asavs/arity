@@ -2,7 +2,13 @@
 
 The ``arity`` import namespace is retained for compatibility.
 """
+import logging
+
+# Attach NullHandler to the package root so the library never configures logging for its host (A12-2)
+logging.getLogger("arity").addHandler(logging.NullHandler())
+
 from ._version import __version__
+from .diagnostics import get_data_loss_count, get_data_loss_reasons, record_data_loss, reset_data_loss_count
 from .handlers import (
     ConsoleTransport,
     JsonlRecordStore,

@@ -8,6 +8,10 @@ background token refreshing.
 from __future__ import annotations
 
 import base64
+import logging
+from .diagnostics import record_data_loss
+
+logger = logging.getLogger(__name__)
 import hashlib
 import http.server
 import json
@@ -229,6 +233,7 @@ class TokenStore:
         # 1. Check OMP SQLite Database
         omp_db = Path.home() / ".omp" / "agent" / "agent.db"
         if omp_db.exists():
+            conn = None
             try:
                 conn = sqlite3.connect(str(omp_db), timeout=2.0)
                 cur = conn.cursor()
@@ -237,33 +242,41 @@ class TokenStore:
                     if raw_data:
                         try:
                             parsed = json.loads(raw_data)
-                            email = parsed.get("email")
-                            key = f"{prov}:{email}" if email else f"{prov}:{row_id}"
-                            discovered[key] = parsed
-                            if prov not in discovered:
-                                discovered[prov] = parsed
-                        except Exception:
-                            continue
-                conn.close()
-            except Exception:
-                pass
+                            if isinstance(parsed, dict):
+                                email = parsed.get("email")
+                                key = f"{prov}:{email}" if email else f"{prov}:{row_id}"
+                                discovered[key] = parsed
+                                if prov not in discovered:
+                                    discovered[prov] = parsed
+                        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                            logger.warning("Failed to parse OMP credential row: %s", exc)
+            except (TypeError, AttributeError):
+                raise
+            except Exception as exc:
+                logger.warning("Failed querying OMP database %s: %s", omp_db, exc)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
         # 2. Check Codex CLI auth.json
         codex_auth = Path.home() / ".codex" / "auth.json"
         if codex_auth.exists() and "openai-codex" not in discovered:
             try:
                 cdata = json.loads(codex_auth.read_text(encoding="utf-8"))
-                tokens = cdata.get("tokens", {})
-                if tokens.get("access_token") and tokens.get("refresh_token"):
-                    discovered["openai-codex"] = {
-                        "access": tokens["access_token"],
-                        "refresh": tokens["refresh_token"],
-                        "accountId": tokens.get("account_id"),
-                        "source": "codex-cli",
-                    }
-            except Exception:
-                pass
-
+                if isinstance(cdata, dict):
+                    tokens = cdata.get("tokens", {})
+                    if isinstance(tokens, dict) and tokens.get("access_token") and tokens.get("refresh_token"):
+                        discovered["openai-codex"] = {
+                            "access": tokens["access_token"],
+                            "refresh": tokens["refresh_token"],
+                            "accountId": tokens.get("account_id"),
+                            "source": "codex-cli",
+                        }
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Failed to parse Codex auth file %s: %s", codex_auth, exc)
         return discovered
 
     def import_all(self) -> dict[str, dict[str, Any]]:
@@ -526,8 +539,8 @@ def login_google_antigravity(
         try:
             webbrowser.open(full_auth_url)
         except Exception:
+            # Benign: URL was printed to console; browser open failure is cosmetic.
             pass
-
     # Wait for callback or timeout
     finished = server_done.wait(timeout=timeout)
     server.shutdown()
@@ -575,9 +588,9 @@ def login_google_antigravity(
         with urllib.request.urlopen(user_req, timeout=10) as uresp:
             udata = json.loads(uresp.read().decode("utf-8"))
             email = udata.get("email", "")
-    except Exception:
-        pass
-
+    except Exception as exc:
+        logger.warning("Failed to fetch Google Antigravity user email: %s", exc)
+        record_data_loss("GoogleAntigravityEmailFetch", exc)
     # Discover / Onboard Cloud Code Assist Project
     print(f"\033[1;33m[Google Antigravity Auth]\033[0m Discovering Cloud Code Assist companion project...")
     project_id = discover_and_onboard_antigravity_project(access_token)
@@ -636,9 +649,9 @@ def discover_and_onboard_antigravity_project(access_token: str) -> str:
         try:
             with urllib.request.urlopen(oreq, timeout=20) as oresp:
                 json.loads(oresp.read().decode("utf-8"))
-        except Exception:
-            pass
-
+        except Exception as exc:
+            logger.warning("Antigravity project onboard attempt failed: %s", exc)
+            record_data_loss("GoogleAntigravityOnboard", exc)
         # Reload after onboarding
         with urllib.request.urlopen(req, timeout=20) as rresp:
             rres = json.loads(rresp.read().decode("utf-8"))
@@ -736,8 +749,8 @@ def login_xai_grok(
         try:
             webbrowser.open(verification_uri)
         except Exception:
+            # Benign: URL was printed to console; browser open failure is cosmetic.
             pass
-
     start_time = time.time()
     poll_payload = {
         "client_id": oauth_client_id,
@@ -866,8 +879,8 @@ def login_openai_codex(
         try:
             webbrowser.open(full_auth_url)
         except Exception:
+            # Benign: URL was printed to console; browser open failure is cosmetic.
             pass
-
     finished = server_done.wait(timeout=timeout)
     server.shutdown()
     server.server_close()
@@ -910,9 +923,9 @@ def login_openai_codex(
             padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
             claims = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
             account_id = claims.get("https://api.openai.com/auth.account_id") or claims.get("account_id")
-    except Exception:
-        pass
-
+    except Exception as exc:
+        logger.warning("Failed to parse JWT claims from Codex token: %s", exc)
+        record_data_loss("CodexJWTClaimsParse", exc)
     cred_data = {
         "access": access_token,
         "refresh": refresh_token,
@@ -1016,8 +1029,8 @@ def login_anthropic(
         try:
             webbrowser.open(full_auth_url)
         except Exception:
+            # Benign: URL was printed to console; browser open failure is cosmetic.
             pass
-
     finished = server_done.wait(timeout=timeout)
     server.shutdown()
     server.server_close()
