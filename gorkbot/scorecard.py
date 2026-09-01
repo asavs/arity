@@ -48,10 +48,48 @@ class Scorecard:
     def __init__(self, store: Optional[RecordStore] = None):
         self.store = store or default_record_store()
         self._standings: dict[str, float] = {}  # key: "role:model" -> standing
+        self._observations: dict[str, int] = {}  # same keys -> verdicts that moved them
         self._load_from_store()
 
     def _key(self, role: str, model: str) -> str:
         return f"{role.lower()}:{model.lower()}"
+
+    def _derived_keys(
+        self,
+        role: str,
+        model: str,
+        signature: Optional[str] = None,
+        harness: Optional[str] = None,
+        tool_runner: Optional[str] = None,
+        skills: Optional[list[Any]] = None,
+    ) -> list[str]:
+        """Every standing key one verdict moves, role:model first.
+
+        Live updates and store replay both derive their keys here so the two can never
+        disagree about which axes a verdict scored.
+        """
+        keys = [self._key(role, model)]
+        if signature:
+            keys.append(signature.lower())
+        if harness:
+            keys.append(f"harness:{harness.lower()}:{model.lower()}")
+        if tool_runner:
+            keys.append(f"tools:{tool_runner.lower()}:{model.lower()}")
+        for sk in skills or []:
+            sk_name = sk.lower() if isinstance(sk, str) else getattr(sk, "name", str(sk)).lower()
+            keys.append(self._key(f"skill:{sk_name}", model))
+        return keys
+
+    def _apply_delta(self, keys: list[str], delta: float) -> float:
+        """Move every derived key by `delta`, clamped at 0; return the role:model standing.
+
+        Counting here and nowhere else is what makes replay reconstruct counts for free: live
+        updates and store replay both arrive through this one helper.
+        """
+        for key in keys:
+            self._standings[key] = max(0.0, self._standings.get(key, 10.0) + delta)
+            self._observations[key] = self._observations.get(key, 0) + 1
+        return self._standings[keys[0]]
 
     def get_standing(self, role_or_key: str, model: Optional[str] = None) -> float:
         """Get the accumulated standing for a role/model pair or a multidimensional signature key."""
@@ -59,6 +97,18 @@ class Scorecard:
             # Direct key lookup (e.g. 'builder:gemini-3.6:wire:ast_tools' or 'gemini-3.6')
             return self._standings.get(role_or_key.lower(), 10.0)
         return self._standings.get(self._key(_role_key(role_or_key), model), 10.0)
+
+    def get_observations(self, role_or_key: str, model: Optional[str] = None) -> int:
+        """How many verdicts moved this standing. 0 means the value is the 10.0 baseline, not evidence."""
+        if model is None:
+            return self._observations.get(role_or_key.lower(), 0)
+        return self._observations.get(self._key(_role_key(role_or_key), model), 0)
+
+    def least_observed(self, keys: list[str]) -> Optional[str]:
+        """The key with the fewest observations; ties broken by sorted key order, never dict order."""
+        if not keys:
+            return None
+        return min(sorted(keys), key=self.get_observations)
 
     def record_verdict(
         self,
@@ -87,37 +137,11 @@ class Scorecard:
         else:  # "failed"
             delta = -1.0
 
-        # 1. Update standard role:model key
-        key = self._key(role, model)
-        current = self.get_standing(role, model)
-        new_standing = max(0.0, current + delta)
-        self._standings[key] = new_standing
-
-        # 2. Update multidimensional combination signature if provided
-        sig_key = signature.lower() if signature else None
-        if sig_key:
-            sig_current = self._standings.get(sig_key, 10.0)
-            self._standings[sig_key] = max(0.0, sig_current + delta)
-
-        # 3. Update harness-specific standing (e.g. harness:wire:gemini-flash)
-        if harness:
-            h_key = f"harness:{harness.lower()}:{model.lower()}"
-            h_current = self._standings.get(h_key, 10.0)
-            self._standings[h_key] = max(0.0, h_current + delta)
-
-        # 4. Update tool runner standing (e.g. tools:ast_tools:gemini-flash)
-        if tool_runner:
-            t_key = f"tools:{tool_runner.lower()}:{model.lower()}"
-            t_current = self._standings.get(t_key, 10.0)
-            self._standings[t_key] = max(0.0, t_current + delta)
-
-        # 5. Update skill-specific standings (e.g. skill:pytest-tdd:gemini-flash)
-        if skills:
-            for sk in skills:
-                sk_name = sk.lower() if isinstance(sk, str) else getattr(sk, "name", str(sk)).lower()
-                sk_key = self._key(f"skill:{sk_name}", model)
-                sk_current = self._standings.get(sk_key, 10.0)
-                self._standings[sk_key] = max(0.0, sk_current + delta)
+        # Score every axis this verdict touches: role:model, the multidimensional signature,
+        # harness:<h>:<model>, tools:<t>:<model>, and skill:<s>:<model>.
+        new_standing = self._apply_delta(
+            self._derived_keys(role, model, signature, harness, tool_runner, skills), delta
+        )
 
         record = ScorecardRecord(
             model=model,
@@ -198,16 +222,41 @@ class Scorecard:
         return "\n".join(lines)
 
     def _load_from_store(self) -> None:
-        """Replay past scorecard records to restore standing state."""
+        """Replay past scorecard records to restore standing state.
+
+        Deltas are replayed rather than the persisted `standing_after` copied, because only the
+        role:model standing is persisted: copying it onto the signature key attributes a
+        role:model aggregate to one signature, and the harness/tools/skill axes have no
+        persisted absolute at all. Records must arrive in append order, since the clamp at 0
+        makes replay order-sensitive exactly as live updates are.
+        """
         if not hasattr(self.store, "query"):
             return
-        records = self.store.query("scorecard")
-        for rec in records:
+        for rec in self.store.query("scorecard"):
             role = rec.get("role", "")
             model = rec.get("model", "")
-            standing = rec.get("standing_after")
-            signature = rec.get("signature")
-            if role and model and standing is not None:
-                self._standings[self._key(role, model)] = float(standing)
-            if signature and standing is not None:
-                self._standings[signature.lower()] = float(standing)
+            if not role or not model:
+                continue
+            delta = rec.get("score_delta")
+            if delta is None:
+                # Legacy or foreign record: the persisted absolute is the only evidence there is.
+                # It is still exactly one verdict, so role:model counts it — but the derived keys
+                # it would have moved are unreconstructable, and inventing counts for them would
+                # claim evidence that was never persisted.
+                standing = rec.get("standing_after")
+                if standing is not None:
+                    key = self._key(role, model)
+                    self._standings[key] = float(standing)
+                    self._observations[key] = self._observations.get(key, 0) + 1
+                continue
+            self._apply_delta(
+                self._derived_keys(
+                    role,
+                    model,
+                    rec.get("signature"),
+                    rec.get("harness"),
+                    rec.get("tool_runner"),
+                    rec.get("skills"),
+                ),
+                float(delta),
+            )
