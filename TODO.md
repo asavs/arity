@@ -38,9 +38,11 @@ external reports; this file remains the maintainer's near-term roadmap.
       their own prompt, skills, runner, and denial set, and undeliverable messages are recorded as errors.
 - [ ] **Next release gate:** lift `message` into a role-bound control-plane wrapper around every
       tool-runner axis so sandbox, MCP, shell, and custom-runner races all preserve the same addressing
-      and recipient authority. Reserve the `message` schema, add correlated delivery records, and reject
-      non-forkable runner instances explicitly. Until then, communication is guaranteed only on the
-      default sandbox path and must not be claimed as invariant across `--variants tools`.
+      and recipient authority. Carry trusted recipient provenance, the requester's exact work root,
+      inherited record exclusions, and frozen-evidence taint across every hop. Reserve the `message`
+      schema, add correlated delivery records, and reject non-forkable runner instances explicitly.
+      Until then, communication and Scout delegation are guaranteed only on the default sandbox path
+      and must not be claimed as invariant across `--variants tools`.
 - [ ] Remove or bind the dormant `HandoffRequested` / `SpawnHandoff` event path to that same control
       plane; it currently reuses the sender's runner and is not a second valid delegation mechanism.
 
@@ -96,7 +98,29 @@ external reports; this file remains the maintainer's near-term roadmap.
 - [ ] Conference cost is ~99% context replay per turn; measure with a provider that reports cache hits.
 
 ## Scout
-- [ ] Headless browser (or a tiny VM) as the escalation past fetch_url's reader fallback. Concrete trigger:
+- [x] Ship the bounded Scout gate as a packaged-role contract: substantive-research delegation with
+      the frozen-Judge exception; host-issued trusted-role provenance; separate project and exact
+      requester-work roots; a sealed application-level runner; and a positive completed-history
+      projection with scope-local HMAC references. This is not OS isolation or secret scanning.
+- [x] Validate public DNS answers and every redirect before requesting it, bound fetch bodies and
+      returned text plus search query/result count, refuse unsafe project or work roots, and fail
+      closed for every trusted research personality on non-sandbox runners, CLI/OMP harnesses,
+      and provider graphs with CLI-owned fallback tools, even when no active scope was issued.
+- [x] Keep query-bearing target URLs out of the third-party reader proxy and restrict their
+      redirects to the same normalized origin; direct failure returns only a canned error.
+- [ ] Add an explicit trust-confirmation and provenance UI for project/home role definitions. Until
+      then they remain executable local configuration but cannot acquire privileged Scout research.
+- [ ] Pin a validated public address to the outbound connection (with correct TLS hostname handling)
+      or move fetching behind an equivalent broker. The current validation/connect split retains a
+      DNS-rebinding race; also decide whether the queryless third-party reader fallback should
+      require consent.
+- [ ] Add byte ceilings to web-search provider response bodies and rendered snippets; the current
+      query-length and result-count limits are not response-size limits.
+- [ ] Decide whether cross-session analytics require authenticated record provenance. The current
+      reader and lifecycle checks validate internal consistency, not who wrote a self-consistent row.
+- [ ] Add a headless browser in an isolated browser process or tiny VM as the escalation past
+      `fetch_url`'s reader fallback, with explicit roots, outbound destinations, download handling,
+      and no ambient browser cookies. Concrete trigger:
       https://grok.com/plans is a JS shell directly and Cloudflare 403s the reader proxy. Pricing pages for
       Google/OpenAI/Anthropic read fine without it; do not build for one page yet.
 - [ ] Scout citations: check URLs in the closing report against the fetch_url log (fetched vs. merely named).
@@ -112,9 +136,13 @@ external reports; this file remains the maintainer's near-term roadmap.
 ## Kernel
 - [ ] xAI wire read timeout (60s) tripped four times in one conference round on long tool-heavy turns; the
       grok CLI fallback then took 807s. Raise/stream the wire timeout before touching the CLI.
-- [ ] CLI harnesses (claude/codex/omp) bring their own tools, which bypass the role's denial set. cwd now
-      confines them to the sandbox (a live run wrote into the repo root before this), but that is containment,
-      not enforcement - the wiki's answer is a leaf user that cannot see the repo.
+- [x] Direct Tier-0 chat never calls a CLI-owned provider node: reject a bare CLI or unsafe primary
+      chain; when only a wrapper's fallback or alternate graph is unsafe, use its clean wire primary
+      and discard those branches before `.call()`.
+- [ ] Explicit race/candidate CLI harnesses (claude/codex/omp) for ordinary non-research roles still
+      bring their own tools, which bypass the role's denial set. Setting `cwd` selects their starting
+      directory but does not confine them; run such a leaf as an OS identity or in a VM/container
+      that cannot see the repository.
 - [ ] Provider replay compatibility is its own fragility axis (Gemini thought signatures, Claude tool ids and
       empty parts). Consider a per-provider replay test that round-trips one tool call.
 - [ ] Existing test suite writes into the real `.arity/records` in places (`test_terrarium.py` etc.);
