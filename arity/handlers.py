@@ -188,6 +188,22 @@ class GeminiModelProvider:
             )
 
 
+def _flatten_messages(messages: list[dict[str, Any]]) -> str:
+    """Render a chat message list as the single prompt string a CLI harness takes on argv."""
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "system" and content:
+            lines.append(f"[System Context]\n{content}\n")
+        elif role == "user" and content:
+            lines.append(f"{content}")
+        elif role == "assistant" and content:
+            lines.append(f"[Assistant]\n{content}")
+
+    return "\n".join(lines).strip()
+
+
 @dataclass
 class CLIModelProvider:
     """Harness / ACP Provider that executes tasks through authenticated CLI subscriptions (codex, claude, omp)."""
@@ -199,19 +215,7 @@ class CLIModelProvider:
     cwd: Optional[str] = None
 
     def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
-        # Assemble full prompt from system + user messages
-        lines: list[str] = []
-        for msg in effect.messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if role == "system" and content:
-                lines.append(f"[System Context]\n{content}\n")
-            elif role == "user" and content:
-                lines.append(f"{content}")
-            elif role == "assistant" and content:
-                lines.append(f"[Assistant]\n{content}")
-
-        full_prompt = "\n".join(lines).strip()
+        full_prompt = _flatten_messages(effect.messages)
 
         if self.harness == "codex":
             cmd = ["codex", "exec", "--skip-git-repo-check", full_prompt]
@@ -270,73 +274,6 @@ class CLIModelProvider:
                 retryable=True,
             )
 
-
-
-@dataclass
-class OMPModelProvider:
-    """Harness provider executing tasks via the Oh My Pi (omp) subagent harness."""
-    model: str = "claude-3-7-sonnet"
-    timeout: float = 120.0
-    cwd: Optional[str] = None  # see CLIModelProvider.cwd
-
-    def call(self, effect: CallModel) -> ModelCompleted | ModelFailed:
-        lines: list[str] = []
-        for msg in effect.messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if role == "system" and content:
-                lines.append(f"[System Context]\n{content}\n")
-            elif role == "user" and content:
-                lines.append(f"{content}")
-            elif role == "assistant" and content:
-                lines.append(f"[Assistant]\n{content}")
-
-        full_prompt = "\n".join(lines).strip()
-        cmd = ["omp", full_prompt]
-
-        # Windows installs CLIs as .cmd shims; without a shell they need their resolved path.
-        cmd[0] = shutil.which(cmd[0]) or cmd[0]
-        try:
-            # No shell and no stdin: a CLI that wants to go interactive (login prompt, TUI) fails
-            # fast instead of waiting on a terminal that isn't there. Without shell=True the
-            # timeout kills the CLI itself, not a shell wrapper whose child keeps the pipes open.
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                cwd=self.cwd,
-            )
-            raw_output = proc.stdout or ""
-            if proc.returncode != 0 and not raw_output.strip():
-                return ModelFailed(
-                    error=f"OMP harness failed (exit code {proc.returncode}): {proc.stderr}",
-                    seat_id=f"omp:{self.model}",
-                    retryable=False,
-                )
-
-            output = raw_output.strip()
-            return ModelCompleted(
-                content=output,
-                tool_calls=[],
-                usage={"prompt_tokens": len(full_prompt) // 4, "completion_tokens": len(output) // 4},
-                finish_reason="stop",
-                seat_id=f"omp:{self.model}",
-            )
-        except subprocess.TimeoutExpired:
-            return ModelFailed(
-                error=f"OMP harness timed out after {self.timeout}s",
-                seat_id=f"omp:{self.model}",
-                retryable=True,
-            )
-        except Exception as e:
-            return ModelFailed(
-                error=f"OMP execution failed: {str(e)}",
-                seat_id=f"omp:{self.model}",
-                retryable=True,
-            )
 
 def create_model_provider(seat: Any) -> ModelProvider:
     """Factory creating the appropriate ModelProvider for any given Seat (Wire with Harness Fallback)."""

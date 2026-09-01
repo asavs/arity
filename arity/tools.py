@@ -20,6 +20,12 @@ from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
 
 
+USER_DELIVERY_MARKER = "[Delivered to Asa]"
+"""Cross-module contract: a ToolRunner prefixes ``message(to="user")`` output with this and the
+dispatcher recovers a kernel's spoken answer by it. The text is frozen — candidates see it and
+past trial records carry it."""
+
+
 class PathTraversalError(Exception):
     """Raised when a path escapes the allowed workspace boundary."""
     pass
@@ -421,7 +427,7 @@ class SandboxToolRunner(ToolRunner):
         def message_tool(to: str, text: str) -> str:
             target = to.lower().strip()
             if target in ("user", "human", "asa"):
-                return f"[Delivered to Asa]: {text}"
+                return f"{USER_DELIVERY_MARKER}: {text}"
             if self.message_router:
                 return self.message_router(target, text)
             return f"[Message queued for {target}]: {text}"

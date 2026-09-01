@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 
 from arity.roles import BUILDER_ROLE, REVIEWER_ROLE
 from arity.tools import (
+    USER_DELIVERY_MARKER,
     McpToolAdapter,
     PathTraversalError,
     SandboxToolRunner,
@@ -93,6 +94,22 @@ class TestSandboxToolRunner(unittest.TestCase):
         )
         self.assertTrue(res_denied_path.is_error)
         self.assertIn("denied access to path", res_denied_path.output)
+
+    def test_message_to_user_carries_the_shared_delivery_marker(self):
+        res = self.runner.execute(
+            ExecuteTool(
+                call_id="call_msg",
+                name="message",
+                arguments={"to": "user", "text": "the answer is 42"},
+            )
+        )
+        self.assertFalse(res.is_error)
+        self.assertTrue(res.output.startswith(USER_DELIVERY_MARKER))
+        self.assertEqual(
+            res.output.split(f"{USER_DELIVERY_MARKER}: ", 1)[-1], "the answer is 42"
+        )
+        # Candidates see this text and past trial records carry it, so it is not free to change.
+        self.assertEqual(USER_DELIVERY_MARKER, "[Delivered to Asa]")
 
     def test_mcp_adapter_schema_and_execution(self):
         adapter = McpToolAdapter(

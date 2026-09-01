@@ -1135,10 +1135,10 @@ def _fmt_tests(tr: Optional[dict[str, Any]]) -> tuple[str, str]:
 
 def default_wire_capable(s: Seat) -> bool:
     """A seat whose provider can call tools. A bare CLI seat can only narrate work it cannot do."""
-    from .handlers import CLIModelProvider, OMPModelProvider
+    from .handlers import CLIModelProvider
     try:
         from .wire import create_wire_model_provider
-        return not isinstance(create_wire_model_provider(s), (CLIModelProvider, OMPModelProvider))
+        return not isinstance(create_wire_model_provider(s), CLIModelProvider)
     except Exception:
         return False
 

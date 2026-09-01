@@ -55,6 +55,25 @@ class TestModelProviders(unittest.TestCase):
             self.assertIn("Hello from Codex!", res.content)
             self.assertEqual(res.seat_id, "codex:gpt-5.6-sol")
 
+    def test_cli_provider_omp_execution(self):
+        provider = CLIModelProvider(harness="omp", model="claude-3-7-sonnet")
+        effect = CallModel(
+            messages=[{"role": "user", "content": "test prompt"}],
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "\x1b[?25l\x1b[1mHello from OMP!\x1b[0m\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            res = provider.call(effect)
+            self.assertIsInstance(res, ModelCompleted)
+            # The omp seat gets the same TUI-escape cleaning as every other harness.
+            self.assertEqual(res.content, "Hello from OMP!")
+            self.assertEqual(res.seat_id, "omp:claude-3-7-sonnet")
+            self.assertEqual(mock_run.call_args.args[0][1], "test prompt")
+
     def test_create_model_provider_factory(self):
         seat_gemini = Seat(id="s1", provider="gemini", endpoint="", model="gemini-3.6-flash", api_key="k1")
         p1 = create_model_provider(seat_gemini)
@@ -67,6 +86,11 @@ class TestModelProviders(unittest.TestCase):
         seat_custom = Seat(id="s3", provider="custom-api", endpoint="https://api.openai.com/v1", model="gpt-4o")
         p3 = create_model_provider(seat_custom)
         self.assertIsInstance(p3, OpenAIModelProvider)
+
+        seat_omp = Seat(id="s4", provider="omp", endpoint="", model="claude-3-7-sonnet")
+        p4 = create_model_provider(seat_omp)
+        self.assertIsInstance(p4, CLIModelProvider)
+        self.assertEqual(p4.harness, "omp")
 
 if __name__ == "__main__":
     unittest.main()
