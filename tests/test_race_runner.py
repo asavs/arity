@@ -21,7 +21,7 @@ from arity.race import (
     resolve_candidates,
     run_race,
 )
-from arity.roles import BUILDER_ROLE, TESTER_ROLE, RoleRegistry
+from arity.roles import BUILDER_ROLE, TEST_ENGINEER_ROLE, RoleRegistry
 from arity.scorecard import Scorecard
 from arity.tasks import TaskBank, load_task_dir
 from arity.terrarium import (
@@ -196,7 +196,7 @@ class TestArchivistJudgement(unittest.TestCase):
         self.assertTrue(all(not r.workspace_path.exists() for r in results))
 
 
-class TestContextAxisAndTester(unittest.TestCase):
+class TestContextAxisAndTestEngineer(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.base = Path(self.tmp.name)
@@ -221,24 +221,30 @@ class TestContextAxisAndTester(unittest.TestCase):
         self.assertNotIn("PARENT", json.dumps(fresh_first))
         self.assertEqual(fresh_first[-1]["content"], "child brief")
 
-    def test_tester_authors_hidden_tests_before_the_race(self):
-        tester_src = "from lru_cache import LRUCache\n\ndef test_contains():\n    c = LRUCache(1)\n    c.put('a', 1)\n    assert 'a' in c\n"
-        tester = CandidateSpec(seat=placeholder_seats()[0], role=TESTER_ROLE, name="tester",
-                               custom_model_provider=ScriptedProvider({"test_by_tester.py": tester_src}, "Wrote tests.", "t"))
+    def test_test_engineer_authors_hidden_tests_before_the_race(self):
+        test_engineer_src = "from lru_cache import LRUCache\n\ndef test_contains():\n    c = LRUCache(1)\n    c.put('a', 1)\n    assert 'a' in c\n"
+        test_engineer = CandidateSpec(
+            seat=placeholder_seats()[0], role=TEST_ENGINEER_ROLE, name="test-engineer",
+            custom_model_provider=ScriptedProvider(
+                {"test_by_test_engineer.py": test_engineer_src}, "Wrote tests.", "t"
+            ),
+        )
         builder = CandidateSpec(seat=placeholder_seats()[0], role=BUILDER_ROLE, name="builder",
                                 custom_model_provider=ScriptedProvider({"lru_cache.py": GOOD_LRU}, "Created lru_cache.py.", "b"))
         task = TaskRecord(brief="lru")
-        winner, results, _ = self.dispatcher.race(task=task, candidates=[builder], archivist=ImpartialArchivist(store=self.store), tester=tester)
-        self.assertIn("test_by_tester.py", task.hidden_tests)
+        winner, results, _ = self.dispatcher.race(
+            task=task, candidates=[builder], archivist=ImpartialArchivist(store=self.store),
+            test_engineer=test_engineer,
+        )
+        self.assertIn("test_by_test_engineer.py", task.hidden_tests)
         self.assertEqual(results[0].test_results["hidden"]["passed"], 1)
-        self.assertIsNotNone(results[0].tester_result)
-        self.assertEqual(results[0].tester_result.role.name, "tester")
+        self.assertIsNotNone(results[0].test_engineer_result)
+        self.assertEqual(results[0].test_engineer_result.role.name, "test-engineer")
 
-    def test_tester_is_a_real_role_not_a_reviewer_alias(self):
+    def test_test_engineer_is_a_canonical_role(self):
         reg = RoleRegistry()
-        self.assertEqual(reg.get("tester").name, "tester")
-        self.assertIn("test-engineering", reg.get("tester").skills)
-        self.assertEqual(reg.get("test_engineer").name, "tester")
+        self.assertEqual(reg.get("test-engineer").name, "test-engineer")
+        self.assertIn("test-engineering", reg.get("test-engineer").skills)
 
 
 class TestTaskBankAndPresets(unittest.TestCase):
@@ -381,12 +387,16 @@ class TestTypePacks(unittest.TestCase):
         self.assertEqual(reg.get("developer:python"), dev)  # cached, same object
         self.assertIsNone(reg.get("developer:cobol"))
 
-    def test_same_pack_attaches_to_tester_and_reviewer(self):
+    def test_test_engineer_shares_language_packs_while_judge_remains_base(self):
         reg = RoleRegistry()
-        self.assertEqual(reg.get("reviewer:python").skills, reg.get("developer:python").skills)
-        self.assertEqual(reg.get("tester:python").type_name, "python")
-        self.assertEqual(reg.with_type(reg.get("reviewer"), "rust").name, "reviewer:rust")
-        self.assertEqual(reg.with_type(reg.get("reviewer"), None).name, "reviewer")
+        developer = reg.get("developer:python")
+        test_engineer = reg.get("test-engineer:python")
+        judge = reg.get("judge")
+        self.assertEqual(test_engineer.type_name, "python")
+        self.assertEqual(test_engineer.verify, developer.verify)
+        self.assertIsNone(reg.get("judge:python"))
+        self.assertIs(reg.with_type(judge, "rust"), judge)
+        self.assertIs(reg.with_type(judge, None), judge)
 
     def test_task_tags_pick_the_type_and_aliases_default_to_python(self):
         reg = RoleRegistry()
@@ -400,12 +410,12 @@ class TestTypePacks(unittest.TestCase):
         self.assertEqual(rust.verify["hidden_dir"], "tests")
         self.assertTrue(rust.verify["test_command"].startswith("cargo test"))
 
-    def test_race_on_a_task_uses_typed_roles_for_builder_tester_and_judge(self):
+    def test_race_on_a_task_uses_typed_roles_for_builder_and_test_engineer(self):
         with TemporaryDirectory() as d:
-            rep = run_race(RaceConfig(task_name="lru_cache", mock=True, role="developer", tester=True,
+            rep = run_race(RaceConfig(task_name="lru_cache", mock=True, role="developer", test_engineer=True,
                                       judges=["gpt-5.6-sol"], review="always", workspace_root=Path(d) / "ws"))
         self.assertEqual({c.role.name for c in rep.candidates}, {"developer:python"})
-        self.assertEqual(rep.results[0].tester_result.role.name, "tester:python")
+        self.assertEqual(rep.results[0].test_engineer_result.role.name, "test-engineer:python")
         self.assertTrue(any("type 'python' from task tags" in n for n in rep.notes))
 
 
