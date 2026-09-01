@@ -81,11 +81,7 @@ def configured_store_spec() -> StoreSpec:
     """Resolve the same backend and path used by ``default_record_store``."""
     from .tools import get_config_value
 
-    configured = (
-        get_config_value("ARITY_STORE")
-        or get_config_value("ARITY_STORE")
-        or "jsonl"
-    )
+    configured = get_config_value("ARITY_STORE") or "jsonl"
     if configured.lower() == "sqlite":
         return StoreSpec("sqlite", Path(".arity/records.db"))
     # Preserve the writable store's historical behavior: only ``sqlite`` opts

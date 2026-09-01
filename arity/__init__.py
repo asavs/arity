@@ -1,12 +1,8 @@
-"""Arity — a small, composable trial kernel for autonomous agent harnesses.
-
-The ``arity`` import namespace is retained for compatibility.
-"""
+"""Arity — a small, composable trial kernel for autonomous agent harnesses."""
 import logging
 
 # Attach NullHandler to the package root so the library never configures logging for its host (A12-2)
 logging.getLogger("arity").addHandler(logging.NullHandler())
-
 from ._version import __version__
 from .diagnostics import get_data_loss_count, get_data_loss_reasons, record_data_loss, reset_data_loss_count
 from .handlers import (
@@ -91,7 +87,7 @@ from .evidence import (
 )
 from .pulse import CacheEconomics, CadenceModel, PulseAction, PulseEngine
 from .transports import RedphoneInbox, RedphoneMessage, WebhookTransport
-from .orchestrator import ArityOrchestrator, ArityOrchestrator, OrchestrationResponse
+from .orchestrator import ArityOrchestrator, OrchestrationResponse
 from .runtime import Runtime
 from .record_readers import (
     JsonlRecordReader,
@@ -278,7 +274,6 @@ __all__ = [
     "RedphoneMessage",
     "WebhookTransport",
     # Orchestrator
-    "ArityOrchestrator",
     "ArityOrchestrator",
     "OrchestrationResponse",
 ]

@@ -68,8 +68,7 @@ arity --help
 arity run --mock --arity 3 --task lru_cache
 ```
 
-`--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the compatibility fallback `ARITY_CONCURRENCY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
-
+`--arity` is a positive requested maximum, not a promise to duplicate candidates until N seats exist. Resolution order is explicit `--arity`, then `ARITY`, then the command default. Reports expose both the requested maximum and the number of unique candidates actually resolved.
 ### Inspect persisted trials
 
 ```bash
@@ -80,8 +79,7 @@ arity trial replay <trial-id> --json
 
 These commands are read-only: they do not run agents, consult providers, repair records, or create a missing store. `show` returns graph-ready metadata without candidate output or artifact bodies; `replay --json` is the explicit full local journal view and can include task briefs, candidate output, test results, and frozen artifact contents. Treat replay output as sensitive. Add `--json` to any inspection command for a versioned envelope. Exit codes are `0` for valid/empty, `1` for an operational read failure, `2` for command syntax, `3` for a missing trial, `4` for a safe partial projection containing a newer schema/event, and `5` for corruption.
 
-Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default), including the documented `ARITY_STORE` compatibility fallback and `.arity/` paths.
-
+Inspection follows the active store selection (`ARITY_STORE=sqlite` or JSONL by default) and `.arity/` paths.
 ### Authenticate provider harnesses
 
 Prefer credentials managed by an official installed harness when one is available. Arity can
@@ -103,7 +101,6 @@ Google, OpenAI, and xAI reuse that configuration during automatic refresh; Anthr
 refresh is not currently implemented. That makes `~/.arity/auth.json` especially sensitive: it
 is plaintext, owner-only (`0600`) on POSIX when Arity writes it, and protected only by the
 destination directory's ACLs on Windows. See [SECURITY.md](SECURITY.md) before using these adapters.
-
 ### Python API (`arity` namespace)
 ```python
 from arity import Runtime, LocalToolRunner, OpenAIModelProvider
@@ -131,8 +128,6 @@ with open_record_reader() as reader:
 print(selected.status, selected.to_dict()["projection"])
 ```
 
-`TrialInspection.events` retains the complete physical journal, while `TrialInspection.replay` stops at the last prefix this installed version can interpret safely.
-
 ### Run Tests
 ```bash
 python -m pytest -q tests
@@ -144,10 +139,9 @@ The clean installed-wheel acceptance gate is separate from the source suite:
 python acceptance/verify_installed.py
 ```
 
-## Compatibility Boundary
+## Configuration & State
 
-The distribution and primary command are named **Arity**. The Python API remains available only from the `arity` package (`import arity` is not provided); `python -m arity` and the `arity` console command remain supported entry points. `.arity/` remains Arity's active state/config location: credentials, records, configuration, and local definition overrides are read or written there. `ARITY_*` settings remain compatibility fallbacks where `ARITY_*` counterparts exist; no state migration is performed. Historical release notes keep the names used when they were published.
-
+Arity stores credentials, records, configuration, and local definition overrides in `~/.arity/` and local `.arity/` directories.
 ## Security
 
 Arity is designed for a trusted single-user workstation. It is not an OS sandbox or a

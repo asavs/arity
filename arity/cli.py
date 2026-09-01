@@ -260,7 +260,7 @@ def show_status():
         status_str = "\033[1;32mLIVE\033[0m" if not s.presence else "\033[1;33mLOCKED (PRESENCE)\033[0m"
         acc_str = f" ({s.account.split('@')[0]})" if s.account else ""
         prov_str = f"{s.provider}{acc_str}"
-        harness_label = "arity" if s.harness == "arity" else s.harness
+        harness_label = s.harness
         print(f"  • {prov_str:25} | {s.model:24} | harness: {harness_label:8} | {status_str} | ${s.base_price_per_m:.4f}/M")
     print("\n\033[1;33m[2. Empirical Scorecard Standings (Axiom 9)]\033[0m")
     standings = getattr(orchestrator.scorecard, "_standings", {})
@@ -502,7 +502,7 @@ def handle_run_command(args: argparse.Namespace) -> None:
     from .race import render_report, run_front_door
     judges = [j.strip() for j in args.judges.split(",") if j.strip()] if getattr(args, "judges", None) else None
     # A background/piped run must never block on the secretary's question.
-    noninteractive = os.environ.get("ARITY_NONINTERACTIVE", os.environ.get("ARITY_NONINTERACTIVE")) == "1"
+    noninteractive = os.environ.get("ARITY_NONINTERACTIVE") == "1"
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and not noninteractive
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
@@ -560,10 +560,7 @@ def main() -> int:
             render_brand_mark(width=23, height=9, seeds=55)
             + f"\n\nArity {__version__}: a small, provider-agnostic trial kernel for agent harnesses."
         ),
-        epilog=(
-            "Python API: import arity (there is no arity import package). "
-            "The arity command remains available as a compatibility alias."
-        ),
+        epilog="Python API: import arity.",
     )
     parser.add_argument("--version", action="version", version=f"Arity {__version__}")
     subparsers = parser.add_subparsers(dest="command")
@@ -641,7 +638,7 @@ def main() -> int:
         "--arity", "-a", "--candidates", "-n", dest="candidates", type=_positive_arity_arg, default=None,
         help=(
             "Positive maximum candidate count; may resolve fewer unique seats "
-            "(precedence: this flag, ARITY, compatibility ARITY_CONCURRENCY, then 3)"
+            "(precedence: this flag, ARITY, then 3)"
         ),
     )
     run_parser.add_argument(

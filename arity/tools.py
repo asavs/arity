@@ -493,7 +493,7 @@ def resolve_arity(explicit: Optional[int] = None, *, default: int = 1) -> int:
     """Resolve the requested maximum arity: explicit, ``ARITY``, compatibility fallback, default."""
     if explicit is not None:
         return positive_int(explicit, name="arity")
-    for key in ("ARITY", "ARITY_CONCURRENCY"):
+    for key in ("ARITY", "ARITY"):
         configured = get_config_value(key)
         if configured is not None:
             label = key if key == "ARITY" else f"{key} (legacy)"

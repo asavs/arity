@@ -25,7 +25,6 @@ version = { attr = "arity._version.__version__" }
 
 [project.scripts]
 arity = "arity.cli:main"
-
 [project.urls]
 Homepage = "https://github.com/asavs/arity"
 Repository = "https://github.com/asavs/arity"

@@ -112,8 +112,7 @@ def normalize_tool_runner(obj: Any) -> str:
 def normalize_harness(obj: Any) -> str:
     """Canonical scorecard name for a harness axis value."""
     raw = _label(obj).lower()
-    return {"codex": "cli", "claude": "cli", "arity": "arity"}.get(raw, raw)
-
+    return {"codex": "cli", "claude": "cli"}.get(raw, raw)
 
 def skill_names(skills: list[Any]) -> list[str]:
     return [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in skills]
@@ -723,9 +722,9 @@ class TerrariumDispatcher:
         if not candidates:
             return []
 
-        # Legacy ARITY_CONCURRENCY remains a parallel-worker safety cap.
+        # Legacy ARITY remains a parallel-worker safety cap.
         from .tools import get_config_value
-        cap = get_config_value("ARITY_CONCURRENCY")
+        cap = get_config_value("ARITY")
         if cap and str(cap).isdigit() and int(cap) > 0:
             max_workers = min(max_workers, int(cap))
 

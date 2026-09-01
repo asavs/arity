@@ -106,7 +106,7 @@ class ArityOrchestrator:
         curr_time = now if now is not None else time.time()
         self._last_turn_time = curr_time
 
-        # API argument > ARITY > legacy ARITY_CONCURRENCY > unary chat.
+        # API argument > ARITY > legacy ARITY > unary chat.
         effective_arity = resolve_arity(candidates_per_task, default=1)
 
         # 1. Post to red phone public address (Axiom 10)
@@ -226,6 +226,4 @@ class ArityOrchestrator:
 
         return actions
 
-
-# Compatibility: the pre-Arity public class name remains importable.
-ArityOrchestrator = ArityOrchestrator
+# End of orchestrator module
