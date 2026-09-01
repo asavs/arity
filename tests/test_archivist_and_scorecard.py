@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from arity.handlers import JsonlRecordStore
-from arity.archivist import ArchivistEntry, ImpartialArchivist
+from arity.archivist import ArchivistEntry, ImpartialArchivist, extract_structured_file_declaration
 from arity.ledger import Seat
 from arity.roles import BUILDER_ROLE
 from arity.scorecard import Scorecard
@@ -100,6 +100,46 @@ class TestArchivistAndScorecard(unittest.TestCase):
         self.assertIn("missing.sql", entry.discrepancy_details or "")
 
         # Scorecard standing should have dropped
+        self.assertLess(self.scorecard.get_standing(res.role.name, "nvidia/nemotron"), 10.0)
+
+    def test_structured_file_declarations_are_parsed_exactly(self):
+        self.assertEqual(
+            extract_structured_file_declaration('{"files": ["src/app.py", "tests/test_app.py"]}'),
+            ["src/app.py", "tests/test_app.py"],
+        )
+        self.assertEqual(
+            extract_structured_file_declaration("files:\n- src/app.py\n- tests/test_app.py"),
+            ["src/app.py", "tests/test_app.py"],
+        )
+        self.assertEqual(
+            extract_structured_file_declaration("[files]\nsrc/app.py\ntests/test_app.py"),
+            ["src/app.py", "tests/test_app.py"],
+        )
+
+    def test_structured_missing_file_triggers_discrepancy_penalty(self):
+        cand_ws = self.ws / "cand_structured"
+        cand_ws.mkdir(parents=True, exist_ok=True)
+        (cand_ws / "present.py").write_text("value = 1\n")
+        res = TerrariumCandidateResult(
+            candidate_id="cand_structured",
+            task_id="task_structured",
+            seat=self.seat_nemotron,
+            role=BUILDER_ROLE,
+            final_state=State(session_id="cand_structured", status=Status.IDLE),
+            output='{"files": ["present.py", "missing.py"]}',
+            self_report="Created unrelated_claim.py.",
+            tokens_used=100,
+            duration_seconds=1.0,
+            workspace_path=cand_ws,
+            status="completed",
+        )
+
+        entry = self.archivist.audit(res)
+
+        self.assertEqual(entry.false_claims, ["missing.py"])
+        self.assertIn("missing.py", entry.discrepancy_details or "")
+        self.assertTrue(entry.discrepancy)
+        self.assertEqual(entry.verdict, "discrepancy")
         self.assertLess(self.scorecard.get_standing(res.role.name, "nvidia/nemotron"), 10.0)
 
     def test_evaluate_trial_picks_verified_winner(self):

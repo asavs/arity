@@ -57,6 +57,7 @@ from .scorecard import Scorecard
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .terrarium import CONTEXT_MODES, CandidateSpec, TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .transports import RedphoneInbox
 from .trial_events import TrialJournal
 from .tools import resolve_arity
 from .types import CallModel, ModelCompleted, StoreRecord
@@ -848,7 +849,11 @@ def run_race(cfg: RaceConfig) -> RaceReport:
         from_role="Asa",
         to_role=role.name,
         hidden_tests=dict(race_task.hidden_tests) if race_task else {},
-        metadata={"module": race_task.module, "entrypoint": race_task.entrypoint} if race_task else {},
+        metadata={
+            "module": race_task.module,
+            "entrypoint": race_task.entrypoint,
+            "task_key": race_task.name,
+        } if race_task else {"task_key": brief},
     )
     journal = TrialJournal(store, task.id)
     journal.append(
@@ -1226,6 +1231,7 @@ def cast_seats(
     brief: str,
     requested: int,
     *,
+    task_key: Optional[str] = None,
     ledger: Optional[SeatLedger] = None,
     scorecard: Optional[Any] = None,
     mode: str = SMART,
@@ -1255,7 +1261,7 @@ def cast_seats(
             ledger=SeatLedger(initial_seats=seats, auto_seed=False), scorecard=scorecard
         )
         return composer.cast(
-            role, brief, candidates_count=count, now=now,
+            role, task_key or brief, candidates_count=count, now=now,
             mode=mode, seed=seed, distinct_on="model",
         )
 
@@ -1607,6 +1613,7 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
     try:
         decision, pool, pool_notes = cast_seats(
             cast_role, brief, requested_arity,
+            task_key=task_name or brief,
             ledger=placeholder_ledger if mock else None,
             scorecard=scorecard,
             mode=cast_mode, seed=cast_seed,
@@ -1615,7 +1622,9 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
     except RuntimeError as exc:
         cast_notes.append(f"{exc} Using placeholder seats (run `arity auth login`).")
         decision, pool, pool_notes = cast_seats(
-            cast_role, brief, requested_arity, ledger=placeholder_ledger,
+            cast_role, brief, requested_arity,
+            task_key=task_name or brief,
+            ledger=placeholder_ledger,
             mode=cast_mode, seed=cast_seed, wire_capable=None,
         )
     cast_notes += pool_notes
@@ -1661,9 +1670,40 @@ def run_front_door(brief: str, *, task_name: Optional[str] = None, role: str = "
         )
     asked = False
     resolution = getattr(rep, "resolution", None)
-    if resolution and not resolution.resolved and rep.judgements and judges_split(rep) and interactive:
-        human_pick(rep, ask=ask, printer=printer)
-        asked = True
+    if resolution and not resolution.resolved and rep.judgements and judges_split(rep):
+        if interactive:
+            human_pick(rep, ask=ask, printer=printer)
+            asked = True
+        else:
+            candidate_letters = {
+                letter: candidate_id
+                for judgement in rep.judgements
+                for letter, candidate_id in (judgement.get("key") or {}).items()
+            }
+            letters_by_candidate = {
+                candidate_id: letter for letter, candidate_id in candidate_letters.items()
+            }
+            split_details = [
+                {
+                    "judge": judgement.get("judge"),
+                    "first_choice": judgement["order"][0],
+                    "first_choice_letter": letters_by_candidate.get(judgement["order"][0]),
+                    "order": list(judgement["order"]),
+                }
+                for judgement in rep.judgements
+                if judgement.get("parsed") and judgement.get("order")
+            ]
+            RedphoneInbox(store=record_store).post(
+                channel="review",
+                sender="arity",
+                text=f"Judge review split on trial {rep.task.id}: {rep.judgements}",
+                kind="alert",
+                metadata={
+                    "candidate_letters": candidate_letters,
+                    "split_details": split_details,
+                },
+            )
+            rep.notes.append("review split recorded in redphone review inbox")
     delivery = deliver(rep, out_dir=out_dir)
     if underfilled:
         delivery.receipt = f"arity {actual_arity}/{requested_arity} resolved · {delivery.receipt}"

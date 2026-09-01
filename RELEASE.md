@@ -8,6 +8,58 @@ Architecture correction: `transition` mutates `State` and emits effect descripti
 I/O-free, not referentially pure. Verification, archival, and blind review are built-in trial
 stages; `Observer` is a telemetry hook.
 
+## Arity 0.5.0 — The Casting Engine
+
+**Release Date:** 2026-09-01
+
+Arity now unifies trial execution, quota economics, empirical scorecard rankings, and unattended
+governance into a single deterministic casting and trial loop. The front door (`arity run`) routes
+through the casting engine; rankings order by average delta rather than permanent incumbent total;
+and silent swallows are replaced with a strict three-class reliability policy.
+
+### What changed:
+
+1. **The Casting Engine & Front Door (`arity/composer.py`, `arity/race.py`, `arity/cli.py`)**
+   - Separated into two distinct questions: Question B (economics and quota filtering) and Question A
+     (empirical scorecard aptitude ordering).
+   - Three casting modes: `smart` (high average delta first with an exploration slot for the least-observed
+     eligible model when $N \ge 2$), `brokie` (lowest dynamic effective cost first), and `chaos`
+     (randomized assignment for unbiased de-confounding, reproducible via `--seed`).
+   - `arity run` routes directly through `CastingComposer`. Wire-capable seats take precedence; CLI-only
+     seats fill fallback slots and never displace available wire seats.
+
+2. **Pre-flight Quota Checks & Stable Task Costing (`arity/composer.py`, `arity/ledger.py`)**
+   - Task token costs are estimated from historical `terrarium_trial` runs, falling back to `trial_axes`
+     and then a 5,000-token conservative default.
+   - `trial_axes` records persist a stable `task_key` (named task bank identifier or prompt brief).
+   - Quota seats below the estimate are excluded before firing live calls; metered API seats and rolled-over
+     quota windows remain eligible.
+
+3. **Anti-Incumbency Scorecard by Average Delta (`arity/scorecard.py`, `arity/archivist.py`)**
+   - Replaced running total standings with average delta: $(\text{standing} - 10.0) / n$.
+   - Confidence tiebreaking uses observation count ($n$). Models with zero observations are explicitly
+     unobserved rather than impersonating a mediocre incumbent.
+
+4. **Structured Discrepancy Reporting (`arity/archivist.py`, `arity/terrarium.py`)**
+   - Candidate prompts instruct models to emit an exact `files: [path1, path2]` closing manifest.
+   - The archivist parses structured declarations (JSON, inline list, YAML bullet list, TOML section)
+     and flags missing declared files as discrepancy penalties (-2.5 pts).
+   - Free-form prose parsing remains as an archival fallback.
+
+5. **Three-Class Quiet Failure Policy & Data Loss Reporting (`arity/diagnostics.py`, `arity/runtime.py`)**
+   - Benign cosmetic fallbacks remain silent with documented comments.
+   - Programming bugs (`TypeError`, `AttributeError`) raise immediately instead of being swallowed.
+   - Store write failures log warnings and increment a global data-loss counter surfaced in trial output.
+
+6. **Asynchronous Split Escalation on Redphone (`arity/race.py`, `arity/transports.py`)**
+   - When facts tie and judges split in non-interactive mode (`--non-interactive` or piped), Arity
+     posts an escalation alert to `RedphoneInbox(channel="review")` with blind candidate mappings and
+     judge rankings instead of silently falling back to archivist order.
+
+7. **Deterministic Transition Engine & Wire Providers (`arity/transition.py`, `arity/wire.py`)**
+   - `transition()` is pure and deterministic: state mutation and effect emissions are decoupled from I/O.
+   - Wire callers for OpenAI, xAI, and Google Antigravity automatically refresh credentials when expired.
+
 ## Arity 0.4.0 — Frozen evidence, replayable trials
 
 **Release Date:** 2026-08-30

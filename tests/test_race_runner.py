@@ -218,10 +218,12 @@ class TestContextAxisAndTester(unittest.TestCase):
         fork_first = fork.seen[0]
         self.assertEqual(fork_first[0], {"role": "system", "content": "PARENT-SYS"})
         self.assertEqual(fork_first[1]["content"], "PARENT-TURN")
-        self.assertEqual(fork_first[-1]["content"], "child brief")
+        self.assertTrue(fork_first[-1]["content"].startswith("child brief"))
+        self.assertIn("files: [path1, path2]", fork_first[-1]["content"])
         fresh_first = fresh.seen[0]
         self.assertNotIn("PARENT", json.dumps(fresh_first))
-        self.assertEqual(fresh_first[-1]["content"], "child brief")
+        self.assertTrue(fresh_first[-1]["content"].startswith("child brief"))
+        self.assertIn("files: [path1, path2]", fresh_first[-1]["content"])
 
     def test_tester_authors_hidden_tests_before_the_race(self):
         tester_src = "from lru_cache import LRUCache\n\ndef test_contains():\n    c = LRUCache(1)\n    c.put('a', 1)\n    assert 'a' in c\n"

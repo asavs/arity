@@ -585,6 +585,13 @@ class TerrariumDispatcher:
             initial_state.messages = [dict(m) for m in task.parent_messages]
 
         user_prompt = compiled_brief.user_prompt
+
+        user_prompt += (
+            "\n\n## Closing report\n"
+            "When you finish, state every file you created or changed in one exact "
+            "structured line: `files: [path1, path2]`. Use `files: []` if you "
+            "changed no files; do not list files that are not in your workspace."
+        )
         if spec.context_adapter is not None:
             adapted = spec.context_adapter.apply(
                 ContextEnvelope(
@@ -954,7 +961,8 @@ class TerrariumDispatcher:
                 f"Notes sent to you by peers:\n{notes}\n\n"
                 f"Produce the final draft in YOUR workspace: keep what is best, borrow from peers with credit in a "
                 f"comment, drop what is worse. You may send short notes to peers with message(to=\"peer:{others.split(', ')[0]}\") "
-                f"- they arrive next round. Do not edit `{PEERS_DIR}/`. Finish with a closing report naming every file you changed.\n\n"
+                f"- they arrive next round. Do not edit `{PEERS_DIR}/`. Finish with a closing report naming every file you changed "
+                "and an exact `files: [path1, path2]` list (or `files: []` if none).\n\n"
                 f"## Original brief\n{task.brief}"
             )
 
