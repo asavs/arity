@@ -6,11 +6,19 @@ Axiom 7: Prompt cache boundary preservation.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
+
+from . import cache_economics
+
+# A lock is held by a person, and people close laptops. Without an expiry, a session that dies
+# before releasing its seat would withhold that seat from casting forever.
+PRESENCE_TTL_SECONDS = 12 * 3600.0
 
 
 @dataclass
@@ -27,7 +35,7 @@ class Seat:
     cycle_seconds: float = 86400.0     # 24h cycle
     reset_deadline: float = 0.0        # Unix timestamp when quota resets
     base_price_per_m: float = 0.0001   # Reference cost per 1M tokens
-    warm_window_seconds: float = 300.0 # Assured warm cache TTL
+    warm_window_seconds: float = 300.0 # Assured warm cache TTL (seeded seats: cache_economics)
     presence: bool = False             # True if human or active session is currently typing here
     workspace_boundary: str = "default"
     api_key: Optional[str] = None
@@ -102,8 +110,14 @@ class SeatLedger:
             pass
         return {}
 
-    def __init__(self, initial_seats: Optional[list[Seat]] = None, auto_seed: bool = True):
+    def __init__(
+        self,
+        initial_seats: Optional[list[Seat]] = None,
+        auto_seed: bool = True,
+        presence_path: Optional[Path] = None,
+    ):
         self._seats: dict[str, Seat] = {}
+        self.presence_path = Path(presence_path) if presence_path else (Path.home() / ".arity" / "presence.json")
         if initial_seats:
             for s in initial_seats:
                 self.register(s)
@@ -149,11 +163,52 @@ class SeatLedger:
         if seat and seat.kind == "quota":
             seat.remaining = max(0.0, seat.remaining - tokens)
 
-    def set_presence(self, seat_id: str, is_present: bool) -> None:
-        """Set or release human presence on a seat."""
+    def read_presence_locks(self, now: Optional[float] = None) -> dict[str, float]:
+        """Seat id -> lock expiry, for locks that have not aged out."""
+        curr_time = now if now is not None else time.time()
+        try:
+            raw = json.loads(self.presence_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        locks: dict[str, float] = {}
+        for seat_id, expires in raw.items():
+            try:
+                expiry = float(expires)
+            except (TypeError, ValueError):
+                continue
+            if expiry > curr_time:
+                locks[str(seat_id)] = expiry
+        return locks
+
+    def set_presence(self, seat_id: str, is_present: bool, now: Optional[float] = None) -> bool:
+        """Set or release human presence on a seat, and record it for other processes.
+
+        A lock has to outlive the process that took it: `arity lock` exits immediately, and
+        every later process re-seeds its ledger from scratch. Returns False when this ledger
+        has no such seat, so a caller can say so rather than reporting a lock it never took.
+        """
         seat = self._seats.get(seat_id)
-        if seat:
-            seat.presence = is_present
+        if not seat:
+            return False
+        seat.presence = is_present
+        curr_time = now if now is not None else time.time()
+        locks = self.read_presence_locks(curr_time)
+        if is_present:
+            locks[seat_id] = curr_time + PRESENCE_TTL_SECONDS
+        else:
+            locks.pop(seat_id, None)
+        self.presence_path.parent.mkdir(parents=True, exist_ok=True)
+        self.presence_path.write_text(json.dumps(locks, indent=2), encoding="utf-8")
+        return True
+
+    def _apply_persisted_presence(self, now: Optional[float] = None) -> None:
+        """Re-apply locks taken by other processes, so every seeded ledger honors them."""
+        for seat_id in self.read_presence_locks(now):
+            seat = self._seats.get(seat_id)
+            if seat:
+                seat.presence = True
 
     def _seed_from_env(self) -> None:
         now = time.time()
@@ -272,3 +327,13 @@ class SeatLedger:
                     api_key=nim_key,
                 )
             )
+
+        # A seeded seat takes its provider's assured warm window (Axiom 7). Seats a caller
+        # hands to __init__ are left alone: only this path invents the value.
+        for seat in self._seats.values():
+            terms = cache_economics.lookup(seat.provider)
+            if terms is not None:
+                seat.warm_window_seconds = terms.warm_window_seconds
+
+        # Last, so it covers every seat any branch above registered.
+        self._apply_persisted_presence()
