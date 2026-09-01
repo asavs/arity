@@ -7,8 +7,9 @@ from pathlib import Path
 import arity
 from arity.handlers import JsonlRecordStore
 from arity.ledger import Seat, SeatLedger
-from arity.roles import RoleRegistry
+from arity.roles import Role, RoleRegistry
 from arity.terrarium import CandidateSpec, TaskRecord, TerrariumDispatcher
+from arity.tiers import TierLevel
 from arity.tools import SandboxToolRunner
 from arity.types import CallModel, ExecuteTool, ModelCompleted
 
@@ -71,6 +72,17 @@ def test_implementation_personalities_share_the_engineering_team() -> None:
         role = registry.get(name)
         assert role is not None
         assert role.team == "engineering"
+
+
+def test_engineer_and_designer_are_tier_one_peers_and_personalities_can_message() -> None:
+    registry = RoleRegistry()
+    engineer = registry.get("engineer")
+    designer = registry.get("designer")
+
+    assert engineer is not None
+    assert designer is not None
+    assert engineer.tier == designer.tier == TierLevel.TIER_1
+    assert all(role.can_use_tool("message") for role in registry.list_roles())
 
 
 def test_message_tool_accepts_every_registered_personality_without_an_allowlist(
@@ -137,6 +149,50 @@ class _UnexpectedFallbackProvider:
             content="SECRETARY_FALLBACK_WAS_SPAWNED",
             usage={"prompt_tokens": 1, "completion_tokens": 1},
         )
+
+
+class _CustomPeerProvider:
+    def call(self, effect: CallModel) -> ModelCompleted:
+        return ModelCompleted(
+            content="CUSTOM_PEER_REPLIED",
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
+        )
+
+
+def test_custom_registered_personality_is_exactly_addressable_through_terrarium(
+    tmp_path: Path,
+) -> None:
+    registry = RoleRegistry()
+    registry.register(Role(
+        name="cartographer",
+        description="Maps a bounded problem space.",
+        system_prompt="Map the requested problem space.",
+    ))
+    seat = Seat(provider="test", model="scripted")
+    store = JsonlRecordStore(tmp_path / "records")
+    dispatcher = TerrariumDispatcher(
+        ledger=SeatLedger(initial_seats=[seat], auto_seed=False),
+        store=store,
+        roles=registry,
+        base_workspace=tmp_path / "terrarium",
+        model_factory=lambda _seat: _CustomPeerProvider(),
+        quiet=True,
+    )
+
+    result = dispatcher.dispatch_single(
+        task=TaskRecord(brief="Ask the custom teammate for help."),
+        candidate_or_seat=CandidateSpec(
+            seat=seat,
+            role=registry.get("engineer"),
+            custom_model_provider=_AskUnknownRecipient("cartographer"),
+        ),
+        run_verification=False,
+    )
+
+    custom_trials = store.query("terrarium_trial", role="cartographer")
+    assert result.output == "CUSTOM_PEER_REPLIED"
+    assert len(custom_trials) == 1
+    assert custom_trials[0]["role"] == "cartographer"
 
 
 def test_unknown_message_recipient_errors_instead_of_resolving_to_secretary(
