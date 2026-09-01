@@ -85,6 +85,26 @@ def test_engineer_and_designer_are_tier_one_peers_and_personalities_can_message(
     assert all(role.can_use_tool("message") for role in registry.list_roles())
 
 
+def test_test_engineer_reads_local_evidence_and_delegates_external_research() -> None:
+    role = RoleRegistry().get("test-engineer")
+
+    assert role is not None
+    assert role.can_use_tool("read_file")
+    assert role.can_use_tool("message")
+    assert not role.can_use_tool("fetch_url")
+    assert not role.can_use_tool("web_search")
+
+
+def test_judge_cannot_change_rerun_or_expand_frozen_evidence() -> None:
+    role = RoleRegistry().get("judge")
+
+    assert role is not None
+    assert role.can_use_tool("read_file")
+    assert role.can_use_tool("message")
+    for tool_name in ("write_file", "run_command", "fetch_url", "web_search"):
+        assert not role.can_use_tool(tool_name)
+
+
 def test_message_tool_accepts_every_registered_personality_without_an_allowlist(
     tmp_path: Path,
 ) -> None:
