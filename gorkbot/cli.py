@@ -42,7 +42,7 @@ def safe_print(*args, **kwargs) -> None:
         except Exception:
             pass
 
-from .ledger import Seat, SeatLedger
+from .ledger import PRESENCE_TTL_SECONDS, Seat, SeatLedger
 from .orchestrator import ArityOrchestrator
 from .spirals import render_brand_mark
 from .tools import positive_int, resolve_arity
@@ -200,22 +200,25 @@ def interactive_chat():
 
     orchestrator = ArityOrchestrator()
     last_turn_time: Optional[float] = None
-    current_model = "gemini-3.6-flash"
-    warm_window = 300.0  # 5-minute sliding cache window (Axiom 7)
+    current_seat: Optional[Seat] = None
 
     while True:
         # Calculate remaining cache warmth
         now = time.time()
         if last_turn_time is None:
             cache_tag = "\033[1;30m[Cache: Cold Start]\033[0m"
+        elif current_seat is None or current_seat.warm_window_seconds <= 0:
+            # No countdown exists to show: a direct Secretary turn does not report which seat
+            # answered, and Gemini/xAI assure no warm window at all (Axiom 7).
+            cache_tag = "\033[1;33m[Cache: No Assured Window]\033[0m"
         else:
             elapsed = now - last_turn_time
-            remaining = int(warm_window - elapsed)
+            remaining = int(current_seat.warm_window_seconds - elapsed)
             if remaining > 0:
                 mins, secs = divmod(remaining, 60)
-                cache_tag = f"\033[1;32m[Cache Hot: {mins}m {secs:02d}s | {current_model}]\033[0m"
+                cache_tag = f"\033[1;32m[Cache Hot: {mins}m {secs:02d}s | {current_seat.model}]\033[0m"
             else:
-                cache_tag = f"\033[1;31m[Cache Evicted | {current_model}]\033[0m"
+                cache_tag = f"\033[1;31m[Cache Evicted | {current_seat.model}]\033[0m"
 
         try:
             user_input = input(f"{cache_tag}\n\033[1;33mAsa:\033[0m ").strip()
@@ -233,7 +236,8 @@ def interactive_chat():
 
         if resp.delegated_task and resp.winning_candidate:
             role_name = resp.delegated_task.to_role
-            model_used = resp.winning_candidate.seat.model
+            current_seat = resp.winning_candidate.seat
+            model_used = current_seat.model
             verdict = resp.archivist_entries[0].verdict.upper() if resp.archivist_entries else "OK"
             print(f"\n\033[1;35m[{role_name} on {model_used} | {latency:.2f}s | Archivist: {verdict}]\033[0m")
             if resp.winning_candidate.output:
@@ -337,16 +341,62 @@ def show_roles():
     print("\033[1;35m====================================================\033[0m\n")
 
 
+def set_seat_presence(seat_id: str, locked: bool) -> int:
+    """Take or release a presence lock on a seat (Axiom 36) and report what actually happened."""
+    orchestrator = ArityOrchestrator()
+    try:
+        found = orchestrator.ledger.set_presence(seat_id, locked)
+    except OSError as exc:
+        print(f"[Arity] Could not record the presence lock: {exc}", file=sys.stderr)
+        return 1
+    if not found:
+        known = ", ".join(sorted(s.id for s in orchestrator.ledger.list_seats())) or "none"
+        print(f"[Arity] No seat '{seat_id}' in the ledger. Known seats: {known}", file=sys.stderr)
+        return 1
+    if locked:
+        hours = int(PRESENCE_TTL_SECONDS // 3600)
+        print(
+            f"\033[1;33m[Presence Lock]\033[0m Seat '{seat_id}' is now locked for human use "
+            f"(expires in {hours}h, or run 'arity unlock {seat_id}')."
+        )
+    else:
+        print(f"\033[1;32m[Presence Unlock]\033[0m Seat '{seat_id}' released for autonomous bot casting.")
+    return 0
+
+
+PROVIDER_ALIASES = {
+    # What a person types -> the key credentials are actually stored under. `login`, `logout`,
+    # and the argparse choices all read this one table; they drifted apart when they did not.
+    "google": "google-antigravity",
+    "agy": "google-antigravity",
+    "antigravity": "google-antigravity",
+    "openai": "openai-codex",
+    "codex": "openai-codex",
+    "chatgpt": "openai-codex",
+    "xai": "xai-oauth",
+    "grok": "xai-oauth",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+}
+
+
 def handle_auth_command(args: argparse.Namespace) -> int:
     """Handle Arity authentication subcommands."""
     from .auth import (
         AuthConfigurationError,
         TokenStore,
         fetch_antigravity_quota,
+        login_anthropic,
         login_google_antigravity,
         login_openai_codex,
         login_xai_grok,
     )
+    login_fns = {
+        "google-antigravity": login_google_antigravity,
+        "openai-codex": login_openai_codex,
+        "xai-oauth": login_xai_grok,
+        "anthropic": login_anthropic,
+    }
     store = TokenStore()
     action = getattr(args, "auth_action", "status") or "status"
 
@@ -355,7 +405,7 @@ def handle_auth_command(args: argparse.Namespace) -> int:
         print("\n\033[1;36m=================== Arity Auth Status ===================\033[0m")
         if not creds:
             print("  No saved or discovered credentials found.")
-            print("  Run \033[1;33marity auth login <google|openai|xai>\033[0m or \033[1;33marity auth import\033[0m.")
+            print("  Run \033[1;33marity auth login <google|openai|xai|anthropic>\033[0m or \033[1;33marity auth import\033[0m.")
         else:
             for prov, data in creds.items():
                 email = data.get("email", "unknown")
@@ -394,40 +444,24 @@ def handle_auth_command(args: argparse.Namespace) -> int:
         print()
 
     elif action == "login":
-        from .auth import login_anthropic
         provider = (getattr(args, "provider", "") or "").lower()
+        login = login_fns.get(PROVIDER_ALIASES.get(provider, provider))
+        if login is None:
+            print(
+                f"[Arity auth] Unknown provider '{provider}'.",
+                file=sys.stderr,
+            )
+            return 2
         try:
-            if provider in ("google", "agy", "antigravity"):
-                login_google_antigravity()
-            elif provider in ("openai", "codex", "chatgpt"):
-                login_openai_codex()
-            elif provider in ("xai", "grok"):
-                login_xai_grok()
-            elif provider in ("anthropic", "claude"):
-                login_anthropic()
-            else:
-                print(
-                    f"[Arity auth] Unknown provider '{provider}'.",
-                    file=sys.stderr,
-                )
-                return 2
+            login()
         except AuthConfigurationError as exc:
             print(f"[Arity auth] {exc}", file=sys.stderr)
             return 1
 
     elif action == "logout":
         provider = (getattr(args, "provider", "") or "").lower()
-        # Map friendly name to key
-        prov_map = {
-            "google": "google-antigravity",
-            "agy": "google-antigravity",
-            "antigravity": "google-antigravity",
-            "openai": "openai-codex",
-            "codex": "openai-codex",
-            "xai": "xai-oauth",
-            "grok": "xai-oauth",
-        }
-        key = prov_map.get(provider, provider)
+        # Unrecognized names pass through, so a stored key ("google-antigravity:me@x.com") works.
+        key = PROVIDER_ALIASES.get(provider, provider)
         if store.delete_credential(key):
             print(f"\033[1;32m[Arity Auth]\033[0m Removed credential for '{key}'.")
         else:
@@ -624,7 +658,7 @@ def main() -> int:
     auth_subparsers.add_parser("import", help="Auto-import active sessions from OMP and Codex")
     
     login_cmd = auth_subparsers.add_parser("login", help="Authenticate with a provider")
-    login_cmd.add_argument("provider", type=str, choices=["google", "agy", "openai", "codex", "xai", "grok", "anthropic", "claude"], help="Provider to authenticate")
+    login_cmd.add_argument("provider", type=str, choices=sorted(PROVIDER_ALIASES), help="Provider to authenticate")
     logout_cmd = auth_subparsers.add_parser("logout", help="Log out from a provider")
     logout_cmd.add_argument("provider", type=str, help="Provider to remove")
 
@@ -663,13 +697,9 @@ def main() -> int:
     elif args.command == "auth":
         return handle_auth_command(args)
     elif args.command == "lock":
-        orchestrator = ArityOrchestrator()
-        orchestrator.ledger.set_presence(args.seat_id, True)
-        print(f"\033[1;33m[Presence Lock]\033[0m Seat '{args.seat_id}' is now locked for human use.")
+        return set_seat_presence(args.seat_id, True)
     elif args.command == "unlock":
-        orchestrator = ArityOrchestrator()
-        orchestrator.ledger.set_presence(args.seat_id, False)
-        print(f"\033[1;32m[Presence Unlock]\033[0m Seat '{args.seat_id}' released for autonomous bot casting.")
+        return set_seat_presence(args.seat_id, False)
     elif args.command == "redphone":
         show_redphone()
     elif args.command == "run":

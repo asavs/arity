@@ -1,17 +1,48 @@
 """Arity composer — casting engine and multi-seat decision maker.
 
+One engine answering two questions with different domains:
+
+- Question A, "who is good at this?", ranges over *models*. Inferred from scorecard
+  evidence, carries uncertainty, needs exploration to stay fresh.
+- Question B, "whose tokens should I spend?", ranges over *seats* — quota window, reset
+  deadline, warm cache, presence lock. Measured, not inferred.
+
+B filters, A orders. The two are never summed: summing them requires an exchange rate
+between a ten-point standing and dollars-per-million, and no such rate exists. B may veto
+A; A may never veto B. A mode selects which question *orders*, not how much each counts,
+so there are no weights and no coefficients here to tune.
+
 Axiom 3: The model behind a bot is chosen per prompt, on evidence (Provider, Model, Effort).
 Axiom 3 Corollary: Many kernels per task (A/B testing candidates on real tasks).
+Axiom 7: A conversation expected to go quiet must not be seated where the assured warm
+window is shorter than the silence.
 Axiom 36: Never choose a seat a human is live on.
 """
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .ledger import Seat, SeatLedger
 from .roles import Role, VOICE_ROLE
+
+BROKIE = "brokie"
+SMART = "smart"
+CHAOS = "chaos"
+CASTING_MODES = (BROKIE, SMART, CHAOS)
+
+# Signature dimensions a Seat carries. The signature's fourth axis, the tool runner, is
+# assigned downstream by the terrarium and is not a property of a seat, so casting cannot
+# serve a distinctness request on it.
+DISTINCT_DIMENSIONS = ("model", "provider", "harness")
+
+BASELINE_STANDING = 10.0
+
+# Below this the exploration slot would be the whole cast, and smart mode would never
+# exploit what it knows.
+MIN_COUNT_FOR_EXPLORATION = 2
 
 
 @dataclass(frozen=True)
@@ -21,6 +52,20 @@ class CastingDecision:
     primary_seat: Seat
     candidates: list[Seat] = field(default_factory=list)
     reason: str = ""
+    mode: str = SMART
+    seed: int = 0
+    requested_count: int = 1
+    distinct_on: Optional[str] = None
+    exploration_seat: Optional[Seat] = None
+    shortfall: Optional[str] = None
+
+    @property
+    def satisfied_count(self) -> int:
+        return len(self.candidates)
+
+    @property
+    def fully_satisfied(self) -> bool:
+        return self.shortfall is None
 
 
 # Default model aptitude preferences by role family
@@ -48,79 +93,203 @@ class CastingComposer:
         self.scorecard = scorecard
         self.aptitudes = aptitude_matrix or APTITUDE_MATRIX
 
+    # -- Question A: who is good at this? ------------------------------------------------
+
+    def _aptitude(self, role: Role, seat: Seat) -> float:
+        """Evidence for this model in this role, plus the role's skill deltas. Inferred."""
+        if not (self.scorecard and hasattr(self.scorecard, "get_standing")):
+            return BASELINE_STANDING
+        standing = self.scorecard.get_standing(role.name, seat.model)
+        for sk in getattr(role, "skills", ()) or ():
+            standing += self.scorecard.get_standing(f"skill:{sk}", seat.model) - BASELINE_STANDING
+        return standing
+
+    def _evidence_key(self, role: Role, seat: Seat) -> str:
+        """The scorecard key whose observation count says how much is known about this seat."""
+        key_name = getattr(role, "key_name", None) or role.name.replace(":", ".")
+        return f"{key_name}:{seat.model}".lower()
+
+    # -- Question B: whose tokens should I spend? -----------------------------------------
+
+    def _affordable(
+        self,
+        curr_time: float,
+        expected_idle_seconds: Optional[float],
+    ) -> tuple[list[Seat], list[str]]:
+        """Seats that can pay, and the reasons any were removed. Measured, never inferred."""
+        pool = self.ledger.list_available(now=curr_time, exclude_presence=True)
+        removals: list[str] = []
+        if not pool:
+            return [], ["no seat is both un-exhausted and free of a presence lock"]
+
+        if expected_idle_seconds is not None:
+            # A zero window is not a violation: a provider that assures nothing has no warm
+            # state to forfeit, so silence costs it nothing extra.
+            kept = [
+                s
+                for s in pool
+                if not (0.0 < s.warm_window_seconds < expected_idle_seconds)
+            ]
+            dropped = len(pool) - len(kept)
+            if dropped:
+                removals.append(
+                    f"{dropped} seat(s) whose assured warm window is shorter than the "
+                    f"{expected_idle_seconds:.0f}s expected idle"
+                )
+            pool = kept
+        return pool, removals
+
+    def _economic_order(self, pool: list[Seat], curr_time: float) -> list[Seat]:
+        """Spend what is about to evaporate: quota before metered, soonest reset first."""
+        return self.ledger.dying_soonest(candidates=pool, now=curr_time)
+
+    # -- Selection -------------------------------------------------------------------------
+
+    @staticmethod
+    def _pick(
+        ordered: list[Seat],
+        limit: int,
+        distinct_on: Optional[str],
+        chosen: list[Seat],
+    ) -> list[Seat]:
+        """Extend `chosen` up to `limit` seats, honoring the caller's distinctness request."""
+        taken = {s.id for s in chosen}
+        seen = {getattr(s, distinct_on) for s in chosen} if distinct_on else set()
+        picked = list(chosen)
+        for seat in ordered:
+            if len(picked) >= limit:
+                break
+            if seat.id in taken:
+                continue
+            if distinct_on:
+                value = getattr(seat, distinct_on)
+                if value in seen:
+                    continue
+                seen.add(value)
+            taken.add(seat.id)
+            picked.append(seat)
+        return picked
+
+    def _explore(
+        self,
+        role: Role,
+        ordered: list[Seat],
+        distinct_on: Optional[str],
+        chosen: list[Seat],
+    ) -> Optional[Seat]:
+        """The least-observed seat still eligible, so the leaders are not the only ones asked."""
+        taken = {s.id for s in chosen}
+        seen = {getattr(s, distinct_on) for s in chosen} if distinct_on else set()
+        eligible = [
+            s
+            for s in ordered
+            if s.id not in taken and not (distinct_on and getattr(s, distinct_on) in seen)
+        ]
+        if not eligible:
+            return None
+        if not (self.scorecard and hasattr(self.scorecard, "least_observed")):
+            return eligible[0]
+        by_key: dict[str, Seat] = {}
+        for seat in eligible:
+            by_key.setdefault(self._evidence_key(role, seat), seat)
+        key = self.scorecard.least_observed(list(by_key))
+        return by_key.get(key) if key else eligible[0]
+
     def cast(
         self,
         role: Role,
         task: str,
         candidates_count: int = 1,
         now: Optional[float] = None,
+        *,
+        mode: str = SMART,
+        seed: Optional[int] = None,
+        distinct_on: Optional[str] = None,
+        expected_idle_seconds: Optional[float] = None,
     ) -> CastingDecision:
-        """Select the best candidate seat(s) for a role and task based on empirical evidence and quota math."""
+        """Cast a role: economics filters the seats, the mode decides what orders them."""
+        if mode not in CASTING_MODES:
+            raise ValueError(f"Unknown casting mode {mode!r}; expected one of {CASTING_MODES}.")
+        if candidates_count < 1:
+            raise ValueError(f"candidates_count must be at least 1, got {candidates_count}.")
+        if distinct_on is not None and distinct_on not in DISTINCT_DIMENSIONS:
+            hint = (
+                " The tool runner is chosen by the terrarium, not carried by a seat."
+                if distinct_on == "tools"
+                else ""
+            )
+            raise ValueError(
+                f"Cannot cast distinct on {distinct_on!r}; a seat carries "
+                f"{DISTINCT_DIMENSIONS}.{hint}"
+            )
+
         curr_time = now if now is not None else time.time()
-        available_seats = self.ledger.list_available(now=curr_time, exclude_presence=True)
+        if seed is None:
+            seed = random.SystemRandom().getrandbits(32)
+        rng = random.Random(seed)
 
-        if not available_seats:
-            raise RuntimeError("No available seats found in ledger (all exhausted or presence-locked).")
+        pool, removals = self._affordable(curr_time, expected_idle_seconds)
+        if not pool:
+            raise RuntimeError(f"No castable seats: {'; '.join(removals)}.")
 
-        def evaluate_seat(seat: Seat) -> float:
-            """Higher score is better."""
-            # 1. Empirical Scorecard Standing (Axiom 9 & 3)
-            standing_score = 10.0
-            if self.scorecard and hasattr(self.scorecard, "get_standing"):
-                standing_score = self.scorecard.get_standing(role.name, seat.model)
-                if hasattr(role, "skills") and role.skills:
-                    for sk in role.skills:
-                        standing_score += (self.scorecard.get_standing(f"skill:{sk}", seat.model) - 10.0)
+        # Every ordering starts from the same deterministic floor, so a tie the mode does not
+        # break falls to seat id rather than to ledger insertion order.
+        base = sorted(pool, key=lambda s: s.id or "")
+        aptitude = {s.id: self._aptitude(role, s) for s in base}
 
-            # 2. Economic Opportunity ($C_eff near 0 gives bonus for expiring subscriptions)
-            eff_cost = seat.effective_cost(curr_time)
-            cost_penalty = eff_cost * 2.0  # Penalize high metered dollar cost
+        if mode == SMART:
+            # Economics is already the tiebreak because sorted() is stable.
+            ordered = sorted(self._economic_order(base, curr_time), key=lambda s: -aptitude[s.id])
+        elif mode == BROKIE:
+            ordered = self._economic_order(
+                sorted(base, key=lambda s: -aptitude[s.id]), curr_time
+            )
+        else:
+            ordered = list(base)
+            rng.shuffle(ordered)
 
-            # 3. Urgency bonus for expiring subscription quota
-            urgency_bonus = 0.0
-            if seat.kind == "quota":
-                time_left = seat.time_to_reset(curr_time)
-                if time_left < 3600:  # < 1 hour left
-                    urgency_bonus = 3.0
-                elif time_left < 14400:  # < 4 hours left
-                    urgency_bonus = 1.5
+        explores = mode == SMART and candidates_count >= MIN_COUNT_FOR_EXPLORATION
+        exploit_slots = candidates_count - 1 if explores else candidates_count
+        chosen = self._pick(ordered, exploit_slots, distinct_on, [])
 
-            return standing_score - cost_penalty + urgency_bonus
+        exploration_seat: Optional[Seat] = None
+        if explores:
+            exploration_seat = self._explore(role, ordered, distinct_on, chosen)
+            if exploration_seat is not None:
+                chosen.append(exploration_seat)
 
-        # Sort all available seats by score descending
-        ranked_seats = sorted(available_seats, key=evaluate_seat, reverse=True)
+        shortfall = None
+        if len(chosen) < candidates_count:
+            detail = f"{len(base)} seat(s) survived question B"
+            if distinct_on:
+                distinct_available = len({getattr(s, distinct_on) for s in base})
+                detail += f", holding {distinct_available} distinct {distinct_on} value(s)"
+            shortfall = (
+                f"requested {candidates_count}, satisfied {len(chosen)}: {detail}"
+            )
+            if removals:
+                shortfall += f" after removing {'; '.join(removals)}"
 
-        # Select candidates, prioritizing provider diversity for A/B trials
-        top_candidates: list[Seat] = []
-        seen_providers: set[str] = set()
-
-        # First pass: pick best seat per distinct provider
-        for seat in ranked_seats:
-            if seat.provider not in seen_providers:
-                top_candidates.append(seat)
-                seen_providers.add(seat.provider)
-                if len(top_candidates) >= candidates_count:
-                    break
-
-        # Second pass: fill remaining candidate slots if needed
-        if len(top_candidates) < candidates_count:
-            for seat in ranked_seats:
-                if seat not in top_candidates:
-                    top_candidates.append(seat)
-                    if len(top_candidates) >= candidates_count:
-                        break
-
-        primary = top_candidates[0]
+        primary = chosen[0]
         reason = (
-            f"Cast '{primary.id}' ({primary.model}) for role '{role.name}'. "
-            f"Scorecard standing: {self.scorecard.get_standing(role.name, primary.model) if self.scorecard else 10.0:.1f} pts, "
-            f"Effective cost: ${primary.effective_cost(curr_time):.4f}/M, "
-            f"Expiring in: {primary.time_to_reset(curr_time):.0f}s"
+            f"Cast '{primary.id}' ({primary.model}) for role '{role.name}' in {mode} mode "
+            f"(seed {seed}). Aptitude: {aptitude[primary.id]:.1f} pts, "
+            f"effective cost: ${primary.effective_cost(curr_time):.4f}/M, "
+            f"expiring in: {primary.time_to_reset(curr_time):.0f}s. "
+            f"{len(chosen)}/{candidates_count} slots filled"
+            + (f", distinct on {distinct_on}" if distinct_on else "")
+            + (f". Filtered: {'; '.join(removals)}" if removals else ".")
         )
 
         return CastingDecision(
             role=role,
             primary_seat=primary,
-            candidates=top_candidates,
+            candidates=chosen,
             reason=reason,
+            mode=mode,
+            seed=seed,
+            requested_count=candidates_count,
+            distinct_on=distinct_on,
+            exploration_seat=exploration_seat,
+            shortfall=shortfall,
         )

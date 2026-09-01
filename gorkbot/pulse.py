@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from . import cache_economics
 from .ledger import Seat, SeatLedger
 
 
@@ -25,32 +26,25 @@ class PulseAction:
 
 
 class CacheEconomics:
-    """Calculates prefix cache costs and cold-start penalties across providers (Axiom 7 / Survey)."""
-
-    # Multipliers: (cache_read_multiplier, cache_write_multiplier, base_price_per_m)
-    PROVIDER_PROFILES: dict[str, tuple[float, float, float]] = {
-        "anthropic": (0.10, 1.25, 3.00),  # Claude 3.5 Sonnet: 90% read discount, 1.25x write
-        "openai": (0.10, 1.25, 2.50),     # GPT-4o: 90% read discount, 1.25x write
-        "gemini": (0.10, 1.00, 0.10),     # Gemini Flash: 90% read discount
-        "nim": (0.25, 1.00, 0.05),        # Nemotron: low base price
-        "openrouter": (0.25, 1.00, 0.40),
-    }
+    """Prices prefix caches from the Axiom 7 table in `cache_economics` (the only copy)."""
 
     @classmethod
     def cold_cost(cls, provider: str, prefix_tokens: int) -> float:
-        """Calculate the dollar cost penalty of having to re-write a cold prompt prefix."""
-        read_mult, write_mult, base_price = cls.PROVIDER_PROFILES.get(provider.lower(), (0.10, 1.00, 1.00))
-        # Cost to write cold prefix minus cost if it were read warm
-        cold_write_cost = (prefix_tokens / 1_000_000.0) * base_price * write_mult
-        warm_read_cost = (prefix_tokens / 1_000_000.0) * base_price * read_mult
-        return max(0.0001, cold_write_cost - warm_read_cost)
+        """Calculate the dollar cost penalty of having to re-send a cold prompt prefix.
+
+        The wiki's cold-vs-warm penalty: a normal cold input turn minus the warm read it
+        replaces, so `cold_cost(provider, 100_000)` reproduces the published column.
+        """
+        terms = cache_economics.profile(provider)
+        lost_discount = terms.input_price_per_m * (1.0 - terms.cache_read_multiplier)
+        return max(0.0001, (prefix_tokens / 1_000_000.0) * lost_discount)
 
     @classmethod
     def ping_cost(cls, provider: str) -> float:
         """Cost of sending a 3-token keepalive ping ('hi luv u')."""
-        _, _, base_price = cls.PROVIDER_PROFILES.get(provider.lower(), (0.10, 1.00, 1.00))
+        terms = cache_economics.profile(provider)
         # 3 tokens input + 2 tokens output
-        return (5.0 / 1_000_000.0) * base_price
+        return (5.0 / 1_000_000.0) * terms.input_price_per_m
 
 
 class CadenceModel:
