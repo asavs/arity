@@ -1,9 +1,10 @@
 ---
 name: rust
-description: Rust toolkit, rules, and verification (stub - verify commands untested). Attaches to any role as role:rust.
+description: Rust toolkit, rules, and verification (stub - verify commands untested) for compatible personalities.
 skills: []
 test_command: cargo test --quiet
 test_globs: [tests/**/*.rs, src/**/*.rs]
+hidden_test_globs: [tests/**/*.rs]
 hidden_dir: tests
 hidden_command: cargo test --quiet --test '*'
 tags: [rust, cargo]

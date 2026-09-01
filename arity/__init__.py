@@ -62,6 +62,7 @@ from .tools import (
     PathTraversalError,
     SandboxToolRunner,
     SyntaxValidationError,
+    MessageDeliveryError,
     UnknownMessageRecipientError,
     resolve_sandbox_path,
 )
@@ -254,6 +255,7 @@ __all__ = [
     "McpToolAdapter",
     "PathTraversalError",
     "SyntaxValidationError",
+    "MessageDeliveryError",
     "UnknownMessageRecipientError",
     "resolve_sandbox_path",
     # Archivist & Scorecard

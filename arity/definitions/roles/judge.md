@@ -1,7 +1,8 @@
 ---
 name: judge
-description: Read-only judge who weighs trial candidates on evidence the archivist has already recorded. Domain comes from a type (judge:python, judge:rust).
+description: Read-only judge who weighs trial candidates on evidence the archivist has already recorded.
 tier: 3
+accepts_types: false
 skills: []
 denied_tools:
   - write_file

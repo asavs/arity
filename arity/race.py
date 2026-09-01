@@ -56,7 +56,7 @@ from .observations import (
     Observation,
     ObservationSubject,
 )
-from .roles import BUILDER_ROLE, TEST_ENGINEER_ROLE, Role, RoleRegistry
+from .roles import BUILDER_ROLE, JUDGE_ROLE, TEST_ENGINEER_ROLE, Role, RoleRegistry
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .telemetry import CachePolicyHint, UsageRecordingContext
@@ -1173,8 +1173,7 @@ def check_citations(text: str, key: dict[str, str], rep: RaceReport) -> dict[str
 def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher, seats: list[Seat]) -> list[dict[str, Any]]:
     from .roles import RoleRegistry
     roles = RoleRegistry()
-    # The Judge takes the same type as the builders: judge:python judges a Python race.
-    judge = roles.with_type(roles.get("judge"), (rep.candidates[0].role.type_name if rep.candidates and rep.candidates[0].role else None))
+    judge = roles.get("judge") or JUDGE_ROLE
     text, key = blind_bundle(rep)
     review_task = TaskRecord(
         brief=text,

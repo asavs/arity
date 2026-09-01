@@ -1,11 +1,12 @@
 ---
 name: python
-description: Python 3.13 toolkit, rules, and verification. Attaches to any role as role:python.
+description: Python 3.13 toolkit, rules, and verification for compatible personalities.
 skills:
   - python-development
   - pytest-tdd
 test_command: python -m pytest -v -p no:cacheprovider
 test_globs: [test_*.py, "*_test.py", tests/**/test_*.py]
+hidden_test_globs: ["**/test_*.py"]
 hidden_dir: .hidden_tests
 hidden_command: python -m pytest .hidden_tests -v -p no:cacheprovider
 tags: [python, pytest]

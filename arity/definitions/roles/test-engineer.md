@@ -3,6 +3,7 @@ name: test-engineer
 description: Builds trustworthy evidence by turning system claims into repeatable tests and evaluations. Domain mechanics come from a type (test-engineer:python, test-engineer:rust).
 tier: 2
 team: engineering
+accepts_types: true
 skills:
   - test-engineering
 denied_tools:

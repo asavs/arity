@@ -330,7 +330,7 @@ def show_roles():
         if role.denial_set.denied_paths:
             print(f"    Path Locks:    {', '.join(role.denial_set.denied_paths)}")
         print()
-    print("\033[1;35m  Types (attach to any role as role:type, e.g. developer:python, test-engineer:rust)\033[0m")
+    print("\033[1;35m  Types (attach to compatible personalities, e.g. developer:python, test-engineer:rust)\033[0m")
     for pack in registry.list_types():
         print(f"  \033[1;33m* {pack.name:20}\033[0m {pack.description}")
         print(f"    Skills:        {', '.join(pack.skills) or '-'}")
@@ -445,7 +445,7 @@ def handle_race_command(args: argparse.Namespace) -> None:
         prompt=getattr(args, "prompt", "") or "",
         task_name=getattr(args, "task", None),
         variants=getattr(args, "variants", None) or "models",
-        role=getattr(args, "role", None) or "builder",
+        role=getattr(args, "role", None) or "developer:python",
         test_command=getattr(args, "test_cmd", None),
         workers=int(getattr(args, "workers", 4) or 4),
         mock=bool(getattr(args, "mock", False)),
@@ -600,7 +600,7 @@ def main() -> int:
     race_parser.add_argument("prompt", type=str, nargs="?", default="", help="Ad-hoc task brief (or use --task)")
     race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `arity tasks`); brings hidden tests")
     race_parser.add_argument("--variants", "-v", type=str, default="models", help="Preset: models | harness | tools | skills | context, or custom 'model=..+harness=..+tools=..+skills=a/b+ctx=..' list")
-    race_parser.add_argument("--role", "-r", type=str, default="builder", help="Builder role (default: builder)")
+    race_parser.add_argument("--role", "-r", type=str, default="developer:python", help="Candidate personality, optionally typed (default: developer:python)")
     race_parser.add_argument("--test-engineer", action="store_true", help="Have the Test Engineer author hidden tests before the race")
     race_parser.add_argument("--test-cmd", type=str, default=None, help="Override the candidate's own test command")
     race_parser.add_argument("--workers", "-w", type=int, default=4, help="Max parallel candidates")

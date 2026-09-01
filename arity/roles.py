@@ -47,6 +47,7 @@ class Role:
     tier: int = 2  # 0 = Secretary, 1 = project peers, 2 = specialists, 3 = leaf workers
     team: str = ""
     skills: tuple[str, ...] = ()
+    accepts_types: bool = False
     allowed_tools: tuple[str, ...] = ()  # Empty means all non-denied tools are allowed
     denial_set: DenialSet = field(default_factory=DenialSet)
     system_prompt: str = ""
@@ -132,6 +133,7 @@ def parse_role_document(content: str) -> Role:
     tier = int(meta.get("tier", 2))
     team = str(meta.get("team", ""))
     skills = tuple(meta.get("skills", []))
+    accepts_types = str(meta.get("accepts_types", "false")).lower() not in ("false", "no", "off", "0")
     allowed_tools = tuple(meta.get("allowed_tools", []))
     denied_tools = tuple(meta.get("denied_tools", []))
     denied_paths = tuple(meta.get("denied_paths", []))
@@ -143,6 +145,7 @@ def parse_role_document(content: str) -> Role:
         tier=tier,
         team=team,
         skills=skills,
+        accepts_types=accepts_types,
         allowed_tools=allowed_tools,
         denial_set=DenialSet(
             denied_tools=denied_tools,
@@ -160,7 +163,7 @@ def load_role_from_file(path: Path) -> Role:
 
 
 # -----------------------------------------------------------------------------
-# Type packs: a language/domain toolkit that attaches to any role (role:type)
+# Type packs: a language/domain toolkit for compatible personalities (role:type)
 # -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -168,22 +171,27 @@ class TypePack:
     """What a role needs to work in one language or domain: skills, rules, and how to verify.
 
     A role is who you are and what you may not touch; a type is what you are working in.
-    developer:python, test-engineer:python and judge:python share one pack.
+    developer:python, test-engineer:python and engineer:python share one pack.
     """
     name: str
     description: str = ""
     skills: tuple[str, ...] = ()
     system_prompt: str = ""      # appended to the role's prompt under "# Type: <name>"
-    verify: dict[str, Any] = field(default_factory=dict)  # test_command, test_globs, hidden_dir, hidden_command
+    verify: dict[str, Any] = field(default_factory=dict)  # test commands/globs, including hidden-test authoring globs
     tags: tuple[str, ...] = ()   # task-bank tags that select this type automatically
 
 
 def parse_type_document(content: str) -> TypePack:
     from .tasks import split_frontmatter
     meta, body = split_frontmatter(content)
-    verify = {k: meta[k] for k in ("test_command", "test_globs", "hidden_dir", "hidden_command") if k in meta}
-    if isinstance(verify.get("test_globs"), str):
-        verify["test_globs"] = [verify["test_globs"]]
+    verify = {
+        k: meta[k]
+        for k in ("test_command", "test_globs", "hidden_test_globs", "hidden_dir", "hidden_command")
+        if k in meta
+    }
+    for key in ("test_globs", "hidden_test_globs"):
+        if isinstance(verify.get(key), str):
+            verify[key] = [verify[key]]
     return TypePack(
         name=str(meta.get("name", "unknown")).lower(),
         description=str(meta.get("description", "")),
@@ -196,6 +204,8 @@ def parse_type_document(content: str) -> TypePack:
 
 def compose(role: Role, pack: TypePack) -> Role:
     """role + type -> a new Role named role:type with the pack's skills, rules, and verification."""
+    if not role.accepts_types:
+        raise ValueError(f"Personality '{role.base_name}' does not accept type packs")
     skills = tuple(role.skills) + tuple(s for s in pack.skills if s not in role.skills)
     prompt = role.system_prompt.rstrip() + f"\n\n# Type: {pack.name}\n{pack.system_prompt.strip()}"
     return Role(
@@ -204,6 +214,7 @@ def compose(role: Role, pack: TypePack) -> Role:
         tier=role.tier,
         team=role.team,
         skills=skills,
+        accepts_types=role.accepts_types,
         allowed_tools=role.allowed_tools,
         denial_set=role.denial_set,
         system_prompt=prompt,
@@ -251,26 +262,49 @@ class RoleRegistry:
                 except Exception:
                     continue
 
-        # Setup clean alias mappings to canonical roles
-        if "secretary" in self._roles:
-            self._roles["voice"] = self._roles["secretary"]
-        # Python is the default developer type until another language is asked for by name.
-        if "developer" in self._roles and "python" in self._types:
-            for alias in ("python_developer", "builder", "coder"):
-                self._roles[alias] = self.get("developer:python")  # type: ignore[assignment]
-        elif "developer" in self._roles:
-            for alias in ("python_developer", "builder", "coder"):
-                self._roles[alias] = self._roles["developer"]
-        if "engineer" in self._roles:
-            self._roles["architect"] = self._roles["engineer"]
-        if "scout" in self._roles:
-            self._roles["recon"] = self._roles["scout"]
+        # Setup clean alias mappings to canonical roles.
+        for base_name in ("secretary", "developer", "engineer", "scout"):
+            self._refresh_role_aliases(base_name)
+
+    def _refresh_role_aliases(self, base_name: str) -> None:
+        role = self._roles.get(base_name)
+        if role is None:
+            return
+        retained_aliases = {
+            "secretary": ("voice",),
+            "engineer": ("architect",),
+            "scout": ("recon",),
+        }
+        for alias in retained_aliases.get(base_name, ()):
+            self._roles[alias] = role
+        if base_name == "developer":
+            self._refresh_developer_aliases()
+
+    def _refresh_developer_aliases(self) -> None:
+        developer = self._roles.get("developer")
+        if developer is None:
+            return
+        default_developer = developer
+        python_pack = self._types.get("python")
+        if python_pack is not None and developer.accepts_types:
+            default_developer = compose(developer, python_pack)
+            self._composed["developer:python"] = default_developer
+        for alias in ("python_developer", "builder", "coder"):
+            self._roles[alias] = default_developer
+
     def register(self, role: Role) -> None:
-        self._roles[role.name.lower()] = role
+        key = role.name.lower()
+        self._roles[key] = role
+        for composed_key in tuple(self._composed):
+            if composed_key.startswith(f"{key}:"):
+                del self._composed[composed_key]
+        self._refresh_role_aliases(key)
 
     def register_type(self, pack: TypePack) -> None:
         self._types[pack.name.lower()] = pack
         self._composed.clear()
+        if pack.name.lower() == "python":
+            self._refresh_developer_aliases()
 
     def get_type(self, name: str) -> Optional[TypePack]:
         return self._types.get(name.lower())
@@ -290,15 +324,15 @@ class RoleRegistry:
                 return self._composed[key]
             base_name, type_name = key.split(":", 1)
             base, pack = self._roles.get(base_name), self._types.get(type_name)
-            if base is None or pack is None:
+            if base is None or pack is None or not base.accepts_types:
                 return None
             self._composed[key] = compose(base, pack)
             return self._composed[key]
         return None
 
     def with_type(self, role: Role, type_name: Optional[str]) -> Role:
-        """Attach a type to a role by name (judge + 'python' -> judge:python); no-op if absent."""
-        if not type_name or role.type_name == type_name:
+        """Attach a type to a compatible personality; no-op when absent or incompatible."""
+        if not type_name or role.type_name == type_name or not role.accepts_types:
             return role
         return self.get(f"{role.base_name}:{type_name}") or role
 
@@ -343,9 +377,12 @@ class RoleRegistry:
             "developer:python": ("python", "pytest", "module", "class", "def "),
             "developer:rust": ("rust", "cargo", "crate"),
             "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
-            "engineer": ("architecture", "system design", "spec", "decompose"),
-            "test-engineer": ("verify tests", "run pytest", "check regression"),
-            "judge": ("audit code", "check pr", "code review"),
+            "engineer": ("architecture", "system design", "spec", "decompose", "technical audit", "design review"),
+            "test-engineer": (
+                "verify tests", "run pytest", "check regression", "audit code", "code review",
+                "review this code", "check pr", "pull request review", "evaluation design",
+            ),
+            "judge": ("frozen evidence", "blind bundle", "rank candidates", "adjudicate candidates"),
             "scout": ("recon", "find repo", "locate docs"),
         }
 
