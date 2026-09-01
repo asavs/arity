@@ -24,7 +24,12 @@ from .roles import BUILDER_ROLE, Role, RoleRegistry, SECRETARY_ROLE, VOICE_ROLE
 from .runtime import Runtime
 from .scorecard import Scorecard
 from .seams import ModelProvider, RecordStore, Transport
-from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
+from .terrarium import (
+    TaskRecord,
+    TerrariumCandidateResult,
+    TerrariumDispatcher,
+    _provider_without_cli_owned_fallbacks,
+)
 from .tiers import BriefCompiler, PredecessorAccounts
 from .tools import MessageDeliveryError, SandboxToolRunner, resolve_arity
 from .transports import RedphoneInbox
@@ -225,9 +230,7 @@ class ArityOrchestrator:
         )
 
         model_provider = self.terrarium._model_factory(primary_seat)
-        for cli in (model_provider, getattr(model_provider, "fallback", None)):
-            if cli is not None and hasattr(cli, "cwd"):
-                cli.cwd = str(session_workspace)
+        model_provider = _provider_without_cli_owned_fallbacks(model_provider)
         runtime = Runtime(
             model_provider=model_provider,
             tool_runner=tool_runner,

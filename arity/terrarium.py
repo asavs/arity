@@ -135,6 +135,29 @@ def _provider_has_cli_owned_tools(provider: Any) -> bool:
     return False
 
 
+def _provider_without_cli_owned_fallbacks(provider: Any) -> Any:
+    """Keep a safe wire primary while removing CLI-owned fallback graphs.
+
+    Direct Tier-0 chat cannot sandbox a CLI's built-in tools. A bare CLI is
+    therefore rejected. A wire wrapper remains usable by selecting its primary
+    provider and intentionally giving up every fallback/alternate branch.
+    """
+    current = provider
+    visited: set[int] = set()
+    while _provider_has_cli_owned_tools(current):
+        if current is None or id(current) in visited or hasattr(current, "cwd"):
+            raise ValueError(
+                "Direct Tier-0 personalities cannot run through CLI-owned tools"
+            )
+        visited.add(id(current))
+        current = getattr(current, "primary", None)
+        if current is None:
+            raise ValueError(
+                "Direct Tier-0 personalities cannot run through CLI-owned tools"
+            )
+    return current
+
+
 def skill_names(skills: list[Any]) -> list[str]:
     return [sk if isinstance(sk, str) else getattr(sk, "name", str(sk)) for sk in skills]
 
