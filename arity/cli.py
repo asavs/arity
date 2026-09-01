@@ -42,6 +42,7 @@ def safe_print(*args, **kwargs) -> None:
         except Exception:
             pass
 
+from .composer import CASTING_MODES, SMART
 from .ledger import PRESENCE_TTL_SECONDS, Seat, SeatLedger
 from .orchestrator import ArityOrchestrator
 from .spirals import render_brand_mark
@@ -506,7 +507,8 @@ def handle_run_command(args: argparse.Namespace) -> None:
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
         conference=args.conference, tester=args.tester, out_dir=_P(args.out) if args.out else None, mock=args.mock,
-        printer=safe_print, interactive=interactive, quiet=not args.verbose,
+        printer=safe_print, interactive=interactive, quiet=not args.verbose, cast_mode=args.cast,
+        cast_seed=args.cast_seed,
     )
     if args.json:
         safe_print(json.dumps({"delivery": delivery.to_dict(), "report": rep.to_dict()}, indent=2))
@@ -640,6 +642,20 @@ def main() -> int:
         help=(
             "Positive maximum candidate count; may resolve fewer unique seats "
             "(precedence: this flag, ARITY, compatibility ARITY_CONCURRENCY, then 3)"
+        ),
+    )
+    run_parser.add_argument(
+        "--cast", choices=list(CASTING_MODES), default=SMART,
+        help=(
+            "Which question orders the cast: smart (aptitude, with an exploration slot), "
+            "brokie (spend the quota about to evaporate), chaos (seeded random)"
+        ),
+    )
+    run_parser.add_argument(
+        "--cast-seed", type=int, default=None, metavar="SEED",
+        help=(
+            "Replay a recorded cast: the seed the trial printed and stored under `casting` "
+            "(an unseeded run records the seed it drew, so any cast can be replayed)"
         ),
     )
     run_parser.add_argument(

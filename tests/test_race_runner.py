@@ -17,8 +17,10 @@ from arity.race import (
     ScriptedProvider,
     _record_store_for_run,
     attach_mocks,
+    live_seats,
     placeholder_seats,
     resolve_candidates,
+    role_for_trial,
     run_race,
 )
 from arity.roles import BUILDER_ROLE, TESTER_ROLE, RoleRegistry
@@ -273,6 +275,44 @@ class TestTaskBankAndPresets(unittest.TestCase):
         models, _ = resolve_candidates("models", BUILDER_ROLE, seats)
         self.assertEqual([s.seat.model for s in models], [s.model for s in seats])
         self.assertEqual(len({s.harness_name for s in models}), 1)
+
+    def test_a_named_model_binds_to_its_own_exhausted_seat_rather_than_a_phantom(self):
+        # P2: variant resolution is not casting. Filtering the exhausted seat out here sent the
+        # name to Seat(provider="custom"), which resolves to whatever the default wire backend
+        # is — a silent rebinding to the wrong provider, where a 429 was the honest answer.
+        import time
+        exhausted = Seat(provider="google", model="gemini-3.6-flash", remaining=0.0,
+                         reset_deadline=time.time() + 3600.0)
+        locked = Seat(provider="openai", model="gpt-5.6-sol", presence=True)
+        ledger = SeatLedger(initial_seats=[exhausted, locked], auto_seed=False)
+        seats = live_seats(ledger)
+        self.assertEqual([s.model for s in seats], ["gemini-3.6-flash"])   # presence still filters
+        self.assertNotIn(exhausted.id, [s.id for s in ledger.list_available()])
+
+        specs, notes = resolve_candidates("model=gemini-3.6-flash", BUILDER_ROLE, seats)
+        self.assertIs(specs[0].seat, exhausted)
+        self.assertEqual(specs[0].seat.provider, "google")
+        self.assertFalse(any("no ledger seat provides" in n for n in notes))
+
+    def test_a_model_no_seat_provides_says_it_was_given_an_invented_seat(self):
+        specs, notes = resolve_candidates("model=nonesuch-9000", BUILDER_ROLE, placeholder_seats())
+        self.assertEqual(specs[0].seat.provider, "custom")
+        self.assertTrue(any("no ledger seat provides model 'nonesuch-9000'" in n for n in notes))
+
+    def test_a_variant_naming_no_model_still_rotates_through_the_seats_silently(self):
+        seats = placeholder_seats()
+        specs, notes = resolve_candidates("harness=cli,harness=omp", BUILDER_ROLE, seats)
+        self.assertEqual([s.seat.id for s in specs], [seats[0].id, seats[1].id])
+        self.assertFalse(any("no ledger seat provides" in n for n in notes))
+
+    def test_role_for_trial_attaches_the_tasks_type_before_anyone_scores(self):
+        task = TaskBank().get("lru_cache")
+        typed, notes = role_for_trial("developer", task, RoleRegistry())
+        self.assertEqual(typed.key_name, "developer.python")
+        self.assertEqual(notes, ["type 'python' from task tags -> developer:python"])
+        # An explicitly typed role is left alone, and so is a role with no task behind it.
+        self.assertEqual(role_for_trial("developer:python", task, RoleRegistry())[1], [])
+        self.assertEqual(role_for_trial("developer", None, RoleRegistry())[0].key_name, "developer")
 
     def test_custom_variant_grammar(self):
         specs, _ = resolve_candidates("model=gpt-5.6-sol+harness=cli+tools=mcp+skills=pytest-tdd/firecrawl-developer-index+ctx=fork,model=gemini-3.6-flash", BUILDER_ROLE, placeholder_seats())

@@ -87,6 +87,47 @@ class TestSeatLedgerAndComposer(unittest.TestCase):
         self.assertEqual(ranked[0].id, "gemini-expiring")
         self.assertEqual(ranked[1].id, "gpt-late")
         self.assertEqual(ranked[2].id, "openrouter-metered")
+        # Both quota deadlines are ahead of `now`: the ranking above is about time left in a
+        # live window, and says nothing about a window that already rolled over.
+        for seat in (self.seat_expiring_soon, self.seat_expiring_late):
+            self.assertGreater(seat.time_to_reset(self.now), 0.0)
+
+    def test_a_rolled_over_deadline_ranks_last_among_quota_seats(self):
+        # An elapsed deadline floors time_to_reset at 0.0 and effective_cost at its minimum, so
+        # without an explicit rank the stalest seat looks like the most urgent and the cheapest.
+        rolled_over = Seat(
+            id="gemini-rolled-over",
+            provider="gemini",
+            model="gemini-3.6-flash-b",
+            kind="quota",
+            total_allowance=1_000_000,
+            remaining=0.0,
+            cycle_seconds=86400,
+            reset_deadline=self.now - 60,
+        )
+        self.ledger.register(rolled_over)
+        self.assertEqual(rolled_over.time_to_reset(self.now), 0.0)
+        self.assertEqual(rolled_over.effective_cost(self.now), 0.0001)
+
+        # `list_available` deliberately keeps it: past its deadline, quota is presumed restored.
+        self.assertIn("gemini-rolled-over", [s.id for s in self.ledger.list_available(now=self.now)])
+        ranked = [s.id for s in self.ledger.dying_soonest(now=self.now)]
+        self.assertEqual(ranked, ["gemini-expiring", "gpt-late", "gemini-rolled-over", "openrouter-metered"])
+
+    def test_a_rolled_over_seat_is_not_cast_primary_over_a_live_one(self):
+        self.ledger.register(Seat(
+            id="rolled-over", provider="gemini", model="stale-model", kind="quota",
+            remaining=0.0, reset_deadline=self.now - 60,
+        ))
+        # Chaos is excluded on purpose: it is seeded random, so it may seat anything eligible.
+        for mode in (SMART, BROKIE):
+            with self.subTest(mode=mode):
+                decision = self.composer.cast(
+                    BUILDER_ROLE, "Build", candidates_count=1, now=self.now, mode=mode,
+                )
+                self.assertEqual(decision.primary_seat.id, "gemini-expiring")
+        ordered = [s.id for s in self.ledger.dying_soonest(now=self.now)]
+        self.assertGreater(ordered.index("rolled-over"), ordered.index("gpt-late"))
 
     def test_presence_locking_prevents_casting(self):
         # Mark gemini-expiring as presence=True (Asa is typing there)
