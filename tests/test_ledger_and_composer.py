@@ -20,6 +20,27 @@ class _NullStore:
         return None
 
 
+class _MemoryStore:
+    """In-memory record store for task-cost estimation tests."""
+
+    def __init__(self, records_by_kind: dict[str, list[dict]]):
+        self.records_by_kind = records_by_kind
+
+    def query(self, kind: str, **filters) -> list[dict]:
+        """Return records of one kind matching every requested top-level field."""
+        return [
+            record for record in self.records_by_kind.get(kind, [])
+            if all(record.get(key) == value for key, value in filters.items())
+        ]
+
+
+class _ScorecardWithStore:
+    """Scorecard-shaped evidence holder for casting tests."""
+
+    def __init__(self, store: _MemoryStore):
+        self.store = store
+
+
 class TestSeatLedgerAndComposer(unittest.TestCase):
     def setUp(self):
         self.now = 10000.0
@@ -462,6 +483,90 @@ class TestQuestionBFilters(CastingEngineTestCase):
             self.ledger.set_presence(seat_id, True, now=self.now)
         with self.assertRaises(RuntimeError):
             self.cast()
+
+
+class TestTaskQuotaFilter(unittest.TestCase):
+    """Historical task cost vetoes quota seats that cannot finish the task."""
+
+    def setUp(self):
+        self.now = 10_000.0
+        self.ledger = SeatLedger(
+            initial_seats=[
+                Seat(
+                    id="quota-exhausted",
+                    provider="quota-exhausted",
+                    model="small-quota",
+                    kind="quota",
+                    remaining=0.0,
+                    reset_deadline=self.now + 3600.0,
+                ),
+                Seat(
+                    id="quota-insufficient",
+                    provider="quota-insufficient",
+                    model="almost-enough",
+                    kind="quota",
+                    remaining=4_999.0,
+                    reset_deadline=self.now + 3600.0,
+                ),
+                Seat(
+                    id="quota-sufficient",
+                    provider="quota-sufficient",
+                    model="enough",
+                    kind="quota",
+                    remaining=5_000.0,
+                    reset_deadline=self.now + 3600.0,
+                ),
+                Seat(
+                    id="metered",
+                    provider="metered",
+                    model="payg",
+                    kind="metered_api",
+                ),
+            ],
+            auto_seed=False,
+        )
+        self.store = _MemoryStore({
+            "terrarium_trial": [
+                {"task_id": "Large migration", "tokens_used": 4_000},
+                {"task_id": "Large migration", "tokens_used": 6_000},
+                {"task_id": "Unrelated task", "tokens_used": 100_000},
+            ],
+        })
+        self.composer = CastingComposer(
+            ledger=self.ledger,
+            scorecard=_ScorecardWithStore(self.store),
+        )
+
+    def test_estimate_uses_matching_trial_records_or_the_default(self):
+        self.assertEqual(self.composer._estimate_task_tokens("Large migration"), 5_000.0)
+        self.assertEqual(self.composer._estimate_task_tokens("Unseen task"), 5_000.0)
+
+    def test_trial_axes_are_used_when_terrarium_trials_are_absent(self):
+        self.store.records_by_kind["trial_axes"] = [
+            {"task_id": "Large migration", "tokens": 4_000},
+            {"task_id": "Large migration", "tokens": 8_000},
+        ]
+        self.store.records_by_kind["terrarium_trial"] = []
+
+        self.assertEqual(self.composer._estimate_task_tokens("Large migration"), 6_000.0)
+
+    def test_cast_excludes_exhausted_and_insufficient_quota_but_keeps_payg(self):
+        decision = self.composer.cast(
+            BUILDER_ROLE,
+            "Large migration",
+            candidates_count=4,
+            now=self.now,
+            mode=BROKIE,
+        )
+
+        self.assertEqual(
+            {seat.id for seat in decision.candidates},
+            {"quota-sufficient", "metered"},
+        )
+        self.assertIn(
+            "1 seat(s) with insufficient quota for estimated 5000 tokens",
+            decision.reason,
+        )
 
 
 class TestWarmWindowFilter(CastingEngineTestCase):

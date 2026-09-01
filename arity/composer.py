@@ -20,6 +20,7 @@ Axiom 36: Never choose a seat a human is live on.
 """
 from __future__ import annotations
 
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -131,16 +132,79 @@ class CastingComposer:
 
     # -- Question B: whose tokens should I spend? -----------------------------------------
 
+    def _estimate_task_tokens(self, task_key: Optional[str] = None) -> float:
+        """Return average recorded token use for a task key, or a conservative default.
+
+        A named task uses its stable task-bank name; an ad hoc task uses its exact brief. New
+        trial axes persist that key, while older records fall back to their opaque ``task_id``.
+        Terrarium trial records are canonical; older imported evidence may only contain
+        ``trial_axes``. Malformed and non-finite measurements do not influence a cast.
+        """
+        store = getattr(self.scorecard, "store", None)
+        query = getattr(store, "query", None)
+        if not callable(query):
+            return 5_000.0
+
+        for kind, token_field in (
+            ("terrarium_trial", "tokens_used"),
+            ("trial_axes", "tokens"),
+        ):
+            try:
+                records = query(kind)
+            except Exception:
+                continue
+
+            total = 0.0
+            count = 0
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                record_task_key = record.get("task_key", record.get("task_id"))
+                if task_key is not None and record_task_key != task_key:
+                    continue
+                tokens = record.get(token_field)
+                if (
+                    isinstance(tokens, (int, float))
+                    and not isinstance(tokens, bool)
+                    and math.isfinite(tokens)
+                    and tokens >= 0
+                ):
+                    total += float(tokens)
+                    count += 1
+            if count:
+                return total / count
+        return 5_000.0
+
     def _affordable(
         self,
         curr_time: float,
         expected_idle_seconds: Optional[float],
+        min_tokens: Optional[float] = None,
     ) -> tuple[list[Seat], list[str]]:
-        """Seats that can pay, and the reasons any were removed. Measured, never inferred."""
+        """Seats with available quota and the reasons any were removed."""
         pool = self.ledger.list_available(now=curr_time, exclude_presence=True)
         removals: list[str] = []
         if not pool:
             return [], ["no seat is both un-exhausted and free of a presence lock"]
+
+        if min_tokens is not None:
+            kept: list[Seat] = []
+            dropped: list[Seat] = []
+            for seat in pool:
+                if (
+                    seat.kind == "quota"
+                    and seat.reset_deadline > curr_time
+                    and seat.remaining < min_tokens
+                ):
+                    dropped.append(seat)
+                else:
+                    kept.append(seat)
+            if dropped:
+                removals.append(
+                    f"{len(dropped)} seat(s) with insufficient quota for estimated "
+                    f"{min_tokens:.0f} tokens"
+                )
+            pool = kept
 
         if expected_idle_seconds is not None:
             # A zero window is not a violation: a provider that assures nothing has no warm
@@ -248,7 +312,10 @@ class CastingComposer:
             seed = random.SystemRandom().getrandbits(32)
         rng = random.Random(seed)
 
-        pool, removals = self._affordable(curr_time, expected_idle_seconds)
+        estimated_tokens = self._estimate_task_tokens(task)
+        pool, removals = self._affordable(
+            curr_time, expected_idle_seconds, min_tokens=estimated_tokens
+        )
         if not pool:
             raise RuntimeError(f"No castable seats: {'; '.join(removals)}.")
 

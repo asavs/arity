@@ -257,6 +257,87 @@ class TestRunFrontDoor(unittest.TestCase):
         self.assertIsNone(cfg.record_store)
         self.assertIsNone(cfg.scorecard)
 
+    def test_noninteractive_split_posts_a_review_redphone_escalation(self):
+        from arity.handlers import JsonlRecordStore
+
+        seats = [
+            Seat(id="seat-a", provider="openai", model="model-a"),
+            Seat(id="seat-b", provider="openai", model="model-b"),
+        ]
+
+        def fake_cast(role, brief, requested, **kwargs):
+            return (
+                CastingDecision(
+                    role=role,
+                    primary_seat=seats[0],
+                    candidates=list(seats),
+                    requested_count=requested,
+                    distinct_on="model",
+                ),
+                list(seats),
+                [],
+            )
+
+        judgements = [
+            {
+                "parsed": True,
+                "judge": "judge-a",
+                "order": ["candidate-a", "candidate-b"],
+                "key": {"A": "candidate-a", "B": "candidate-b"},
+            },
+            {
+                "parsed": True,
+                "judge": "judge-b",
+                "order": ["candidate-b", "candidate-a"],
+                "key": {"A": "candidate-a", "B": "candidate-b"},
+            },
+        ]
+        report = SimpleNamespace(
+            task=SimpleNamespace(id="split-trial"),
+            candidates=seats,
+            judgements=judgements,
+            notes=[],
+            requested_arity=None,
+            resolution=SimpleNamespace(resolved=False),
+        )
+        delivery = SimpleNamespace(asked_human=False, receipt="withheld")
+        with TemporaryDirectory() as d:
+            store = JsonlRecordStore(Path(d) / "records")
+            with (
+                patch.object(race, "resolve_record_store", return_value=store),
+                patch.object(race, "cast_seats", fake_cast),
+                patch.object(race, "run_race", return_value=report),
+                patch.object(race, "deliver", return_value=delivery),
+            ):
+                run_front_door("brief", candidates=2, interactive=False)
+            messages = store.query("redphone_message", channel="review")
+
+        self.assertEqual(len(messages), 1)
+        message = messages[0]
+        self.assertEqual(message["text"], f"Judge review split on trial split-trial: {judgements}")
+        self.assertEqual(
+            message["metadata"]["candidate_letters"],
+            {"A": "candidate-a", "B": "candidate-b"},
+        )
+        self.assertEqual(
+            message["metadata"]["split_details"],
+            [
+                {
+                    "judge": "judge-a",
+                    "first_choice": "candidate-a",
+                    "first_choice_letter": "A",
+                    "order": ["candidate-a", "candidate-b"],
+                },
+                {
+                    "judge": "judge-b",
+                    "first_choice": "candidate-b",
+                    "first_choice_letter": "B",
+                    "order": ["candidate-b", "candidate-a"],
+                },
+            ],
+        )
+        self.assertIn("review split recorded in redphone review inbox", report.notes)
+
     def test_cast_seed_and_mode_reach_the_front_door_from_the_cli(self):
         # P6: chaos records a seed so the cast can be replayed; without a flag it could not be.
         import arity.cli as cli

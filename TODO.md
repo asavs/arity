@@ -9,8 +9,8 @@ Longer horizon, cut by axiom rather than by subsystem:
 (a join where existing software may win; researched after 1.0.0, not before).
 
 ## Cost and casting
-- [ ] **Pre-flight casting.** Estimate a task's cost from `trial_axes` history for the signature and skip
-      seats whose remaining quota cannot cover it, instead of attempting and rotating at zero usage.
+- [x] **Pre-flight casting.** Estimate a task's cost from `trial_axes` history and skip seats whose
+      remaining quota cannot cover it, instead of attempting and rotating at zero usage.
 - [ ] **Actual cost per trial.** `actual_cost_usd = quota_fraction_consumed × window_price_usd`, comparable
       to `api_equiv_usd = tokens × list_price`. Needs `Seat.window_price_usd` (Antigravity plan, ChatGPT
       Plus/Pro, SuperGrok — being fetched by a scout race) and a quota snapshot before/after each candidate.
@@ -33,8 +33,8 @@ Longer horizon, cut by axiom rather than by subsystem:
 - [ ] Refine the choices when models cannot settle on one implementation: present Asa the judges' cherry-picks as
       concrete diffs to apply to the winner, offer conference as the merge path, and make "keep both" a valid
       answer. Today: winner by cost tie-break, cherry-picks printed, human_pick only on a terminal.
-- [ ] Non-interactive runs should leave the question in the redphone inbox instead of silently keeping the
-      archivist's order.
+- [x] Non-interactive runs leave a judge-split question in the redphone inbox instead of silently
+      keeping the archivist's order.
 
 ## Harnesses
 - [ ] The claude CLI is a real harness (own tools, own system prompt). Race it as cli:claude on purpose, with a
@@ -43,8 +43,8 @@ Longer horizon, cut by axiom rather than by subsystem:
 ## Races
 - [ ] A brief that asks a write-denied role (scout) to write a file is a task-design error; the race
       should refuse or warn at resolve time (role.can_use_tool('write_file') vs brief mentions 'write').
-- [ ] Archivist discrepancy detection is regex over prose; make the closing report structured
-      (files: [...]) so claims are exact.
+- [x] Archivist discrepancy detection uses structured closing reports (`files: [...]`) so claims are exact;
+      prose regexes remain only as a compatibility fallback for older reports.
 - [ ] First non-code race (scout, secretary) — verify facts-tie → review → human holds up without pytest.
 - [ ] `types/rust.md` verify commands are untested (`cargo test`, hidden tests under `tests/`).
 - [ ] Conference: nobody has used `message(to="peer:X")` yet in a live run; watch whether it matters.
