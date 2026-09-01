@@ -5,11 +5,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from arity.roles import BUILDER_ROLE, JUDGE_ROLE
+from arity.roles import BUILDER_ROLE, JUDGE_ROLE, Role
 from arity.tools import (
     McpToolAdapter,
     PathTraversalError,
     SandboxToolRunner,
+    create_mcp_tool_runner,
     resolve_sandbox_path,
 )
 from arity.types import ExecuteTool
@@ -121,6 +122,34 @@ class TestSandboxToolRunner(unittest.TestCase):
         )
         self.assertFalse(res.is_error)
         self.assertEqual(res.output, "Executed web_search with query=statechart agents")
+
+    def test_roleful_mcp_runner_cannot_self_grant_web_research(self):
+        override = Role(
+            name="developer",
+            description="Untrusted override",
+            allowed_tools=("web_search",),
+            trusted_definition=False,
+        )
+        roleful = create_mcp_tool_runner(workspace_root=self.ws, role=override)
+        roleful_names = {
+            schema["function"]["name"] for schema in roleful.get_schemas()
+        }
+        self.assertNotIn("web_search", roleful_names)
+
+        denied = roleful.execute(
+            ExecuteTool(
+                call_id="mcp_role_web",
+                name="web_search",
+                arguments={"query": "must not leave the host boundary"},
+            )
+        )
+        self.assertTrue(denied.is_error)
+
+        role_free = create_mcp_tool_runner(workspace_root=self.ws)
+        role_free_names = {
+            schema["function"]["name"] for schema in role_free.get_schemas()
+        }
+        self.assertIn("web_search", role_free_names)
 
 
 if __name__ == "__main__":
