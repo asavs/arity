@@ -1,6 +1,7 @@
 """Tests for arity 0.0.1 architecture."""
 from __future__ import annotations
 
+import itertools
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -134,6 +135,63 @@ class TestTransition(unittest.TestCase):
         self.assertEqual(new_state.status, Status.HALTED)
         has_halt = any(isinstance(e, Halt) for e in effects)
         self.assertTrue(has_halt)
+
+
+class TestTransitionDeterminism(unittest.TestCase):
+    """The reducer is replayable: same state + event + id source -> same output."""
+
+    @staticmethod
+    def _counter():
+        seq = itertools.count(1)
+        return lambda: f"id{next(seq)}"
+
+    def _replay(self, event):
+        state = State(session_id="det_001", status=Status.WAITING_MODEL)
+        return transition(state, event, new_id=self._counter())
+
+    def test_unidentified_tool_calls_get_the_same_ids_every_replay(self):
+        event = ModelCompleted(
+            content="Checking status",
+            tool_calls=[
+                {"type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}},
+                {"type": "function", "function": {"name": "read_file", "arguments": '{"path": "b"}'}},
+            ],
+        )
+
+        first_state, first_effects = self._replay(event)
+        second_state, second_effects = self._replay(event)
+
+        self.assertEqual(
+            [e.call_id for e in first_effects if isinstance(e, ExecuteTool)],
+            ["id1", "id2"],
+        )
+        self.assertEqual(first_effects, second_effects)
+        self.assertEqual(first_state, second_state)
+
+    def test_handoff_child_id_is_the_same_every_replay(self):
+        event = HandoffRequested(target_role="researcher", brief="find the thing")
+
+        first_state, first_effects = self._replay(event)
+        second_state, second_effects = self._replay(event)
+
+        spawns = [e for e in first_effects if isinstance(e, SpawnHandoff)]
+        self.assertEqual([s.session_id for s in spawns], ["sub_id1"])
+        self.assertEqual(first_effects, second_effects)
+        self.assertEqual(first_state, second_state)
+
+    def test_supplied_call_ids_are_kept_and_consume_no_ids(self):
+        event = ModelCompleted(
+            content=None,
+            tool_calls=[
+                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+                {"type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+            ],
+        )
+        _, effects = self._replay(event)
+        self.assertEqual(
+            [e.call_id for e in effects if isinstance(e, ExecuteTool)],
+            ["c1", "id1"],
+        )
 
 
 class TestRuntimeEndToEnd(unittest.TestCase):

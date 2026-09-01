@@ -6,8 +6,7 @@ to the injected seam handlers (Model, Tools, Store, Transport, Observers).
 from __future__ import annotations
 
 import queue
-import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 from .handlers import (
     default_record_store,
@@ -18,7 +17,7 @@ from .handlers import (
     create_default_model_provider,
 )
 from .seams import ModelProvider, Observer, RecordStore, ToolRunner, Transport
-from .transition import transition
+from .transition import default_new_id, transition
 from .types import (
     CallModel,
     Effect,
@@ -54,6 +53,8 @@ class Runtime:
         self.store = store or default_record_store()
         self.transport = transport or ConsoleTransport()
         self.observers: list[Observer] = observers or [MetricsObserver()]
+        # Sole source of freshness for this runtime and its reducer; reassign to replay.
+        self.new_id: Callable[[], str] = default_new_id
 
     def step(self, state: State, event: Event) -> tuple[State, list[Event]]:
         """Run one state transition and execute all generated effects.
@@ -68,7 +69,7 @@ class Runtime:
                 pass
 
         # 2. I/O-free state transition
-        new_state, effects = transition(state, event)
+        new_state, effects = transition(state, event, new_id=self.new_id)
 
         # 3. Notify observers of generated effects
         for effect in effects:
@@ -130,6 +131,7 @@ class Runtime:
                     transport=self.transport,
                     observers=self.observers,
                 )
+                child_runtime.new_id = self.new_id
                 final_child_state = child_runtime.run(
                     child_state,
                     initial_event=UserMessage(text=effect.brief, sender="parent"),
@@ -171,7 +173,7 @@ class Runtime:
         """Convenience method to run a conversational turn."""
         if state is None:
             state = State(
-                session_id=f"sess_{uuid.uuid4().hex[:8]}",
+                session_id=f"sess_{self.new_id()}",
                 system_prompt=system_prompt,
                 active_tools=self.tools.get_schemas(),
             )

@@ -3,6 +3,29 @@
 External model routers, tool harnesses, record stores, transports, and telemetry
 integrations can implement these protocols. Trial verification and ranking remain
 built-in orchestration stages rather than implementations of these seams.
+
+Defined in this module:
+
+    ModelProvider  Model routing: gateways, provider SDKs, direct HTTP calls.
+    ToolRunner     Tool execution: sandboxes, MCP servers, local Python functions.
+    RecordReader   Query-only record access for inspection, dashboards, and replay.
+    RecordStore    RecordReader plus append: JSONL, SQLite, vector DBs, audit ledgers.
+    Transport      User/channel I/O: CLI, webhook, Discord, Slack, SMS.
+    Observer       Event/effect telemetry and evaluation monitoring.
+
+Defined elsewhere. Each is expressed in terms of types declared in its own module, so
+it stays beside them; hosting it here would mean importing those modules, and two of
+them already import this one.
+
+    ContextAdapter (arity.terrarium)
+        One named, testable transform applied to a ContextEnvelope just before a
+        candidate runtime starts.
+    TrialEvaluator (arity.evidence)
+        Turns a frozen EvidenceBundle into an Evaluation, so alternate evaluators can
+        run later without rerunning the candidate harnesses.
+    TrialJournal (arity.trial_events)
+        A concrete class rather than a Protocol: persists ordered lifecycle events
+        through any RecordStore, from which replay_trial reconstructs the trial.
 """
 from __future__ import annotations
 
