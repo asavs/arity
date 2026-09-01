@@ -529,6 +529,10 @@ def test_scout_fetch_revalidates_redirect_targets_before_reading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    body_reads: list[int] = []
+    opened_urls: list[str] = []
+    opener_builds: list[int] = []
+
     class RedirectedPrivateResponse:
         headers = {"Content-Type": "text/plain"}
 
@@ -542,12 +546,20 @@ def test_scout_fetch_revalidates_redirect_targets_before_reading(
             return "http://169.254.169.254/latest/meta-data/credentials"
 
         def read(self, *_args, **_kwargs) -> bytes:
+            body_reads.append(1)
             return b"REDIRECTED_METADATA_SECRET"
 
-    monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda *_args, **_kwargs: RedirectedPrivateResponse(),
-    )
+    class PublicOpener:
+        def open(self, request, *_args, **_kwargs):
+            opened_urls.append(str(request.full_url))
+            return RedirectedPrivateResponse()
+
+    def build_public_opener(*_handlers):
+        opener_builds.append(1)
+        return PublicOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", build_public_opener)
+    monkeypatch.setattr("urllib.request._opener", None)
     registry = RoleRegistry()
     runner = SandboxToolRunner(
         workspace_root=tmp_path / "isolated",
@@ -563,6 +575,9 @@ def test_scout_fetch_revalidates_redirect_targets_before_reading(
     )
 
     assert result.is_error is True
+    assert opener_builds
+    assert opened_urls
+    assert body_reads == []
     assert "REDIRECTED_METADATA_SECRET" not in result.output
     assert "QUERY_SECRET_TOKEN" not in result.output
 
@@ -746,6 +761,35 @@ def test_scout_record_query_is_bounded_resolved_only_sanitized_and_query_only(
     assert forbidden_kind.is_error is True
     assert "NON_ALLOWLISTED_TOOL_RESULT" not in forbidden_kind.output
     assert before == after
+
+
+@pytest.mark.parametrize(
+    "private_filter",
+    ("model", "signature", "output", "candidate_id"),
+)
+def test_scout_record_query_rejects_private_field_oracles(
+    tmp_path: Path,
+    private_filter: str,
+) -> None:
+    registry = RoleRegistry()
+    runner = SandboxToolRunner(
+        workspace_root=tmp_path / "isolated",
+        role=registry.get("scout"),
+        role_registry=registry,
+        research_scope=_research_scope(tmp_path / "project"),
+    )
+
+    result = _execute(
+        runner,
+        "query_records",
+        kind="terrarium_trial",
+        filters={private_filter: "PRIVATE_FILTER_SENTINEL"},
+        limit=1,
+    )
+
+    assert result.is_error is True
+    assert "public projected fields" in result.output.lower()
+    assert "PRIVATE_FILTER_SENTINEL" not in result.output
 
 
 def test_scout_record_reader_closes_on_success_and_canned_failure(
