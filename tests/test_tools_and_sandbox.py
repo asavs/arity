@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import unittest
+import socket
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from arity.roles import BUILDER_ROLE, JUDGE_ROLE, Role
+from arity.research import ResearchScope
+from arity.roles import BUILDER_ROLE, JUDGE_ROLE, Role, RoleRegistry
 from arity.tools import (
     McpToolAdapter,
     PathTraversalError,
@@ -150,6 +153,69 @@ class TestSandboxToolRunner(unittest.TestCase):
             schema["function"]["name"] for schema in role_free.get_schemas()
         }
         self.assertIn("web_search", role_free_names)
+
+    def test_queried_fetch_never_forwards_url_to_reader_proxy(self):
+        opened_urls: list[str] = []
+
+        class EmptyPublicResponse:
+            headers = {"Content-Type": "text/html"}
+
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self) -> str:
+                return self.url
+
+            def read(self, *_args, **_kwargs) -> bytes:
+                return b"<html><body>empty</body></html>"
+
+        class RecordingOpener:
+            def open(self, request, *_args, **_kwargs):
+                opened_urls.append(str(request.full_url))
+                return EmptyPublicResponse(str(request.full_url))
+
+        registry = RoleRegistry()
+        runner = SandboxToolRunner(
+            workspace_root=self.ws / "scout-child",
+            role=registry.get("scout"),
+            role_registry=registry,
+            research_scope=ResearchScope(project_root=self.ws),
+        )
+        secret = "QUERY_PROXY_SECRET"
+        public_answer = [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        with (
+            patch("socket.getaddrinfo", return_value=public_answer),
+            patch("urllib.request.build_opener", return_value=RecordingOpener()),
+        ):
+            result = runner.execute(
+                ExecuteTool(
+                    call_id="query_origin_only",
+                    name="fetch_url",
+                    arguments={
+                        "url": f"https://public.example/docs?token={secret}"
+                    },
+                )
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(len(opened_urls), 1)
+        self.assertTrue(opened_urls[0].startswith("https://public.example/"))
+        self.assertNotIn("r.jina.ai", opened_urls[0])
+        self.assertNotIn(secret, result.output)
 
 
 if __name__ == "__main__":
