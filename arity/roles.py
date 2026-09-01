@@ -379,7 +379,7 @@ class RoleRegistry:
             "builder": ("implement", "build a", "create a", "write code", "schema", "table"),
             "engineer": ("architecture", "system design", "spec", "decompose", "technical audit", "design review"),
             "test-engineer": (
-                "verify tests", "run pytest", "check regression", "audit code", "code review",
+                "verify tests", "run pytest", "check regression", "audit", "review", "audit code", "code review",
                 "review this code", "check pr", "pull request review", "evaluation design",
             ),
             "judge": ("frozen evidence", "blind bundle", "rank candidates", "adjudicate candidates"),
@@ -411,12 +411,12 @@ class RoleRegistry:
 _default_registry = RoleRegistry()
 SECRETARY_ROLE = _default_registry.get("secretary") or parse_role_document("---\nname: secretary\ntier: 0\n---\nSecretary")
 VOICE_ROLE = _default_registry.get("voice") or SECRETARY_ROLE
-ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\nteam: engineering\n---\nEngineer")
+ENGINEER_ROLE = _default_registry.get("engineer") or parse_role_document("---\nname: engineer\ntier: 1\nteam: engineering\naccepts_types: true\n---\nEngineer")
 ARCHITECT_ROLE = _default_registry.get("architect") or ENGINEER_ROLE
 DESIGNER_ROLE = _default_registry.get("designer") or parse_role_document("---\nname: designer\ntier: 1\n---\nDesigner")
-DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\nteam: engineering\n---\nDeveloper")
+DEVELOPER_ROLE = _default_registry.get("developer") or parse_role_document("---\nname: developer\ntier: 2\nteam: engineering\naccepts_types: true\n---\nDeveloper")
 BUILDER_ROLE = _default_registry.get("builder") or DEVELOPER_ROLE
 PYTHON_DEVELOPER_ROLE = _default_registry.get("developer:python") or BUILDER_ROLE
 SCOUT_ROLE = _default_registry.get("scout") or parse_role_document("---\nname: scout\ntier: 1\n---\nScout")
-TEST_ENGINEER_ROLE = _default_registry.get("test-engineer") or parse_role_document("---\nname: test-engineer\ntier: 2\nteam: engineering\n---\nTest Engineer")
+TEST_ENGINEER_ROLE = _default_registry.get("test-engineer") or parse_role_document("---\nname: test-engineer\ntier: 2\nteam: engineering\naccepts_types: true\n---\nTest Engineer")
 JUDGE_ROLE = _default_registry.get("judge") or parse_role_document("---\nname: judge\ntier: 3\n---\nJudge")

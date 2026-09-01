@@ -990,12 +990,15 @@ class TerrariumDispatcher:
         def round_brief(L: str, rnd: int, inbox: list[str]) -> str:
             notes = "\n".join(f"- {m}" for m in inbox) if inbox else "- (none)"
             others = ", ".join(M for M in letters if M != L)
-            messaging = (
-                f'You may send short notes to peers with message(to="peer:{others.split(", ")[0]}"); '
-                "they arrive next round."
-                if rnd < rounds and others
-                else "This is the final round; peer messaging is closed because no later round can receive a note."
-            )
+            if not others:
+                messaging = "Peer messaging is unavailable because this conference has no other candidates."
+            elif rnd < rounds:
+                messaging = (
+                    f'You may send short notes to peers with message(to="peer:{others.split(", ")[0]}"); '
+                    "they arrive next round."
+                )
+            else:
+                messaging = "This is the final round; peer messaging is closed because no later round can receive a note."
             return (
                 f"# Conference round {rnd}/{rounds}\n"
                 f"You are candidate {L}. You and {others} each built the brief below in isolation; all attempts are now "
