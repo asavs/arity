@@ -1396,6 +1396,49 @@ def test_evidence_projection_requires_the_exact_resolved_bundle(
     assert "999" not in result.output
 
 
+def test_record_reader_rejects_non_finite_metrics(tmp_path: Path) -> None:
+    database = tmp_path / "records.sqlite"
+    writer = SqliteRecordStore(database)
+    _append_valid_resolution(
+        writer,
+        task_id="finite-task",
+        candidate_id="finite-candidate",
+    )
+    writer.append(StoreRecord(kind="terrarium_trial", record={
+        "task_id": "finite-task",
+        "candidate_id": "finite-candidate",
+        "role": "developer:python",
+        "status": "completed",
+        "tokens_used": 5,
+        "duration_seconds": float("inf"),
+        "fallbacks": float("nan"),
+    }))
+    writer.close()
+    registry = RoleRegistry()
+    runner = SandboxToolRunner(
+        workspace_root=tmp_path / "isolated",
+        role=registry.get("scout"),
+        role_registry=registry,
+        research_scope=_research_scope(
+            tmp_path / "project",
+            record_spec=StoreSpec("sqlite", database),
+        ),
+    )
+
+    result = _execute(
+        runner,
+        "query_records",
+        kind="terrarium_trial",
+        filters={},
+        limit=10,
+    )
+
+    assert result.is_error is True
+    assert result.output == "Execution Error: record history is unavailable"
+    assert "Infinity" not in result.output
+    assert "NaN" not in result.output
+
+
 def test_scout_records_accept_neutral_cross_kind_refs_but_raw_ids_have_no_oracle(
     tmp_path: Path,
 ) -> None:
