@@ -1,7 +1,20 @@
-"""Arity transports — red-phone address, webhook front door, and channel ingress.
+"""Arity transports — an in-process channel queue and an outbound callback sink.
 
-Axiom 10: The red phone is a public address, not an alarm (redphone.com/asas).
-Axiom 6: The front door is a phone (SMS, voice, webhooks).
+What exists here: `RedphoneInbox`, a per-instance dict of channel name to a list of
+`RedphoneMessage`, optionally mirrored into a `RecordStore`; and `WebhookTransport`, a
+`Transport` that records every outgoing `EmitMessage` and hands it to a caller-supplied
+callback whose default does nothing. Both run entirely inside the calling process. No
+code in this module opens a socket, serves an address, or contacts a carrier.
+
+Stated intent, not built:
+
+Axiom 6 — the front door is a phone: voice calls, SMS/MMS, images, and URLs arriving on
+a rented number. There is no carrier or voice transport; the only way a message enters
+`RedphoneInbox` is an in-process call to `post`.
+
+Axiom 10 — the red phone is a public address, not an alarm (`redphone.com/asas`): a
+public inbox anyone can post a problem to, with bots triaging and escalating by email.
+No address is served to anyone outside the process and there is no escalation path.
 """
 from __future__ import annotations
 
@@ -27,7 +40,12 @@ class RedphoneMessage:
 
 
 class RedphoneInbox:
-    """Public address and multi-channel message queue (Axiom 10)."""
+    """In-process multi-channel message queue, optionally mirrored to a record store.
+
+    This is the local half of Axiom 10. Messages arrive only through direct `post`
+    calls from inside this process; nothing here publishes an address, accepts a
+    submission from outside, or escalates anywhere.
+    """
 
     def __init__(self, store: Optional[Any] = None):
         self.store = store
@@ -41,7 +59,10 @@ class RedphoneInbox:
         kind: str = "text",
         metadata: Optional[dict[str, Any]] = None,
     ) -> RedphoneMessage:
-        """Post a message into a channel queue and persist to record store."""
+        """Append a message to its channel queue, mirroring it to the store if one is set.
+
+        A store failure is swallowed: the queued message is the return value either way.
+        """
         msg = RedphoneMessage(
             channel=channel,
             sender=sender,
@@ -86,7 +107,7 @@ class RedphoneInbox:
         return list(self._channels.get(channel, []))
 
     def list_recent(self, channel: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
-        """Query recent historical messages across channels from persistent store."""
+        """Query recent stored messages, one channel or all. Empty without a store."""
         if self.store and hasattr(self.store, "query"):
             filters = {"channel": channel} if channel else {}
             records = self.store.query("redphone_message", **filters)
@@ -95,7 +116,13 @@ class RedphoneInbox:
 
 
 class WebhookTransport(Transport):
-    """Transport that delivers outgoing effects to a webhook/callback."""
+    """Egress-only sink: records each outgoing effect and passes it to a callback.
+
+    Despite the name it speaks no HTTP and holds no URL. Posting to an actual webhook
+    is the caller's job, inside the callback it supplies; the default callback drops
+    the effect, leaving `sent_messages` as the only record. Nothing here receives, so
+    this is not a front door in the Axiom 6 sense.
+    """
 
     def __init__(self, callback: Optional[Callable[[EmitMessage], None]] = None):
         self._callback = callback or self._default_callback

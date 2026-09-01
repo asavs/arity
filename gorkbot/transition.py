@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from .types import (
     CallModel,
@@ -34,8 +34,22 @@ from .types import (
 )
 
 
-def transition(state: State, event: Event) -> tuple[State, list[Effect]]:
-    """Compute the next state and required effects for a given event."""
+def default_new_id() -> str:
+    """Default id source: eight hex characters of OS entropy."""
+    return uuid.uuid4().hex[:8]
+
+
+def transition(
+    state: State,
+    event: Event,
+    *,
+    new_id: Callable[[], str] = default_new_id,
+) -> tuple[State, list[Effect]]:
+    """Compute the next state and required effects for a given event.
+
+    ``new_id`` is the only source of freshness the reducer has; supply a
+    deterministic one to replay a session.
+    """
     effects: list[Effect] = []
 
     # 1. User Message arrives
@@ -97,7 +111,7 @@ def transition(state: State, event: Event) -> tuple[State, list[Effect]]:
             )
 
             for tc in event.tool_calls:
-                call_id = tc.get("id", uuid.uuid4().hex[:8])
+                call_id = tc["id"] if "id" in tc else new_id()
                 fn = tc.get("function", {})
                 name = fn.get("name", "unknown")
                 raw_args = fn.get("arguments", "{}")
@@ -235,7 +249,7 @@ def transition(state: State, event: Event) -> tuple[State, list[Effect]]:
     # 5. Handoff requested
     if isinstance(event, HandoffRequested):
         state.status = Status.WAITING_HANDOFF
-        child_id = f"sub_{uuid.uuid4().hex[:8]}"
+        child_id = f"sub_{new_id()}"
         effects.append(
             SpawnHandoff(
                 session_id=child_id,
