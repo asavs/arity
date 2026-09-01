@@ -2,6 +2,7 @@
 name: designer
 description: Defines the intended outward form, experience, and conceptual shape of what the team builds.
 tier: 1
+accepts_types: false
 skills: []
 denied_paths:
   - .ssh

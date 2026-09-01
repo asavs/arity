@@ -31,7 +31,13 @@ class SyntaxValidationError(Exception):
     pass
 
 
-class UnknownMessageRecipientError(ValueError):
+class MessageDeliveryError(ValueError):
+    """Raised when a requested message cannot be delivered truthfully."""
+
+    pass
+
+
+class UnknownMessageRecipientError(MessageDeliveryError):
     """Raised when ``message`` names neither the user nor a registered personality."""
 
     pass
@@ -178,7 +184,7 @@ class SandboxToolRunner(ToolRunner):
                 output=f"Syntax Error: {str(e)}",
                 is_error=True,
             )
-        except UnknownMessageRecipientError as e:
+        except MessageDeliveryError as e:
             return ToolCompleted(
                 call_id=effect.call_id,
                 tool_name=effect.name,
@@ -434,6 +440,23 @@ class SandboxToolRunner(ToolRunner):
             func=fetch_url,
         )
 
+        def web_search(query: str, limit: int = 5) -> str:
+            return smart_web_search(query, limit)
+
+        self.register(
+            name="web_search",
+            description="Search the web for current sources using the configured search provider.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "description": "Maximum results", "default": 5},
+                },
+                "required": ["query"],
+            },
+            func=web_search,
+        )
+
         def message_tool(to: str, text: str) -> str:
             target = to.lower().strip()
             if target in ("user", "human", "asa"):
@@ -452,7 +475,9 @@ class SandboxToolRunner(ToolRunner):
                 )
             if self.message_router:
                 return self.message_router(recipient.name, text)
-            return f"[Message queued for {recipient.name}]: {text}"
+            raise MessageDeliveryError(
+                f"No message router is configured; the message to '{recipient.name}' was not delivered."
+            )
 
         registered = ", ".join(role.name for role in self.role_registry.list_roles())
 

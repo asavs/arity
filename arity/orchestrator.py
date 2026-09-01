@@ -25,7 +25,7 @@ from .scorecard import Scorecard
 from .seams import ModelProvider, RecordStore, Transport
 from .terrarium import TaskRecord, TerrariumCandidateResult, TerrariumDispatcher
 from .tiers import BriefCompiler, PredecessorAccounts
-from .tools import SandboxToolRunner, resolve_arity
+from .tools import MessageDeliveryError, SandboxToolRunner, resolve_arity
 from .transports import RedphoneInbox
 from .types import (
     CallModel,
@@ -166,10 +166,16 @@ class ArityOrchestrator:
             peer_role = self.roles.get(to_peer)
             if peer_role is None:
                 known = ", ".join(role.name for role in self.roles.list_roles())
-                return f"Error: Unknown message recipient '{to_peer}'. Registered personalities: {known}."
+                raise MessageDeliveryError(
+                    f"Unknown message recipient '{to_peer}'. Registered personalities: {known}."
+                )
             peer_task = TaskRecord(from_role=target_role.name, to_role=peer_role.name, brief=text_msg)
             peer_casting = self.composer.cast(role=peer_role, task=text_msg, candidates_count=1, now=curr_time)
-            peer_res = self.terrarium.dispatch_single(task=peer_task, seat=peer_casting.primary_seat, role=peer_role)
+            peer_res = self.terrarium.dispatch_single(
+                task=peer_task,
+                candidate_or_seat=peer_casting.primary_seat,
+                role=peer_role,
+            )
             return peer_res.output or f"[{peer_role.name} replied with no output]"
 
         tool_runner = SandboxToolRunner(

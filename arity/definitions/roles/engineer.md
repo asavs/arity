@@ -3,6 +3,7 @@ name: engineer
 description: Domain-general engineer who owns technical contracts, architecture, feasibility, and coordination.
 tier: 1
 team: engineering
+accepts_types: true
 skills:
   - firecrawl-developer-index
   - scout-recon

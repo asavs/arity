@@ -27,7 +27,7 @@ from .handlers import (
     OMPModelProvider,
     create_model_provider,
 )
-from .tools import SandboxToolRunner, create_mcp_tool_runner
+from .tools import MessageDeliveryError, SandboxToolRunner, create_mcp_tool_runner
 from .ledger import Seat, SeatLedger
 from .roles import Role, RoleRegistry, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
@@ -282,6 +282,7 @@ def _run_tests(ws: Path, cmd: str, timeout: float, allow_unittest_fallback: bool
 PYTHON_VERIFY: dict[str, Any] = {
     "test_command": "python -m pytest -v -p no:cacheprovider",
     "test_globs": ["test_*.py", "*_test.py", "tests/**/test_*.py"],
+    "hidden_test_globs": ["**/test_*.py"],
     "hidden_dir": HIDDEN_TESTS_DIR,
     "hidden_command": f"python -m pytest {HIDDEN_TESTS_DIR} -v -p no:cacheprovider",
 }
@@ -425,6 +426,7 @@ class TerrariumDispatcher:
         candidate_id: Optional[str] = None,
         mailbox: Optional[dict[str, list[str]]] = None,
         peer_letter: Optional[str] = None,
+        peer_messages_open: bool = True,
         usage_context: Optional[UsageRecordingContext] = None,
     ) -> TerrariumCandidateResult:
         """Run a single candidate kernel in an isolated sandbox with multidimensional seams.
@@ -473,20 +475,29 @@ class TerrariumDispatcher:
         # 1. Peer message router for cross-kernel delegation
         def route_peer_message(to_peer: str, text_msg: str) -> str:
             target = to_peer.strip()
+            if target.lower().startswith("peer:") and not peer_messages_open:
+                raise MessageDeliveryError(
+                    "Peer messaging is closed in the final conference round; no later round exists."
+                )
             if target.lower().startswith("peer:") and mailbox is not None:
                 letter = target.split(":", 1)[1].strip().upper()
                 if letter == (peer_letter or ""):
-                    return "That is you. Address a different peer letter."
+                    raise MessageDeliveryError("That is you. Address a different peer letter.")
                 if letter not in mailbox:
-                    return f"No peer '{letter}' in this conference. Peers: {', '.join(sorted(k for k in mailbox if k != peer_letter))}."
+                    raise MessageDeliveryError(
+                        f"No peer '{letter}' in this conference. "
+                        f"Peers: {', '.join(sorted(k for k in mailbox if k != peer_letter))}."
+                    )
                 mailbox[letter].append(f"[from {peer_letter or '?'}] {text_msg}")
                 return f"Queued for {letter}; delivered at the start of their next round."
             if task.depth + 1 >= task.max_depth:
-                return f"Error: Maximum message hop limit ({task.max_depth}) reached."
+                raise MessageDeliveryError(f"Maximum message hop limit ({task.max_depth}) reached.")
             target_peer = self.roles.get(to_peer)
             if target_peer is None:
                 known = ", ".join(role.name for role in self.roles.list_roles())
-                return f"Error: Unknown message recipient '{to_peer}'. Registered personalities: {known}."
+                raise MessageDeliveryError(
+                    f"Unknown message recipient '{to_peer}'. Registered personalities: {known}."
+                )
             peer_task = TaskRecord(
                 from_role=actual_role.name if hasattr(actual_role, 'name') else str(actual_role),
                 to_role=target_peer.name,
@@ -498,9 +509,7 @@ class TerrariumDispatcher:
                 seat=seat,
                 role=target_peer,
                 harness=spec.harness,
-                tool_runner_type=spec.tool_runner_type,
-                skills=spec.skills,
-                context_adapter=spec.context_adapter,
+                tool_runner_type="sandbox",
             )
             peer_res = self.dispatch_single(
                 task=peer_task,
@@ -817,31 +826,40 @@ class TerrariumDispatcher:
     ) -> tuple[dict[str, str], TerrariumCandidateResult]:
         """Run a Test Engineer candidate against the brief and harvest the test files it writes.
 
-        The Test Engineer works in its own sandbox and never sees any builder output. Whatever
-        `test_*.py` files it leaves behind become the hidden suite for the race.
+        The Test Engineer works in its own sandbox and never sees any builder output. The selected
+        type pack defines both its authoring instructions and which files become the hidden suite.
         """
         from .roles import TEST_ENGINEER_ROLE
+        if test_engineer.role is None:
+            test_engineer.role = TEST_ENGINEER_ROLE
+        verify = getattr(test_engineer.role, "verify", None) or PYTHON_VERIFY
+        hidden_test_globs = verify.get("hidden_test_globs") or PYTHON_VERIFY["hidden_test_globs"]
+        if isinstance(hidden_test_globs, str):
+            hidden_test_globs = [hidden_test_globs]
+        hidden_test_globs = [str(pattern) for pattern in hidden_test_globs]
+        accepted_files = ", ".join(f"`{pattern}`" for pattern in hidden_test_globs)
         test_engineer_task = TaskRecord(
             from_role=task.from_role,
             to_role="test-engineer",
             brief=(
                 "Author the acceptance tests for the following task. You are NOT implementing it; "
-                "another engineer will, without seeing your tests. Write only `test_*.py` files.\n\n"
+                "another engineer will, without seeing your tests. "
+                f"Write only test files matching the selected type pack's hidden-test globs: {accepted_files}.\n\n"
                 f"## Task under test\n{task.brief}"
             ),
             depth=task.depth,
             max_depth=task.max_depth,
             task_context=task.task_context,
         )
-        if test_engineer.role is None:
-            test_engineer.role = TEST_ENGINEER_ROLE
         res = self.dispatch_single(task=test_engineer_task, candidate_or_seat=test_engineer, run_verification=False)
         harvested: dict[str, str] = {}
         if res.workspace_path.exists():
-            for p in sorted(res.workspace_path.rglob("test_*.py")):
-                if any(part in ARTIFACT_IGNORE_PARTS for part in p.parts):
-                    continue
-                harvested[p.name] = p.read_text(encoding="utf-8")
+            for pattern in hidden_test_globs:
+                for p in sorted(res.workspace_path.glob(pattern)):
+                    relative = p.relative_to(res.workspace_path)
+                    if not p.is_file() or any(part in ARTIFACT_IGNORE_PARTS for part in relative.parts):
+                        continue
+                    harvested[relative.as_posix()] = p.read_text(encoding="utf-8")
         return harvested, res
 
     def teardown(self, results: list[TerrariumCandidateResult]) -> None:
@@ -972,6 +990,12 @@ class TerrariumDispatcher:
         def round_brief(L: str, rnd: int, inbox: list[str]) -> str:
             notes = "\n".join(f"- {m}" for m in inbox) if inbox else "- (none)"
             others = ", ".join(M for M in letters if M != L)
+            messaging = (
+                f'You may send short notes to peers with message(to="peer:{others.split(", ")[0]}"); '
+                "they arrive next round."
+                if rnd < rounds and others
+                else "This is the final round; peer messaging is closed because no later round can receive a note."
+            )
             return (
                 f"# Conference round {rnd}/{rounds}\n"
                 f"You are candidate {L}. You and {others} each built the brief below in isolation; all attempts are now "
@@ -979,8 +1003,8 @@ class TerrariumDispatcher:
                 f"Archivist facts, by letter:\n" + "\n".join(f"- {M}: {facts(M)}" for M in letters) + "\n\n"
                 f"Notes sent to you by peers:\n{notes}\n\n"
                 f"Produce the final draft in YOUR workspace: keep what is best, borrow from peers with credit in a "
-                f"comment, drop what is worse. You may send short notes to peers with message(to=\"peer:{others.split(', ')[0]}\") "
-                f"- they arrive next round. Do not edit `{PEERS_DIR}/`. Finish with a closing report naming every file you changed.\n\n"
+                f"comment, drop what is worse. {messaging} Do not edit `{PEERS_DIR}/`. "
+                f"Finish with a closing report naming every file you changed.\n\n"
                 f"## Original brief\n{task.brief}"
             )
 
@@ -1013,7 +1037,7 @@ class TerrariumDispatcher:
                 res = self.dispatch_single(
                     round_task, round_spec, run_verification=False, test_command=test_command,
                     workspace=prev.workspace_path, candidate_id=f"{by_letter[L].candidate_id}_c{rnd}",
-                    mailbox=mailbox, peer_letter=L,
+                    mailbox=mailbox, peer_letter=L, peer_messages_open=not last,
                     usage_context=(
                         None
                         if usage_contexts is None
