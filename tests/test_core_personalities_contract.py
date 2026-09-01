@@ -101,7 +101,9 @@ def test_judge_cannot_change_rerun_or_expand_frozen_evidence() -> None:
     assert role is not None
     assert role.can_use_tool("read_file")
     assert role.can_use_tool("message")
-    for tool_name in ("write_file", "run_command", "fetch_url", "web_search"):
+    for tool_name in (
+        "write_file", "run_command", "execute_command", "fetch_url", "web_search",
+    ):
         assert not role.can_use_tool(tool_name)
 
 
