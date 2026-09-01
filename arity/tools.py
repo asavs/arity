@@ -1002,15 +1002,19 @@ def create_mcp_tool_runner(
             "required": ["command"],
         },
     })
-    adapter.register_mcp_tool({
-        "name": "web_search",
-        "description": "Search the web via MCP protocol.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
+    # A role-bound MCP axis has no host-issued ResearchScope. Keep cross-boundary
+    # retrieval absent even if an untrusted role override removes its denial.
+    # Role-free callers remain an explicit host/custom integration seam.
+    if role is None:
+        adapter.register_mcp_tool({
+            "name": "web_search",
+            "description": "Search the web via MCP protocol.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-    })
+        })
     return adapter
