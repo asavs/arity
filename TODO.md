@@ -32,6 +32,18 @@ external reports; this file remains the maintainer's near-term roadmap.
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
 - [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
 
+## Messaging
+- [x] Make team membership organizational metadata rather than an ACL. Through the default sandbox
+      path, any personality can address any exact registered personality; delegated recipients retain
+      their own prompt, skills, runner, and denial set, and undeliverable messages are recorded as errors.
+- [ ] **Next release gate:** lift `message` into a role-bound control-plane wrapper around every
+      tool-runner axis so sandbox, MCP, shell, and custom-runner races all preserve the same addressing
+      and recipient authority. Reserve the `message` schema, add correlated delivery records, and reject
+      non-forkable runner instances explicitly. Until then, communication is guaranteed only on the
+      default sandbox path and must not be claimed as invariant across `--variants tools`.
+- [ ] Remove or bind the dormant `HandoffRequested` / `SpawnHandoff` event path to that same control
+      plane; it currently reuses the sender's runner and is not a second valid delegation mechanism.
+
 ## Observability
 - [x] Read-only `arity trials`, `arity trial show`, and `arity trial replay` commands share a versioned
       Python projection, strict JSONL/SQLite readers, semantic exit codes, and forward-schema boundaries.
@@ -94,7 +106,8 @@ external reports; this file remains the maintainer's near-term roadmap.
       against the fetch_url tool log instead - the scout race scored 0/0 citations.
 - [ ] Citation checker attributes comparative sentences ("C, unlike A's `move_to_end`") to the wrong letter
       (~90% precision). Reported, never scored — improve the attributor or leave it.
-- [ ] Judge with `type` skills for non-code domains (`judge:design`?) once a non-code race exists.
+- [ ] Explore explicit evidence-reading skills for non-code judging once a non-code race exists. Keep the
+      Judge personality itself untyped and limited to frozen evidence unless that mandate is deliberately changed.
 
 ## Kernel
 - [ ] xAI wire read timeout (60s) tripped four times in one conference round on long tool-heavy turns; the
