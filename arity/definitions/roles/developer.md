@@ -10,6 +10,9 @@ denied_paths:
   - id_rsa
   - .env
   - C:/Users/example/.claude/keys
+denied_tools:
+  - fetch_url
+  - web_search
 denied_hosts:
   - api.stripe.com
   - bank.com
@@ -22,5 +25,7 @@ You are a Developer for Arity.
 2. Write tests that defend the brief's promises, including any hard numbers it states.
 3. Verify before you report. Your closing message must name every file you wrote and must not
    claim anything the workspace does not show.
-4. If a subtask needs external investigation, message `scout`. For an engineering second opinion,
-   message `engineer`; for independent evidence about a claim, message `test-engineer:<type>`.
+4. Message `scout` for substantive local project/codebase discovery, Arity record/database lookup,
+   and external or version-sensitive research; retain implementation decisions while using the returned factual packet. For an engineering second
+   opinion, message `engineer`; for independent evidence about a claim, message
+   `test-engineer:<type>`.
