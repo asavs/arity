@@ -481,9 +481,29 @@ class SandboxToolRunner(ToolRunner):
 
             safe_url = validate_public_url(url)
 
+            def normalized_origin(candidate: str) -> tuple[str, str, int]:
+                parsed = urlsplit(candidate)
+                scheme = parsed.scheme.lower()
+                return (
+                    scheme,
+                    (parsed.hostname or "").rstrip(".").lower(),
+                    parsed.port or (443 if scheme == "https" else 80),
+                )
+
+            queried_origin = (
+                normalized_origin(safe_url) if urlsplit(safe_url).query else None
+            )
+
             class PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, req, fp, code, msg, headers, newurl):
                     safe_redirect = validate_public_url(newurl)
+                    if (
+                        queried_origin is not None
+                        and normalized_origin(safe_redirect) != queried_origin
+                    ):
+                        raise ResearchAccessError(
+                            "Security Denial: queried URLs cannot redirect across origins"
+                        )
                     return super().redirect_request(
                         req, fp, code, msg, headers, safe_redirect
                     )
