@@ -1,4 +1,4 @@
-# gorkbot v0
+# arity v0
 
 Axiomatic, multi-kernel assistant core in Python 3.13 standard library.
 

@@ -105,7 +105,7 @@ def start_local_daemon() -> tuple[http.server.HTTPServer, str]:
 
 def run_demo() -> None:
     print("=" * 65)
-    print("  GORKBOT v0 SYSTEM DEMO - MULTI-MODEL KERNEL COORDINATION")
+    print("  ARITY v0 SYSTEM DEMO - MULTI-MODEL KERNEL COORDINATION")
     print("=" * 65)
 
     store = Store(workspace_dir=Path("./workspace"))
@@ -301,7 +301,7 @@ def run_demo() -> None:
     # SUMMARY TOTALS
     # -------------------------------------------------------------
     print("\n" + "=" * 65)
-    print("  GORKBOT v0 RUN COMPLETE - TOTAL METRICS")
+    print("  ARITY v0 RUN COMPLETE - TOTAL METRICS")
     print("=" * 65)
     print(f"Total Model Calls : {ledger.total_calls}")
     print(f"Total Tokens Used : {ledger.total_tokens}")

@@ -1,4 +1,4 @@
-# gorkbot v0
+# arity v0
 
 A small standard-library implementation of the continuity/composition core.
 

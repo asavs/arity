@@ -38,7 +38,7 @@ SEEDS = [
     ("openai", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1",
      None, "api", "openrouter:account"),
 ]
-DEFAULT_BUDGET = int(os.environ.get("GORK_SEAT_BUDGET", "400000"))
+DEFAULT_BUDGET = int(os.environ.get("ARITY_SEAT_BUDGET", "400000"))
 
 def window_s(provider):
     return (CACHE_TABLE.get(provider) or CACHE_TABLE["nim"])["window_s"] \
@@ -83,12 +83,12 @@ class Proxy:
     def headers(self, seat):
         h = {"Content-Type": "application/json", "Authorization": "Bearer " + self._keys[seat.id]}
         if "openrouter" in seat.endpoint:
-            h["HTTP-Referer"], h["X-Title"] = "https://redphone.example/asas", "gorkbot"
+            h["HTTP-Referer"], h["X-Title"] = "https://redphone.example/asas", "arity"
         return h
 
 def _openrouter_models(key):
     """OpenRouter's roster moves weekly, so ask it rather than hardcoding a guess."""
-    env = os.environ.get("GORK_OPENROUTER_MODELS")
+    env = os.environ.get("ARITY_OPENROUTER_MODELS")
     if env:
         return [m.strip() for m in env.split(",") if m.strip()]
     try:

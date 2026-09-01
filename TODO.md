@@ -18,7 +18,7 @@ Longer horizon, cut by axiom rather than by subsystem:
 - [ ] Tie-break inside a correctness tier by actual cost when measured, API-equivalent otherwise; show both.
 
 ## Front door
-- [x] `arity run "<brief>"` goes through the trial pipeline (explicit `--arity`, `ARITY`, then legacy `GORKBOT_CONCURRENCY`,
+- [x] `arity run "<brief>"` goes through the trial pipeline (explicit `--arity`, `ARITY`, then legacy `ARITY_CONCURRENCY`,
       review on tie, conference off) and then **delivers**: winning sandbox copied to `--out` or
       `deliveries/<task_id>/`, or the closing output printed when there are no files. One-line receipt.
 - [x] Secretary asks Asa on a review disagreement (`human_pick`, recorded as `human_pick` records).
@@ -71,7 +71,7 @@ Longer horizon, cut by axiom rather than by subsystem:
       not enforcement - the wiki's answer is a leaf user that cannot see the repo.
 - [ ] Provider replay compatibility is its own fragility axis (Gemini thought signatures, Claude tool ids and
       empty parts). Consider a per-provider replay test that round-trips one tool call.
-- [x] Existing test suite writes into the real `.gorkbot/records` in places; `test_terrarium.py` was the
+- [x] Existing test suite writes into the real `.arity/records` in places; `test_terrarium.py` was the
       only one, and now passes a temp store. An audit of every `default_record_store()` caller found no
       other write-side offender. Registry-discovery tests in `test_race_runner.py` still *read* the user's
-      real `~/.gorkbot` overrides — same non-hermeticity, read side, still open.
+      real `~/.arity` overrides — same non-hermeticity, read side, still open.

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-01
 **Answers:** `A13-1` in [the axiom backlog](2026-09-01-axiom-backlog.md).
-**Source of the questions:** Axiom 13 in `.wiki/axioms.md` (sibling `Projects/gorkbot` repo).
+**Source of the questions:** Axiom 13 in `.wiki/axioms.md` (sibling `Projects/arity` repo).
 
 ## How to read this
 
@@ -40,14 +40,14 @@ Verdicts used below:
 
 | Seam | Declared in | Verdict |
 |---|---|---|
-| `ModelProvider` | `gorkbot/seams.py` | **Does not hold** — confinement and harness attribution ride on undeclared attributes |
-| `ToolRunner` | `gorkbot/seams.py` | **Does not hold** — a third-party *class* is never instantiated; the delivery contract is undeclared |
-| `RecordStore` / `RecordReader` | `gorkbot/seams.py` | **Holds with a leak** — two built-ins disagree on filter equality; journal locking probes undeclared attributes; write failures are swallowed |
-| `Transport` | `gorkbot/seams.py` | **Half a seam** — egress only. There is no ingress seam at all |
-| `Observer` | `gorkbot/seams.py` | **Holds, carries no weight** — every callback is wrapped in `except Exception: pass`, and the archivist that should use it does not |
-| `ContextAdapter` | `gorkbot/terrarium.py:131` | **Holds** — the cleanest seam in the repo. Not in `seams.py` |
-| `TrialEvaluator` | `gorkbot/evidence.py:587` | **Holds in-process; no socket** — the CLI cannot name one |
-| `TrialJournal` | `gorkbot/trial_events.py:455` | **Holds for one process; does not hold across processes** — its own docstring says so |
+| `ModelProvider` | `arity/seams.py` | **Does not hold** — confinement and harness attribution ride on undeclared attributes |
+| `ToolRunner` | `arity/seams.py` | **Does not hold** — a third-party *class* is never instantiated; the delivery contract is undeclared |
+| `RecordStore` / `RecordReader` | `arity/seams.py` | **Holds with a leak** — two built-ins disagree on filter equality; journal locking probes undeclared attributes; write failures are swallowed |
+| `Transport` | `arity/seams.py` | **Half a seam** — egress only. There is no ingress seam at all |
+| `Observer` | `arity/seams.py` | **Holds, carries no weight** — every callback is wrapped in `except Exception: pass`, and the archivist that should use it does not |
+| `ContextAdapter` | `arity/terrarium.py:131` | **Holds** — the cleanest seam in the repo. Not in `seams.py` |
+| `TrialEvaluator` | `arity/evidence.py:587` | **Holds in-process; no socket** — the CLI cannot name one |
+| `TrialJournal` | `arity/trial_events.py:455` | **Holds for one process; does not hold across processes** — its own docstring says so |
 
 Two facts apply to every row and are not repeated in each section:
 
@@ -55,13 +55,13 @@ Two facts apply to every row and are not repeated in each section:
   config key that names a class, no subprocess or RPC boundary at any seam. Every graft is a
   Python object passed to a constructor. The literal answer to "can an alien *binary* plug in
   cleanly with zero glue" is **no, at every seam** — an alien *Python object* can. The one
-  exception is `ARITY_STORE` / `GORKBOT_STORE` (`gorkbot/tools.py:453`,
-  `gorkbot/record_readers.py:80`), which selects between the two built-in record backends and
+  exception is `ARITY_STORE` / `ARITY_STORE` (`arity/tools.py:453`,
+  `arity/record_readers.py:80`), which selects between the two built-in record backends and
   cannot name a third.
 - **The spine is not injectable.** Axiom 13's stack audit lists the pure statechart as one of
   the five seams, with the join `transition(state, event) -> (new_state, effects)`. Arity's
   reducer is genuinely pure and genuinely the only place state changes, but `Runtime` imports
-  it at module level and calls it directly (`gorkbot/runtime.py:20,71`). It cannot be replaced
+  it at module level and calls it directly (`arity/runtime.py:20,71`). It cannot be replaced
   without editing `Runtime`.
   **[SEAM]** XState v5, LangGraph Pregel/checkpointers, Erlang OTP / Rust Ractor.
 
@@ -71,32 +71,32 @@ Two facts apply to every row and are not repeated in each section:
 
 **Declared:** `call(effect: CallModel) -> ModelCompleted | ModelFailed`. One method.
 **Implemented by:** `OpenAIModelProvider`, `GeminiModelProvider`, `CLIModelProvider`,
-`OMPModelProvider` (`gorkbot/handlers.py`); `AntigravityWireProvider`, `CodexWireProvider`,
-`GrokWireProvider`, `FallbackModelProvider` (`gorkbot/wire.py`).
+`OMPModelProvider` (`arity/handlers.py`); `AntigravityWireProvider`, `CodexWireProvider`,
+`GrokWireProvider`, `FallbackModelProvider` (`arity/wire.py`).
 
 ### Male join — **does not hold**
 
 A provider that implements the Protocol exactly and nothing more runs **unconfined** and is
 **misattributed in the evidence record**. Three undeclared attributes are load-bearing:
 
-- **`cwd`** — `gorkbot/terrarium.py:557-559` walks `(model_provider, model_provider.fallback)`
+- **`cwd`** — `arity/terrarium.py:557-559` walks `(model_provider, model_provider.fallback)`
   and sets `.cwd` on anything that has it. This is the only thing that keeps a CLI harness
   inside the candidate sandbox. A conforming third-party provider has no `cwd`, gets no
   confinement, and acts in the coordinator's own working directory — the Arity repo. The code
   already says so: `TODO(kernel): a CLI's own tools still bypass the role's denial set;
   sandboxing by cwd is containment, not enforcement.`
-- **`fallback` / `fallback_count`** — `gorkbot/terrarium.py:618-621` reads these to append
+- **`fallback` / `fallback_count`** — `arity/terrarium.py:618-621` reads these to append
   `->cli` to the recorded harness name when a wire fell back mid-run. A third-party provider
   that internally reroutes to a different model or harness reports `fallbacks: 0`, and the
   trial record attributes the result to the harness the signature *claims*. That is not a
   plumbing gap; it is an evidence-integrity failure, in the subsystem whose entire purpose is
   attributable evidence.
-- **`primary`** — `gorkbot/terrarium.py:551` distinguishes "a bare CLI" from "a wire with a
+- **`primary`** — `arity/terrarium.py:551` distinguishes "a bare CLI" from "a wire with a
   fallback" by `hasattr(model_provider, "primary")`, to decide whether to file the trial under
   `cli:<harness>` or under `wire`.
 
 Also undeclared and read elsewhere: `harness`, `model`, `account_key`
-(`gorkbot/wire.py:450-459`, `gorkbot/terrarium.py:552`).
+(`arity/wire.py:450-459`, `arity/terrarium.py:552`).
 
 This is `A12-3` in the backlog: a `HarnessAware` protocol. Until it exists, the honest
 statement is that Arity has *two* model seams — the declared one, and an undeclared one that
@@ -104,20 +104,20 @@ decides confinement and attribution.
 
 ### Female joins — pluggability
 
-One method to implement, and it must return the frozen dataclasses from `gorkbot/types.py`,
+One method to implement, and it must return the frozen dataclasses from `arity/types.py`,
 not duck-typed equivalents (`Runtime` re-queues the return value as an `Event` and
 `transition` dispatches on `isinstance`). `runtime_checkable` means `isinstance(x,
 ModelProvider)` only checks that a `call` attribute exists — it will accept a class object as
 readily as an instance.
 
-Sockets that exist: `Runtime(model_provider=...)` (`gorkbot/runtime.py:46`),
+Sockets that exist: `Runtime(model_provider=...)` (`arity/runtime.py:46`),
 `CandidateSpec.custom_model_provider` and `CandidateSpec.harness`
-(`gorkbot/terrarium.py:160,166`), `TerrariumDispatcher(model_factory=...)`
-(`gorkbot/terrarium.py:383`), `ArityOrchestrator(model_factory=...)`
-(`gorkbot/orchestrator.py:71`).
+(`arity/terrarium.py:160,166`), `TerrariumDispatcher(model_factory=...)`
+(`arity/terrarium.py:383`), `ArityOrchestrator(model_factory=...)`
+(`arity/orchestrator.py:71`).
 
 Socket that is missing: the orchestrator's direct-chat path reaches into
-`self.terrarium._model_factory` (`gorkbot/orchestrator.py:184`) — a private attribute of
+`self.terrarium._model_factory` (`arity/orchestrator.py:184`) — a private attribute of
 another object — rather than holding its own.
 
 ### Boundary of intent
@@ -138,9 +138,9 @@ none of it. Everything in it is rentable.
 
 - **[SEAM]** LiteLLM (load balancing, circuit breakers), OpenRouter Auto, RouteLLM, Not
   Diamond, vLLM Semantic Router, CLIProxyAPI (seat pooling).
-- **[SEAM]** OAuth device-flow + token refresh (`gorkbot/auth.py`): any maintained OAuth
+- **[SEAM]** OAuth device-flow + token refresh (`arity/auth.py`): any maintained OAuth
   client library.
-- **[SEAM]** Per-provider payload translation (`gorkbot/gemini_format.py`): LiteLLM's
+- **[SEAM]** Per-provider payload translation (`arity/gemini_format.py`): LiteLLM's
   translation layer covers this.
 
 ---
@@ -149,17 +149,17 @@ none of it. Everything in it is rentable.
 
 **Declared:** `execute(effect: ExecuteTool) -> ToolCompleted` and
 `get_schemas() -> list[dict]`.
-**Implemented by:** `LocalToolRunner` (`gorkbot/handlers.py:400`), `SandboxToolRunner`
-(`gorkbot/tools.py:44`), `McpToolAdapter` (`gorkbot/tools.py:563`).
+**Implemented by:** `LocalToolRunner` (`arity/handlers.py:400`), `SandboxToolRunner`
+(`arity/tools.py:44`), `McpToolAdapter` (`arity/tools.py:563`).
 
 ### Male join — **does not hold**
 
 Two independent defects, both verified.
 
 **A third-party `ToolRunner` class is never instantiated.** `CandidateSpec.tool_runner_type`
-explicitly accepts `type[ToolRunner]` (`gorkbot/terrarium.py:161`). The dispatch chain checks
+explicitly accepts `type[ToolRunner]` (`arity/terrarium.py:161`). The dispatch chain checks
 `isinstance(spec.tool_runner_type, ToolRunner)` *before* the `callable(...)` branch
-(`gorkbot/terrarium.py:510` vs `:512`). Because `ToolRunner` is `runtime_checkable`, that
+(`arity/terrarium.py:510` vs `:512`). Because `ToolRunner` is `runtime_checkable`, that
 `isinstance` only asks whether the object has `execute` and `get_schemas` — and a *class*
 object has both. So a custom class takes the instance branch, is assigned as-is, and the first
 call fails:
@@ -176,18 +176,18 @@ The two built-in classes escape this only because they are special-cased by iden
 
 **The kernel's final answer travels on an undeclared string prefix.** When a kernel ends its
 turn by calling `message(to="user")`, `SandboxToolRunner` returns the literal
-`"[Delivered to Asa]: <text>"` (`gorkbot/tools.py:424`), and the dispatcher recovers the
+`"[Delivered to Asa]: <text>"` (`arity/tools.py:424`), and the dispatcher recovers the
 candidate's output by scanning tool messages for that prefix and splitting on `"]: "`
-(`gorkbot/terrarium.py:648-653`). The comment there notes Claude in particular delivers its
+(`arity/terrarium.py:648-653`). The comment there notes Claude in particular delivers its
 answer this way and then stops with empty content. An alien `ToolRunner` that satisfies the
 Protocol has no way to know this string exists, so a Claude candidate running on it records
 **no output** and loses its trial.
 
 **Also:** denial-set enforcement is a property of one implementation, not of the seam.
-`SandboxToolRunner` checks role, path, host, and command (`gorkbot/tools.py:96-139`).
+`SandboxToolRunner` checks role, path, host, and command (`arity/tools.py:96-139`).
 `LocalToolRunner` checks nothing — `(self.workspace_root / path).resolve()`
-(`gorkbot/handlers.py:460,487`) escapes on `../` or an absolute path, and `run_command` is
-`shell=True` with no filter (`gorkbot/handlers.py:506`). The MCP arm checks
+(`arity/handlers.py:460,487`) escapes on `../` or an absolute path, and `run_command` is
+`shell=True` with no filter (`arity/handlers.py:506`). The MCP arm checks
 `role.can_use_tool` only. This is backlog `A2-2`; it is repeated here because it means "swap
 the tool runner" also silently swaps the security model.
 
@@ -200,7 +200,7 @@ external tool executor and is the best-shaped one in the repo — it just has no
 plugged into it.
 
 **`create_mcp_tool_runner` speaks no MCP.** It is an in-process Python closure over local
-primitives that appends `"via MCP"` to its output strings (`gorkbot/tools.py:618-726`). No
+primitives that appends `"via MCP"` to its output strings (`arity/tools.py:618-726`). No
 JSON-RPC, no stdio, no server. Trials attributing wins to an `mcp_tools` arm are attributing
 them to local Python. This is backlog `A2-4`.
 
@@ -208,12 +208,12 @@ them to local Python. This is backlog `A2-4`.
 
 The opinion is not the sandbox — it is that **the tool runner is a comparable trial axis**:
 `normalize_tool_runner` gives it a canonical name that enters the trial signature
-(`gorkbot/terrarium.py:103`, `:203`), so "did MCP or native tools do better on this task for
+(`arity/terrarium.py:103`, `:203`), so "did MCP or native tools do better on this task for
 this model" is a question with a recorded answer. Nobody else is asking it that way.
 
 Everything under it is commodity, and ours is weak: `cwd` is containment, not isolation; there
 is no container, VM, or user boundary anywhere in the repo (verified: no Docker, Firecracker,
-or podman reference in `gorkbot/`). The README's claim of "Docker/WSL sandboxes"
+or podman reference in `arity/`). The README's claim of "Docker/WSL sandboxes"
 (`README.md:53`) describes an intention, not code.
 
 - **[SEAM]** MCP: the official SDK, as a real JSON-RPC client over stdio/Streamable HTTP.
@@ -229,9 +229,9 @@ or podman reference in `gorkbot/`). The README's claim of "Docker/WSL sandboxes"
 
 **Declared:** `RecordReader.query(kind, **filters) -> list[dict]`;
 `RecordStore` adds `append(effect: StoreRecord) -> None`.
-**Implemented by:** `JsonlRecordStore` (`gorkbot/handlers.py:550`), `SqliteRecordStore`
-(`gorkbot/stores/sqlite.py:11`), and the query-only `JsonlRecordReader` /
-`SqliteRecordReader` (`gorkbot/record_readers.py`).
+**Implemented by:** `JsonlRecordStore` (`arity/handlers.py:550`), `SqliteRecordStore`
+(`arity/stores/sqlite.py:11`), and the query-only `JsonlRecordReader` /
+`SqliteRecordReader` (`arity/record_readers.py`).
 
 ### Male join — **holds with a leak**
 
@@ -240,23 +240,23 @@ reader refuses to turn malformed persistence into a shorter, apparently-valid lo
 leaks:
 
 - **The two halves disagree on what a filter means.** `JsonlRecordStore.query` compares with
-  Python `==` (`gorkbot/handlers.py:581`), so `1` matches `True`. `JsonlRecordReader` uses
-  `_strict_equal`, which compares types first (`gorkbot/record_readers.py:102-124`). Same
+  Python `==` (`arity/handlers.py:581`), so `1` matches `True`. `JsonlRecordReader` uses
+  `_strict_equal`, which compares types first (`arity/record_readers.py:102-124`). Same
   Protocol, two semantics, and nothing tells a third-party store which one the journal
   requires. Latent rather than live today, because `TrialJournal` filters only on a string
   `trial_id`.
 - **Journal locking probes undeclared attributes.** `_journal_lock`
-  (`gorkbot/trial_events.py:47-57`) keys the shared in-process lock off `store.path` or
+  (`arity/trial_events.py:47-57`) keys the shared in-process lock off `store.path` or
   `store.root` — neither declared by the Protocol — and falls back to `object:{id(store)}`.
   A conforming third-party store gets the fallback, so two journals wrapping two handles on
   the *same* backing store do not share a lock, and sequence allocation races.
 - **Write failures are silent.** `Runtime.step` wraps `self.store.append(effect)` in
-  `except Exception: pass` (`gorkbot/runtime.py:86-90`). A third-party store that fails to
+  `except Exception: pass` (`arity/runtime.py:86-90`). A third-party store that fails to
   persist loses records and generates no friction record. This is the bad direction of "the
   rest doesn't notice." Same for `Transport.emit` (`:93-97`). Backlog `A12-2`.
 
-Minor: `hasattr(self.store, "query")` (`gorkbot/terrarium.py:644`) and
-`hasattr(self.store, "append")` (`gorkbot/transports.py:56,90`) guard methods the Protocol
+Minor: `hasattr(self.store, "query")` (`arity/terrarium.py:644`) and
+`hasattr(self.store, "append")` (`arity/transports.py:56,90`) guard methods the Protocol
 already requires — harmless, but they signal that callers do not trust the seam.
 
 ### Female joins — pluggability
@@ -267,16 +267,16 @@ free string; the kinds actually in use are `message`, `model_turn`, `tool_result
 declared anywhere — a store that wanted to shard or index by kind would have to discover it by
 reading the code.
 
-`ARITY_STORE` / `GORKBOT_STORE` selects `jsonl` or `sqlite` and nothing else. There is no way
+`ARITY_STORE` / `ARITY_STORE` selects `jsonl` or `sqlite` and nothing else. There is no way
 to name a third backend from configuration.
 
 ### Boundary of intent
 
 The storage engine is commodity and should be. The opinion is one layer up, in what gets
 stored: the **frozen evidence bundle** with per-artifact content hashes
-(`gorkbot/evidence.py:147-485`), and a **`Resolution` that is attributable to a named
+(`arity/evidence.py:147-485`), and a **`Resolution` that is attributable to a named
 evaluator panel** and records `expected_evaluator_ids` alongside the ones that actually
-reported (`gorkbot/evidence.py:614`). That refusal to quietly resolve on a partial panel is
+reported (`arity/evidence.py:614`). That refusal to quietly resolve on a partial panel is
 genuinely ours and is not what memory frameworks are built for.
 
 Memory in the Letta/Zep sense — tiered working/recall/archival, temporal knowledge graphs,
@@ -292,8 +292,8 @@ vector recall — does not exist here at all, and when it is wanted it should be
 ## 4. `Transport`
 
 **Declared:** `emit(effect: EmitMessage) -> None`. One method.
-**Implemented by:** `ConsoleTransport` (`gorkbot/handlers.py:592`), `WebhookTransport`
-(`gorkbot/transports.py:97`), `_NullTransport` (`gorkbot/terrarium.py:47`).
+**Implemented by:** `ConsoleTransport` (`arity/handlers.py:592`), `WebhookTransport`
+(`arity/transports.py:97`), `_NullTransport` (`arity/terrarium.py:47`).
 
 ### Male join — **half a seam**
 
@@ -303,14 +303,14 @@ the seam is only half there.
 Axiom 13's own join description is: *"Transports ingest raw wire protocols and emit
 `Event::UserMessage` / `Event::Interrupt`; receive `Effect::EmitMessage`."* Arity implements
 the receive half only. **There is no ingress seam.** `RedphoneInbox`
-(`gorkbot/transports.py:29`) is a concrete class holding an in-process dict, is not a Protocol,
+(`arity/transports.py:29`) is a concrete class holding an in-process dict, is not a Protocol,
 implements nothing in `seams.py`, and is called directly by the orchestrator
-(`gorkbot/orchestrator.py:113`). Input arrives by calling
+(`arity/orchestrator.py:113`). Input arrives by calling
 `ArityOrchestrator.handle_message(str)` from Python. Nothing can inject an `Interrupt` at all —
-the event type exists and the reducer handles it (`gorkbot/transition.py:291`), but no seam
+the event type exists and the reducer handles it (`arity/transition.py:291`), but no seam
 can produce one.
 
-`WebhookTransport`'s default callback is `pass` (`gorkbot/transports.py:108`). The module
+`WebhookTransport`'s default callback is `pass` (`arity/transports.py:108`). The module
 docstring claims "SMS, voice, webhooks"; the code is a list and a no-op. Backlog `A6-1`,
 `A10-2`.
 
@@ -341,7 +341,7 @@ triage, not about transport.
 ## 5. `Observer`
 
 **Declared:** `on_event(state, event)` and `on_effect(state, effect)`, both returning `None`.
-**Implemented by:** `MetricsObserver` (`gorkbot/handlers.py:608`). That is the only
+**Implemented by:** `MetricsObserver` (`arity/handlers.py:608`). That is the only
 implementation in the repo.
 
 ### Male join — **holds, but carries no weight**
@@ -350,18 +350,18 @@ Nothing depends on an observer, so anything can replace it and nothing notices �
 pass, practically a sign the seam is not doing work. Two things to be honest about:
 
 - **Every callback is swallowed.** Both loops wrap the call in `except Exception: pass`
-  (`gorkbot/runtime.py:64-68`, `:74-79`). A third-party observer that throws on every event is
+  (`arity/runtime.py:64-68`, `:74-79`). A third-party observer that throws on every event is
   indistinguishable from one that works. Telemetry that can fail silently is telemetry you
   cannot trust to be complete.
-- **The archivist does not use this seam.** `gorkbot/archivist.py:17` imports `Observer` and
+- **The archivist does not use this seam.** `arity/archivist.py:17` imports `Observer` and
   never references it again. `ImpartialArchivist` audits by reading the candidate's workspace
-  from disk and querying the record store (`gorkbot/archivist.py:60-95`). Axiom 13's stack
+  from disk and querying the record store (`arity/archivist.py:60-95`). Axiom 13's stack
   audit describes the Observer join as exactly this: *"passively sniffs events and effects on
   the wire, letting the impartial archivist audit claimed model changes against real tool logs
   without invading the agent loop."* That is the design. It is not the implementation.
 
 Note also that a `SpawnHandoff` child runtime is constructed with the parent's observer list
-(`gorkbot/runtime.py:131`), so one `MetricsObserver` accumulates parent and child tokens into
+(`arity/runtime.py:131`), so one `MetricsObserver` accumulates parent and child tokens into
 one number with no way to separate them.
 
 ### Female joins — pluggability
@@ -381,7 +381,7 @@ what a kernel did, cross-checked against artifacts, that is *also* the fallback 
 dies without writing its own report. Nobody else builds that, because nobody else treats a
 model's own account of its work as one of two accounts. But note `A9`: the "kernel self-report"
 is currently an f-string the dispatcher writes about the kernel
-(`gorkbot/terrarium.py:641`), so the two-account structure has one real leg.
+(`arity/terrarium.py:641`), so the two-account structure has one real leg.
 
 - **[SEAM]** OpenTelemetry GenAI semantic conventions, Langfuse, Arize Phoenix (tracing,
   token/cost accounting, Bradley-Terry eval judges).
@@ -391,7 +391,7 @@ is currently an f-string the dispatcher writes about the kernel
 ## 6. `ContextAdapter`
 
 **Declared:** `adapter_id: str` and `apply(envelope: ContextEnvelope) -> ContextEnvelope`
-(`gorkbot/terrarium.py:131`). Not in `seams.py`; not `runtime_checkable`.
+(`arity/terrarium.py:131`). Not in `seams.py`; not `runtime_checkable`.
 
 ### Male join — **holds**
 
@@ -399,13 +399,13 @@ This is the best-behaved seam in the repo, and the reason is that its contract i
 both ends rather than assumed:
 
 - `CandidateSpec.__post_init__` rejects an adapter without a non-empty `adapter_id`
-  (`gorkbot/terrarium.py:172`).
+  (`arity/terrarium.py:172`).
 - The dispatcher type-checks the return value: `if not isinstance(adapted, ContextEnvelope):
-  raise TypeError` (`gorkbot/terrarium.py:591`).
+  raise TypeError` (`arity/terrarium.py:591`).
 - `ContextEnvelope` is a frozen dataclass with a tuple of messages, so an adapter cannot
   mutate the caller's state by accident.
 - `adapter_id` enters the trial signature as `ctx_adapter=<id>`
-  (`gorkbot/terrarium.py:208`), so an adapter's effect on outcomes is recorded and comparable.
+  (`arity/terrarium.py:208`), so an adapter's effect on outcomes is recorded and comparable.
 
 An external compaction strategy can be dropped in and the rest genuinely does not notice.
 
@@ -415,7 +415,7 @@ One attribute, one method, one frozen input type, one frozen output type. This i
 answer to give anyone asking what an Arity plug looks like.
 
 Gaps, both small: it is named in the `seams.py` docstring catalog but not defined or
-re-exported there, so `from gorkbot.seams import ContextAdapter` still fails (backlog
+re-exported there, so `from arity.seams import ContextAdapter` still fails (backlog
 `A12-4`); it is not `runtime_checkable`, so it cannot be validated by `isinstance` the way the
 others can; and like everything else it must be a Python object — there is no way to name an
 adapter from the CLI or config.
@@ -438,26 +438,26 @@ retrieval — is commodity and should be borrowed.
 ## 7. `TrialEvaluator`
 
 **Declared:** `evaluator_id: str` and `evaluate(bundle: EvidenceBundle) -> Evaluation`
-(`gorkbot/evidence.py:587`). Not in `seams.py`.
+(`arity/evidence.py:587`). Not in `seams.py`.
 
 ### Male join — **holds in-process**
 
-`evaluate_bundle` (`gorkbot/evidence.py:596-603`) enforces the contract properly: the return
+`evaluate_bundle` (`arity/evidence.py:596-603`) enforces the contract properly: the return
 must be an `Evaluation`, it must validate against the bundle it claims to judge, and its
 `evaluator_id` must match the evaluator that produced it. An evaluator that lies about its own
 identity is rejected rather than recorded.
 
 Failures are handled honestly rather than swallowed: an evaluator that raises is recorded as a
 `review.recorded` event with `status: failed` and the exception text
-(`gorkbot/race.py:853-863`), and a declared judge that never reported is recorded as
-`status: missing` (`gorkbot/race.py:876-886`). This is the one place in the repo where a seam
+(`arity/race.py:853-863`), and a declared judge that never reported is recorded as
+`status: missing` (`arity/race.py:876-886`). This is the one place in the repo where a seam
 failing is treated as evidence instead of noise.
 
 ### Female joins — **no socket outside Python**
 
-`RaceConfig.evaluators` (`gorkbot/race.py:88`) is reachable only from the Python API —
-`run_front_door(evaluators=[...])` (`gorkbot/race.py:1432`). The CLI never constructs one;
-`gorkbot/inspection_cli.py` reads `evaluator_id` only to display it. So the only evaluators
+`RaceConfig.evaluators` (`arity/race.py:88`) is reachable only from the Python API —
+`run_front_door(evaluators=[...])` (`arity/race.py:1432`). The CLI never constructs one;
+`arity/inspection_cli.py` reads `evaluator_id` only to display it. So the only evaluators
 that can run from the shipped front door are the built-in LLM judges named by `--judges`.
 
 An external eval service — the obvious thing to plug in here — cannot be plugged in without
@@ -469,7 +469,7 @@ LLM-as-judge is commodity and the ecosystem is ahead of us. The opinion is the s
 discipline: an evaluation is **bound to one content-hashed evidence bundle**, carries its
 evaluator's identity, and a resolution names both the panel it *expected* and the panel that
 *reported*, so a partial panel produces an unresolved trial instead of a quiet winner
-(`gorkbot/evidence.py:713`, `gorkbot/race.py:890`). That is refusal-to-attribute as a
+(`arity/evidence.py:713`, `arity/race.py:890`). That is refusal-to-attribute as a
 first-class behavior, and it is worth keeping when the judging itself is rented.
 
 - **[SEAM]** Langfuse / Phoenix judges, promptfoo, DeepEval, Inspect.
@@ -478,7 +478,7 @@ first-class behavior, and it is worth keeping when the judging itself is rented.
 
 ## 8. `TrialJournal`
 
-**Declared:** a concrete class, not a Protocol (`gorkbot/trial_events.py:455`). It *consumes*
+**Declared:** a concrete class, not a Protocol (`arity/trial_events.py:455`). It *consumes*
 the `RecordStore` seam and exposes `append(event_type, payload, idempotency_key=...)` and
 `replay()`.
 
@@ -489,26 +489,26 @@ sequence allocation in-process. Cross-process orchestration requires a RecordSto
 transactional sequence allocation."* That is exactly right and exactly the constraint.
 
 Sequence allocation is guarded by a module-level dict of `threading.RLock`s keyed by
-`(store_identity, trial_id)` (`gorkbot/trial_events.py:35-57`), where store identity is
+`(store_identity, trial_id)` (`arity/trial_events.py:35-57`), where store identity is
 `store.path` or `store.root` — undeclared attributes, as noted under `RecordStore`. Two
 coordinator processes writing the same trial will allocate the same sequence number, and
 replay will then refuse the log: `_coalesce_events` raises on conflicting events at one
-sequence and on gaps (`gorkbot/trial_events.py:527-552`). Failing loudly at read time is the
+sequence and on gaps (`arity/trial_events.py:527-552`). Failing loudly at read time is the
 right choice; it does not make the write path safe.
 
 Replay itself is strict in a way worth preserving: exactly one `trial.started` at sequence 1,
-no gaps, unique arm ids and ordinals, unique idempotency keys (`gorkbot/trial_events.py:555+`).
+no gaps, unique arm ids and ordinals, unique idempotency keys (`arity/trial_events.py:555+`).
 
 ### Female joins — pluggability
 
 The journal is not itself pluggable — it is a concrete class with a hardcoded event
 vocabulary (`trial.started`, `arm.completed`, `evidence.frozen`, `review.recorded`,
-`resolution.recorded`, `delivery.completed`; `gorkbot/trial_events.py:26-33`). What it needs
+`resolution.recorded`, `delivery.completed`; `arity/trial_events.py:26-33`). What it needs
 *from* a plug is one thing the `RecordStore` seam does not offer: **atomic sequence
 allocation**. If that were declared — an optional `allocate_sequence(kind, key) -> int`, or a
 compare-and-set append — a Postgres or EventStoreDB backend would make cross-process
 orchestration work with no other change. `SqliteRecordStore` already has the unique index that
-would support it (`gorkbot/stores/sqlite.py:36-41`).
+would support it (`arity/stores/sqlite.py:36-41`).
 
 ### Boundary of intent
 
@@ -530,9 +530,9 @@ append-only record that will not quietly reinterpret itself is close to the whol
 - **Ingress.** See `Transport` above. Nothing can deliver a `UserMessage` or an `Interrupt`
   into a running session from outside Python.
 - **Clock / scheduler.** `SchedulePulse` is in the `Effect` union and imported by the reducer
-  (`gorkbot/types.py:149`, `gorkbot/transition.py:27`), but nothing emits it and `Runtime.step`
-  has no branch that executes it (`gorkbot/runtime.py:84-147`) — it would be silently dropped.
-  `PulseEngine` is an advisory object the orchestrator polls (`gorkbot/orchestrator.py:204`).
+  (`arity/types.py:149`, `arity/transition.py:27`), but nothing emits it and `Runtime.step`
+  has no branch that executes it (`arity/runtime.py:84-147`) — it would be silently dropped.
+  `PulseEngine` is an advisory object the orchestrator polls (`arity/orchestrator.py:204`).
   Axiom 11 needs a clock that outlives a process; that is a seam, and it is unstarted.
   Backlog `A11-1`, `A11-2`.
   **[SEAM]** systemd timers / cron, APScheduler, Temporal.

@@ -4,7 +4,7 @@
 **Companion to:** [the fleet-development position](2026-09-01-agent-fleet-development.md),
 [the quiet-failure inventory](2026-09-01-quiet-failures.md), [the seam register](seam-register.md),
 the 2026-08-31 codebase audit, and `.wiki/axioms.md` (which lives in the sibling
-`Projects/gorkbot` repo, not this one).
+`Projects/arity` repo, not this one).
 
 ## How to read this
 
@@ -352,7 +352,7 @@ in-process dict, an egress-only callback) with the axioms kept as stated intent.
 
 ## A7 — The voice is a role held by one model for a period
 
-**Status:** The table is now real. `gorkbot/cache_economics.py` holds one table sourced from
+**Status:** The table is now real. `arity/cache_economics.py` holds one table sourced from
 the wiki; `pulse.py` and the chat header read it, and seeded seats take their warm window
 from it. The arithmetic changed substantially — Anthropic's cold-100k penalty went from
 $0.345 to $0.90 — because the old private table was costing Claude 3.5 Sonnet and GPT-4o.
@@ -482,7 +482,7 @@ everywhere*.
   built runner that happens to define `__call__` is still used rather than called. The delivery
   marker has one home, `tools.USER_DELIVERY_MARKER`, with its text frozen since it appears in
   candidate-visible output and past records. Open follow-up: the constant is importable from
-  `gorkbot.tools` but is not on the package surface or next to the `ToolRunner` Protocol an
+  `arity.tools` but is not on the package surface or next to the `ToolRunner` Protocol an
   alien implementor would actually read.
 - **A13-2 (original statement)** Two concrete defects the register found, both verified by execution:
   `isinstance(SomeRunnerClass, ToolRunner)` returns `True` because `runtime_checkable` only
@@ -499,7 +499,7 @@ everywhere*.
 
 ## "Axiom 36" — presence
 
-**Status:** The mechanism works as of 2026-09-01 — locks persist to `~/.gorkbot/presence.json`
+**Status:** The mechanism works as of 2026-09-01 — locks persist to `~/.arity/presence.json`
 with a 12-hour TTL and are re-applied after seeding. The number still does not exist.
 
 - **X-1 [DECIDE]** Register presence in the wiki as a numbered axiom, or renumber the three

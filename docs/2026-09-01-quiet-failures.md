@@ -1,7 +1,7 @@
-# Quiet failures — every silent exception handler in `gorkbot/`
+# Quiet failures — every silent exception handler in `arity/`
 
 **Date:** 2026-09-01
-**Scope:** the `gorkbot/` package only. The root `gorkbot.py` legacy prototype and `impl/` are
+**Scope:** the `arity/` package only. The root `arity.py` legacy prototype and `impl/` are
 excluded by design.
 **Companion to:** the 2026-08-31 codebase audit, [the axiom backlog](2026-09-01-axiom-backlog.md).
 
@@ -105,7 +105,7 @@ convert at all".
 | `auth.py:245` | per-row OMP credential parse | `parsed.get("email")` on a non-dict raises `AttributeError` and is absorbed; one credential is silently not imported. |
 | `auth.py:248` | the whole OMP SQLite block, **including `conn.close()`** | A schema change or a code error reads as "no OMP credentials". The connection also leaks, because `close()` is inside the `try`. |
 | `auth.py:264` | the Codex `auth.json` parse block | A `KeyError`/`TypeError` reads as "no Codex credential on this machine". |
-| `tools.py:464` | `json.loads(config.json)` in `get_config_value` | A single typo in `.gorkbot/config.json` silently disables **every** setting in the file; each lookup falls through to `None` and the caller's default. Nothing tells the user their config is not being read. |
+| `tools.py:464` | `json.loads(config.json)` in `get_config_value` | A single typo in `.arity/config.json` silently disables **every** setting in the file; each lookup falls through to `None` and the caller's default. Nothing tells the user their config is not being read. |
 
 ## BENIGN — 14
 
@@ -169,7 +169,7 @@ read path exists.
   ends a race that would otherwise have produced a usable result. For `runtime.py:90`, on the
   effect-dispatch path, that is every turn of every candidate.
 - *Cost:* the discovery loops (`roles.py`, `skills.py`, `tasks.py`) currently tolerate one bad file
-  in a directory. Raising means a single malformed `.md` in `~/.gorkbot/roles/` stops Arity from
+  in a directory. Raising means a single malformed `.md` in `~/.arity/roles/` stops Arity from
   starting. That may well be right — a role that silently becomes the Secretary is arguably worse —
   but it is a real change in failure posture and should be chosen, not inherited.
 - *Benefit:* it is the only option that cannot itself be swallowed.
@@ -195,7 +195,7 @@ Two smaller decisions ride along with the main one:
 
 ## Method, and a caveat on line numbers
 
-Found by walking the AST of every `.py` file under `gorkbot/` and selecting `ExceptHandler` nodes
+Found by walking the AST of every `.py` file under `arity/` and selecting `ExceptHandler` nodes
 whose body consists only of `pass`, `continue`, `break`, or a bare constant. That catches the
 whole category by structure rather than by grep, which is why the count (42) is lower than the
 audit's "~38 across ~15 files" estimate in file count and higher in site count — a text search for

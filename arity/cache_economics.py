@@ -1,7 +1,7 @@
 """Arity cache economics — the one Axiom 7 table, and the only one.
 
 Source of record: the wiki's Axiom 7, "How long a kernel wants to live", at
-`gorkbot/.wiki/axioms.md` (checked out here as `C:/Users/example/Projects/gorkbot/.wiki/axioms.md`),
+`arity/.wiki/axioms.md` (checked out here as `C:/Users/example/Projects/arity/.wiki/axioms.md`),
 summarising `.wiki/research/2026-08-27-prompt-cache-economics-codex.md`. Every number below
 comes from those two documents. When they change, this file changes; nothing else in Arity
 carries a second copy of them.

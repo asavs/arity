@@ -1,4 +1,4 @@
-"""gorkbot v0 core implementation."""
+"""arity v0 core implementation."""
 
 from archivist import Archivist
 from cadence import Cadence, Conversation

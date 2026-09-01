@@ -1,4 +1,4 @@
-"""gorkbot v0: continuity and composition, with replaceable edges."""
+"""arity v0: continuity and composition, with replaceable edges."""
 
 from casting import Cadence, Caster, Conversation, Pulse, Scorecard
 from ledger import CACHE_TABLE, Ledger, Seat

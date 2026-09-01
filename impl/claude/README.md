@@ -1,4 +1,4 @@
-# gorkbot v0
+# arity v0
 
 One voice, a staff, and a door to each — small and real. Python 3.13, stdlib only, 1,497 lines
 across 11 modules. Nothing is mocked: every turn is a POST to a provider you have a key for, and
@@ -12,7 +12,7 @@ python demo.py
 Seats come from whichever of those exist; the kernel never sees a key (the proxy in `ledger.py`
 injects it). Output goes to stdout and `run.log`; artifacts to `run/` — `workspace/` is what the
 builder built, `tiers/` is the journal, `kernels/` holds each dead kernel's evidence envelope.
-`GORK_SEAT_BUDGET` caps tokens per seat (default 400000). The demo plays S1 (DM → handoff →
+`ARITY_SEAT_BUDGET` caps tokens per seat (default 400000). The demo plays S1 (DM → handoff →
 builder writes `brokie/schema.sql` → archivist verifies), S3 (sporadic cadence keeps the warm
 kernel), S36 (presence pushes a fresh cast elsewhere), S7 (a death with a report, then a starved
 seat so the report is genuinely ABSENT) and S39 (keepalive, then let go), and prints totals.

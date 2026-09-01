@@ -88,7 +88,7 @@ class ChatHarness:
         request = urllib.request.Request(seat.endpoint.rstrip("/") + "/chat/completions",
             data=json.dumps(body).encode(), method="POST",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                     "User-Agent": "gorkbot-v0"})
+                     "User-Agent": "arity-v0"})
         self.calls += 1
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
