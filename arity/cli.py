@@ -322,13 +322,15 @@ def show_roles():
         granted_tools = [s["function"]["name"] for s in runner.get_schemas() if s.get("function", {}).get("name") != "search"]
         print(f"  \033[1;33m• {role.name:20}\033[0m")
         print(f"    Description:   {role.description}")
+        if role.team:
+            print(f"    Team:          {role.team}")
         if role.skills:
             print(f"    Skills:        {', '.join(role.skills)}")
         print(f"    Granted Tools: \033[1;32m{', '.join(granted_tools)}\033[0m")
         if role.denial_set.denied_paths:
             print(f"    Path Locks:    {', '.join(role.denial_set.denied_paths)}")
         print()
-    print("\033[1;35m  Types (attach to any role as role:type, e.g. developer:python, reviewer:rust)\033[0m")
+    print("\033[1;35m  Types (attach to any role as role:type, e.g. developer:python, test-engineer:rust)\033[0m")
     for pack in registry.list_types():
         print(f"  \033[1;33m* {pack.name:20}\033[0m {pack.description}")
         print(f"    Skills:        {', '.join(pack.skills) or '-'}")
@@ -605,7 +607,7 @@ def main() -> int:
     race_parser.add_argument("--mock", action="store_true", help="Canned providers (good / slow / liar), ephemeral store, no tokens spent")
     race_parser.add_argument("--keep", action="store_true", help="Keep sandboxes after the race (default for live runs)")
     race_parser.add_argument("--teardown", action="store_true", help="Delete sandboxes after the race (default for --mock)")
-    race_parser.add_argument("--judges", type=str, default="", help="Review phase: comma-separated judge models that read a blind bundle and rank (reviewer role)")
+    race_parser.add_argument("--judges", type=str, default="", help="Review phase: comma-separated judge models that read a blind bundle and rank (Judge personality)")
     race_parser.add_argument("--review", choices=["tie", "always", "never"], default="tie", help="When the review phase runs (default: only when facts tie)")
     race_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="After the isolated build, wake the candidates up together for ROUNDS rounds (peers' work visible, notes via message(to='peer:X')), then re-verify")
     race_parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
@@ -623,7 +625,7 @@ def main() -> int:
         "run",
         help=(
             "Front door: trial a brief across a candidate limit, deliver the fact-ranked result, "
-            "and ask the Secretary when tie reviewers disagree"
+            "and ask the Secretary when judges disagree on a factual tie"
         ),
     )
     run_parser.add_argument("prompt", type=str, nargs="?", default="", help="What you want (or use --task)")
@@ -638,7 +640,7 @@ def main() -> int:
     )
     run_parser.add_argument(
         "--judges", type=str, default=None,
-        help="Blind reviewer models on a factual tie (default: the resolved candidates)",
+        help="Blind Judge models on a factual tie (default: the resolved candidates)",
     )
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
     run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
