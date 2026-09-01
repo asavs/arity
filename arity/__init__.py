@@ -62,6 +62,7 @@ from .tools import (
     PathTraversalError,
     SandboxToolRunner,
     SyntaxValidationError,
+    UnknownMessageRecipientError,
     resolve_sandbox_path,
 )
 from .scorecard import Scorecard, ScorecardRecord
@@ -253,6 +254,7 @@ __all__ = [
     "McpToolAdapter",
     "PathTraversalError",
     "SyntaxValidationError",
+    "UnknownMessageRecipientError",
     "resolve_sandbox_path",
     # Archivist & Scorecard
     "Scorecard",

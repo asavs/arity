@@ -88,6 +88,7 @@ class ArityOrchestrator:
             compiler=self.compiler,
             base_workspace=self.base_workspace,
             model_factory=model_factory,
+            roles=self.roles,
         )
 
         self._last_session: Optional[State] = None
@@ -162,13 +163,20 @@ class ArityOrchestrator:
         primary_seat = casting.primary_seat
 
         def route_peer_message(to_peer: str, text_msg: str) -> str:
-            peer_role = self.roles.resolve(to_peer)
+            peer_role = self.roles.get(to_peer)
+            if peer_role is None:
+                known = ", ".join(role.name for role in self.roles.list_roles())
+                return f"Error: Unknown message recipient '{to_peer}'. Registered personalities: {known}."
             peer_task = TaskRecord(from_role=target_role.name, to_role=peer_role.name, brief=text_msg)
             peer_casting = self.composer.cast(role=peer_role, task=text_msg, candidates_count=1, now=curr_time)
             peer_res = self.terrarium.dispatch_single(task=peer_task, seat=peer_casting.primary_seat, role=peer_role)
             return peer_res.output or f"[{peer_role.name} replied with no output]"
 
-        tool_runner = SandboxToolRunner(role=target_role, message_router=route_peer_message)
+        tool_runner = SandboxToolRunner(
+            role=target_role,
+            message_router=route_peer_message,
+            role_registry=self.roles,
+        )
         brief = self.compiler.assemble(
             role=target_role,
             task=user_text,
