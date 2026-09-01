@@ -4,11 +4,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import create_autospec, patch
 
 from arity.handlers import JsonlRecordStore
 from arity.ledger import Seat, SeatLedger
 from arity.orchestrator import ArityOrchestrator
-from arity.types import CallModel, ModelCompleted
+from arity.terrarium import TerrariumCandidateResult
+from arity.types import CallModel, ModelCompleted, State
 
 
 class TestArityOrchestrator(unittest.TestCase):
@@ -118,6 +120,70 @@ class TestArityOrchestrator(unittest.TestCase):
         # 6. Pulse tick discovers expiring seat
         pulse_actions = orchestrator.tick_pulse(now=10000.0)
         self.assertTrue(any(a.kind == "harvest_quota" for a in pulse_actions))
+
+    def test_peer_message_router_reaches_dispatch_single(self):
+        def mock_model_factory(seat: Seat):
+            class MockChatProvider:
+                def call(self, effect: CallModel) -> ModelCompleted:
+                    return ModelCompleted(
+                        content="Hi Asa.",
+                        tool_calls=[],
+                        usage={"prompt_tokens": 10, "completion_tokens": 5},
+                    )
+
+            return MockChatProvider()
+
+        captured_routers = []
+
+        class RouterCapturingToolRunner:
+            def __init__(self, role=None, message_router=None, **kwargs):
+                captured_routers.append(message_router)
+
+            def get_schemas(self):
+                return []
+
+            def execute(self, effect):
+                raise AssertionError("no tool execution expected on this path")
+
+        orchestrator = ArityOrchestrator(
+            ledger=self.ledger,
+            store=self.store,
+            base_workspace=self.ws / "terrarium",
+            model_factory=mock_model_factory,
+        )
+
+        def fake_dispatch(task, candidate_or_seat, role=None, **kwargs):
+            return TerrariumCandidateResult(
+                candidate_id="cand_peer",
+                task_id=task.id,
+                seat=candidate_or_seat,
+                role=role,
+                final_state=State(session_id="cand_peer"),
+                output="PEER_ANSWER",
+                self_report=None,
+                tokens_used=0,
+                duration_seconds=0.0,
+                workspace_path=self.ws / "peer",
+            )
+
+        # autospec of the real bound method rejects any keyword the true signature lacks.
+        orchestrator.terrarium.dispatch_single = create_autospec(
+            orchestrator.terrarium.dispatch_single, side_effect=fake_dispatch
+        )
+
+        with patch("arity.orchestrator.SandboxToolRunner", RouterCapturingToolRunner):
+            orchestrator.handle_message(
+                user_text="hello, who is on the staff today?",
+                sender="Asa",
+                candidates_per_task=1,
+                now=10000.0,
+            )
+
+        self.assertEqual(len(captured_routers), 1)
+        route_peer_message = captured_routers[0]
+        self.assertIsNotNone(route_peer_message)
+
+        self.assertEqual(route_peer_message("scout", "find the upstream docs"), "PEER_ANSWER")
 
 
 if __name__ == "__main__":
