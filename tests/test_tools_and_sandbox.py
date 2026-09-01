@@ -217,6 +217,60 @@ class TestSandboxToolRunner(unittest.TestCase):
         self.assertNotIn("r.jina.ai", opened_urls[0])
         self.assertNotIn(secret, result.output)
 
+    def test_roleful_research_scope_requires_trusted_research_role(self):
+        scope = ResearchScope(project_root=self.ws)
+        denied_roles = (
+            Role(
+                name="scout",
+                description="Untrusted override",
+                research_access=True,
+                trusted_definition=False,
+            ),
+            Role(
+                name="scout",
+                description="Trusted but not research enabled",
+                research_access=False,
+            ),
+            Role(
+                name="designer",
+                description="Trusted wrong personality",
+                research_access=True,
+            ),
+        )
+        for role in denied_roles:
+            with self.subTest(role=role.name, description=role.description):
+                with self.assertRaisesRegex(ValueError, "trusted|research|grant"):
+                    SandboxToolRunner(
+                        workspace_root=self.ws / f"denied-{role.name}",
+                        role=role,
+                        research_scope=scope,
+                    )
+
+        trusted_scout = Role(
+            name="scout",
+            description="Host-authorized Scout",
+            research_access=True,
+        )
+        roleful = SandboxToolRunner(
+            workspace_root=self.ws / "trusted-scout",
+            role=trusted_scout,
+            research_scope=scope,
+        )
+        self.assertIn(
+            "read_project_file",
+            {schema["function"]["name"] for schema in roleful.get_schemas()},
+        )
+
+        host_runner = SandboxToolRunner(
+            workspace_root=self.ws / "host-seam",
+            role=None,
+            research_scope=scope,
+        )
+        self.assertIn(
+            "read_project_file",
+            {schema["function"]["name"] for schema in host_runner.get_schemas()},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
