@@ -19,6 +19,7 @@ from .composer import CastingComposer, CastingDecision
 from .handlers import ConsoleTransport, JsonlRecordStore, default_record_store
 from .ledger import Seat, SeatLedger
 from .pulse import PulseAction, PulseEngine
+from .research import ResearchScope
 from .roles import BUILDER_ROLE, Role, RoleRegistry, SECRETARY_ROLE, VOICE_ROLE
 from .runtime import Runtime
 from .scorecard import Scorecard
@@ -69,6 +70,7 @@ class ArityOrchestrator:
         transport: Optional[Transport] = None,
         base_workspace: Optional[Path] = None,
         model_factory: Optional[Callable[[Seat], ModelProvider]] = None,
+        research_scope: Optional[ResearchScope] = None,
     ):
         self.store = store or default_record_store()
         self.ledger = ledger or SeatLedger()
@@ -81,6 +83,7 @@ class ArityOrchestrator:
         self.inbox = inbox or RedphoneInbox(store=self.store)
         self.transport = transport or ConsoleTransport()
         self.base_workspace = Path(base_workspace) if base_workspace else Path(".terrarium")
+        self.research_scope = research_scope or ResearchScope.configured()
 
         self.terrarium = TerrariumDispatcher(
             ledger=self.ledger,
@@ -89,6 +92,7 @@ class ArityOrchestrator:
             base_workspace=self.base_workspace,
             model_factory=model_factory,
             roles=self.roles,
+            research_scope=self.research_scope,
         )
 
         self._last_session: Optional[State] = None
@@ -161,6 +165,7 @@ class ArityOrchestrator:
 
         # 5. Direct single conversational kernel (Tier 0)
         primary_seat = casting.primary_seat
+        session_workspace = self.base_workspace / "sessions" / target_role.base_name
 
         def route_peer_message(to_peer: str, text_msg: str) -> str:
             peer_role = self.roles.get(to_peer)
@@ -171,14 +176,39 @@ class ArityOrchestrator:
                 )
             peer_task = TaskRecord(from_role=target_role.name, to_role=peer_role.name, brief=text_msg)
             peer_casting = self.composer.cast(role=peer_role, task=text_msg, candidates_count=1, now=curr_time)
+            peer_research_scope = (
+                self.research_scope.with_work_root(session_workspace)
+                if peer_role.trusted_definition
+                and peer_role.research_access
+                and self.research_scope.grants(peer_role.base_name)
+                else None
+            )
+            research_forbidden = (
+                target_role.frozen_evidence
+                or target_role.base_name == "judge"
+                or not target_role.trusted_definition
+            )
+            if research_forbidden and peer_role.research_access:
+                raise MessageDeliveryError(
+                    "This personality's frozen or untrusted provenance forbids Scout research."
+                )
+            peer_task.metadata["research_forbidden"] = research_forbidden
             peer_res = self.terrarium.dispatch_single(
                 task=peer_task,
                 candidate_or_seat=peer_casting.primary_seat,
                 role=peer_role,
+                research_scope=(
+                    peer_research_scope
+                    if peer_research_scope is not None
+                    else self.research_scope
+                    if peer_role.trusted_definition and not research_forbidden
+                    else None
+                ),
             )
             return peer_res.output or f"[{peer_role.name} replied with no output]"
 
         tool_runner = SandboxToolRunner(
+            workspace_root=session_workspace,
             role=target_role,
             message_router=route_peer_message,
             role_registry=self.roles,
@@ -190,10 +220,14 @@ class ArityOrchestrator:
             endpoint=primary_seat.endpoint,
             model=primary_seat.model,
             session_id=f"{target_role.name}_main",
+            workspace=str(session_workspace),
             all_tools=tool_runner.get_schemas(),
         )
 
         model_provider = self.terrarium._model_factory(primary_seat)
+        for cli in (model_provider, getattr(model_provider, "fallback", None)):
+            if cli is not None and hasattr(cli, "cwd"):
+                cli.cwd = str(session_workspace)
         runtime = Runtime(
             model_provider=model_provider,
             tool_runner=tool_runner,

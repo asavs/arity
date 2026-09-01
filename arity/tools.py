@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any, Callable, Optional
 
 from ._version import USER_AGENT
 from .configuration import get_config_value
-from .research import ResearchScope
+from .research import ResearchAccessError, ResearchScope
 from .roles import Role, RoleRegistry
 from .seams import ToolRunner
 from .types import ExecuteTool, ToolCompleted
@@ -50,14 +51,10 @@ class UnknownMessageRecipientError(MessageDeliveryError):
 RESEARCH_RUNNER_TOOLS = frozenset(
     {
         "fetch_url",
-        "list_directory",
         "list_project",
         "message",
         "query_records",
-        "read_file",
         "read_project_file",
-        "search",
-        "search_files",
         "search_project",
         "web_search",
     }
@@ -97,6 +94,14 @@ class SandboxToolRunner(ToolRunner):
         self.role_registry = role_registry if role_registry is not None else RoleRegistry()
         self.research_scope = research_scope
         self.excluded_record_ids = tuple(excluded_record_ids)
+        if (
+            self.research_scope is not None
+            and self.role is not None
+            and not self.research_scope.grants(self.role.base_name)
+        ):
+            raise ValueError(
+                "research scope does not grant this personality access"
+            )
         self._custom_tools: dict[str, Callable[..., str]] = {}
         self._schemas: list[dict[str, Any]] = []
         self._register_default_tools()
@@ -133,6 +138,12 @@ class SandboxToolRunner(ToolRunner):
             fn_name = s.get("function", {}).get("name", "")
             if self.research_scope is not None and fn_name not in RESEARCH_RUNNER_TOOLS:
                 continue
+            if (
+                self.role is not None
+                and fn_name in {"fetch_url", "web_search"}
+                and self.research_scope is None
+            ):
+                continue
             if self.role is None or self.role.can_use_tool(fn_name):
                 filtered.append(s)
         return filtered
@@ -144,6 +155,17 @@ class SandboxToolRunner(ToolRunner):
                 call_id=effect.call_id,
                 tool_name=effect.name,
                 output=f"Security Denial: research runners cannot execute tool '{effect.name}'",
+                is_error=True,
+            )
+        if (
+            self.role is not None
+            and effect.name in {"fetch_url", "web_search"}
+            and self.research_scope is None
+        ):
+            return ToolCompleted(
+                call_id=effect.call_id,
+                tool_name=effect.name,
+                output="Security Denial: cross-boundary web research requires a host-issued research capability",
                 is_error=True,
             )
         # 1. Role denial check
@@ -400,6 +422,9 @@ class SandboxToolRunner(ToolRunner):
             from html.parser import HTMLParser
             from urllib.parse import urlsplit, urlunsplit
 
+            if type(timeout) is not int or not 1 <= timeout <= 30:
+                raise ResearchAccessError("fetch timeout must be an integer from 1 to 30 seconds")
+
             def validate_public_url(candidate: str) -> str:
                 try:
                     parsed = urlsplit(candidate)
@@ -407,24 +432,44 @@ class SandboxToolRunner(ToolRunner):
                 except ValueError as exc:
                     raise ValueError("URL is malformed") from exc
                 if parsed.scheme.lower() not in {"http", "https"}:
-                    raise ValueError("Only HTTP and HTTPS URLs may be fetched")
+                    raise ResearchAccessError("Security Denial: only HTTP and HTTPS URLs may be fetched")
                 if parsed.username is not None or parsed.password is not None:
-                    raise ValueError("URLs containing credentials may not be fetched")
+                    raise ResearchAccessError("Security Denial: URLs containing credentials may not be fetched")
                 hostname = (parsed.hostname or "").rstrip(".").lower()
                 if not hostname:
                     raise ValueError("URL must include a public hostname")
                 if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
-                    raise ValueError("Local network URLs may not be fetched")
+                    raise ResearchAccessError("Security Denial: local network URLs may not be fetched")
                 if hostname in {"metadata.google.internal", "metadata.azure.internal"}:
-                    raise ValueError("Cloud metadata URLs may not be fetched")
+                    raise ResearchAccessError("Security Denial: cloud metadata URLs may not be fetched")
                 try:
                     address = ipaddress.ip_address(hostname)
                 except ValueError:
                     address = None
                 if address is not None and not address.is_global:
-                    raise ValueError("Non-public network URLs may not be fetched")
+                    raise ResearchAccessError("Security Denial: non-public network URLs may not be fetched")
                 if address is None and "." not in hostname:
-                    raise ValueError("Single-label network hosts may not be fetched")
+                    raise ResearchAccessError("Security Denial: single-label network hosts may not be fetched")
+                if address is None:
+                    try:
+                        answers = socket.getaddrinfo(
+                            hostname,
+                            port or (443 if parsed.scheme.lower() == "https" else 80),
+                            type=socket.SOCK_STREAM,
+                        )
+                    except OSError as exc:
+                        raise ResearchAccessError(
+                            "Security Denial: public hostname could not be resolved"
+                        ) from exc
+                    resolved = {
+                        ipaddress.ip_address(answer[4][0])
+                        for answer in answers
+                        if answer[4]
+                    }
+                    if not resolved or any(not candidate.is_global for candidate in resolved):
+                        raise ResearchAccessError(
+                            "Security Denial: hostname resolves to a non-public network"
+                        )
                 # Drop fragments, which are never sent to the server and can hide
                 # credential-like material in logs and error strings.
                 netloc = hostname if port is None else f"{hostname}:{port}"
@@ -435,7 +480,9 @@ class SandboxToolRunner(ToolRunner):
             class PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, req, fp, code, msg, headers, newurl):
                     safe_redirect = validate_public_url(newurl)
-                    return super().redirect_request(req, fp, code, msg, headers, safe_redirect)
+                    return super().redirect_request(
+                        req, fp, code, msg, headers, safe_redirect
+                    )
 
             opener = urllib.request.build_opener(PublicOnlyRedirectHandler())
 
@@ -491,7 +538,7 @@ class SandboxToolRunner(ToolRunner):
             # Reader proxy renders JS shells into markdown. TODO(scout): swap for Firecrawl/TinyFish or a
             # headless browser in a VM when pricing pages need clicks; a reader is enough for text.
             def via_reader() -> tuple[str, str]:
-                proxy_url = f"https://r.jina.ai/{safe_url}"
+                proxy_url = validate_public_url(f"https://r.jina.ai/{safe_url}")
                 req = urllib.request.Request(proxy_url, headers={**headers, "Accept": "text/markdown, text/plain"})
                 with opener.open(req, timeout=timeout + 15) as resp:
                     validate_public_url(resp.geturl())
@@ -502,6 +549,8 @@ class SandboxToolRunner(ToolRunner):
             for attempt in (direct, via_reader):
                 try:
                     text, how = attempt()
+                except ResearchAccessError:
+                    raise
                 except Exception as e:
                     errors.append(f"{attempt.__name__}: {e}")
                     continue
@@ -509,7 +558,7 @@ class SandboxToolRunner(ToolRunner):
                     errors.append("direct: page is a JS shell or sign-in wall")
                     continue
                 return f"[fetched via {how}] {text[:limit]}"
-            return "Error fetching the requested URL: " + " | ".join(errors)
+            raise ResearchAccessError("The requested public URL could not be fetched safely")
 
         self.register(
             name="fetch_url",
@@ -525,7 +574,18 @@ class SandboxToolRunner(ToolRunner):
         )
 
         def web_search(query: str, limit: int = 5) -> str:
-            return smart_web_search(query, limit)
+            if not isinstance(query, str) or not query.strip():
+                raise ResearchAccessError("web search query must be nonblank text")
+            if len(query) > 512:
+                raise ResearchAccessError("web search query exceeds 512 characters")
+            if type(limit) is not int or limit <= 0:
+                raise ResearchAccessError("web search limit must be a positive integer")
+            result = smart_web_search(query, min(limit, 10))
+            if result.startswith(("Search error", "TinyFish Error", "TinyFish search error")):
+                raise ResearchAccessError("Public web search is unavailable")
+            if result.startswith(("No results found", "TinyFish returned no results")):
+                return "(no public search results)"
+            return result
 
         self.register(
             name="web_search",
@@ -651,11 +711,11 @@ class SandboxToolRunner(ToolRunner):
 
         self.register(
             name="search_project",
-            description="Search project text by regex and return bounded file:line excerpts.",
+            description="Search project text for case-insensitive literal alternatives and return bounded file:line excerpts.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regex to search"},
+                    "pattern": {"type": "string", "description": "Literal text; separate alternatives with |"},
                     "path": {"type": "string", "description": "Project-relative starting path", "default": "."},
                     "glob": {"type": "string", "description": "File glob such as **/*.py", "default": "*"},
                     "limit": {"type": "integer", "description": "Requested match count (capped)", "default": 50},

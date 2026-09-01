@@ -57,6 +57,7 @@ from .observations import (
     ObservationSubject,
 )
 from .roles import BUILDER_ROLE, JUDGE_ROLE, TEST_ENGINEER_ROLE, Role, RoleRegistry
+from .research import ResearchScope
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .telemetry import CachePolicyHint, UsageRecordingContext
@@ -83,6 +84,8 @@ class RaceConfig:
     store_root: Optional[Path] = None
     record_store: Optional[RecordStore] = None
     workspace_root: Optional[Path] = None
+    project_root: Optional[Path] = None
+    research_scope: Optional[ResearchScope] = None
     # Review phase: the Judge reads a blind bundle of the candidates and ranks them.
     judges: list[str] = field(default_factory=list)  # model names to seat as judges
     review: str = "tie"  # "tie" (only when facts tie) | "always" | "never"
@@ -865,7 +868,16 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     store = _record_store_for_run(cfg, tmp_root)
     workspace = cfg.workspace_root or (tmp_root / "terrarium" if tmp_root else Path(".terrarium"))
     ledger = SeatLedger(initial_seats=[c.seat for c in candidates], auto_seed=False)
-    dispatcher = TerrariumDispatcher(ledger=ledger, store=store, base_workspace=workspace, quiet=cfg.as_json or cfg.quiet)
+    dispatcher = TerrariumDispatcher(
+        ledger=ledger,
+        store=store,
+        base_workspace=workspace,
+        quiet=cfg.as_json or cfg.quiet,
+        research_scope=(
+            cfg.research_scope
+            or ResearchScope.configured(cfg.project_root)
+        ),
+    )
     archivist = ImpartialArchivist(store=store)
 
     task = TaskRecord(
