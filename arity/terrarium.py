@@ -51,7 +51,7 @@ class _NullTransport:
 
 
 HIDDEN_TESTS_DIR = ".hidden_tests"
-"""Directory inside a candidate sandbox where tester-authored tests are dropped after the build."""
+"""Directory inside a candidate sandbox where Test Engineer-authored tests are dropped after the build."""
 
 # Files the archivist must not attribute to a candidate: verification side-effects.
 PEERS_DIR = "peers"
@@ -77,7 +77,7 @@ class TaskRecord:
     # so the provider's prompt cache is hit (Axiom 7); other modes ignore them.
     parent_system_prompt: Optional[str] = None
     parent_messages: list[dict[str, Any]] = field(default_factory=list)
-    # Tester-authored tests the builder never sees. Copied into the sandbox
+    # Test Engineer-authored tests the builder never sees. Copied into the sandbox
     # only after the build finishes, then run alongside the builder's own tests.
     hidden_tests: dict[str, str] = field(default_factory=dict)  # relative filename -> source
 
@@ -299,7 +299,7 @@ def run_sandbox_verification(
 
     Two layers, reported separately and merged in the top-level counts:
       - the candidate's own tests (test_*.py / *_test.py / tests/**), or `test_command`
-      - `hidden_tests`: tester-authored files the candidate never saw, written to
+      - `hidden_tests`: Test Engineer-authored files the candidate never saw, written to
         `.hidden_tests/` only now and run with the workspace on PYTHONPATH.
     Result keys: has_tests, passed, failed, total, exit_code, duration, output,
     plus `own` and `hidden` sub-results with the same shape.
@@ -361,7 +361,7 @@ class TerrariumCandidateResult:
     tool_runner_name: str = "sandbox"
     skills_used: list[str] = field(default_factory=list)
     test_results: Optional[dict[str, Any]] = None
-    tester_result: Optional["TerrariumCandidateResult"] = None
+    test_engineer_result: Optional["TerrariumCandidateResult"] = None
     fallbacks: int = 0  # wire -> CLI harness fallbacks during the run; >0 means the harness axis moved
     brief: str = ""  # the brief this candidate was given (archivist checks its hard numbers against own tests)
     task_metadata: dict[str, Any] = field(default_factory=dict)  # e.g. module/entrypoint from the task bank
@@ -813,15 +813,15 @@ class TerrariumDispatcher:
     def author_hidden_tests(
         self,
         task: TaskRecord,
-        tester: CandidateSpec,
+        test_engineer: CandidateSpec,
     ) -> tuple[dict[str, str], TerrariumCandidateResult]:
-        """Run a tester candidate against the brief and harvest the test files it writes.
+        """Run a Test Engineer candidate against the brief and harvest the test files it writes.
 
-        The tester works in its own sandbox and never sees any builder output. Whatever
+        The Test Engineer works in its own sandbox and never sees any builder output. Whatever
         `test_*.py` files it leaves behind become the hidden suite for the race.
         """
         from .roles import TEST_ENGINEER_ROLE
-        tester_task = TaskRecord(
+        test_engineer_task = TaskRecord(
             from_role=task.from_role,
             to_role="test-engineer",
             brief=(
@@ -833,9 +833,9 @@ class TerrariumDispatcher:
             max_depth=task.max_depth,
             task_context=task.task_context,
         )
-        if tester.role is None:
-            tester.role = TEST_ENGINEER_ROLE
-        res = self.dispatch_single(task=tester_task, candidate_or_seat=tester, run_verification=False)
+        if test_engineer.role is None:
+            test_engineer.role = TEST_ENGINEER_ROLE
+        res = self.dispatch_single(task=test_engineer_task, candidate_or_seat=test_engineer, run_verification=False)
         harvested: dict[str, str] = {}
         if res.workspace_path.exists():
             for p in sorted(res.workspace_path.rglob("test_*.py")):
@@ -864,14 +864,14 @@ class TerrariumDispatcher:
         test_command: Optional[str] = None,
         max_workers: int = 4,
         archivist: Optional[Any] = None,
-        tester: Optional[CandidateSpec] = None,
+        test_engineer: Optional[CandidateSpec] = None,
         teardown: bool = False,
         usage_contexts: Optional[Mapping[str, UsageRecordingContext]] = None,
     ) -> tuple[Optional[TerrariumCandidateResult], list[TerrariumCandidateResult], list[Any]]:
         """Execute an empirical race between multidimensional candidates, audit and rank them.
 
         Order of operations matters for impartiality:
-          1. tester (if given) authors hidden tests, before any builder runs
+          1. the Test Engineer (if given) authors hidden tests, before any builder runs
           2. builders run in parallel sandboxes; each is verified against its own tests
              AND the hidden suite, which is only written into the sandbox after the build
           3. the archivist audits artifacts (excluding verification side-effects) and scores
@@ -879,9 +879,9 @@ class TerrariumDispatcher:
         """
         task_record = TaskRecord(brief=task) if isinstance(task, str) else task
 
-        tester_result: Optional[TerrariumCandidateResult] = None
-        if tester is not None:
-            harvested, tester_result = self.author_hidden_tests(task_record, tester)
+        test_engineer_result: Optional[TerrariumCandidateResult] = None
+        if test_engineer is not None:
+            harvested, test_engineer_result = self.author_hidden_tests(task_record, test_engineer)
             merged = dict(task_record.hidden_tests)
             merged.update(harvested)
             task_record.hidden_tests = merged
@@ -901,10 +901,10 @@ class TerrariumDispatcher:
 
         winner, entries = archivist.evaluate_trial(results)
         for r in results:
-            r.tester_result = tester_result
+            r.test_engineer_result = test_engineer_result
 
         if teardown:
-            self.teardown(results + ([tester_result] if tester_result else []))
+            self.teardown(results + ([test_engineer_result] if test_engineer_result else []))
         return winner, results, entries
 
     def conference(

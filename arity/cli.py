@@ -450,7 +450,7 @@ def handle_race_command(args: argparse.Namespace) -> None:
         workers=int(getattr(args, "workers", 4) or 4),
         mock=bool(getattr(args, "mock", False)),
         as_json=bool(getattr(args, "json", False)),
-        tester=bool(getattr(args, "tester", False)),
+        test_engineer=bool(getattr(args, "test_engineer", False)),
         teardown=(True if getattr(args, "teardown", False) else (False if getattr(args, "keep", False) else None)),
         judges=[j.strip() for j in (getattr(args, "judges", "") or "").split(",") if j.strip()],
         review=getattr(args, "review", None) or "tie",
@@ -473,7 +473,7 @@ def handle_run_command(args: argparse.Namespace) -> None:
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json and not noninteractive
     rep, delivery = run_front_door(
         args.prompt or "", task_name=args.task, role=args.role, candidates=args.candidates, judges=judges,
-        conference=args.conference, tester=args.tester, out_dir=_P(args.out) if args.out else None, mock=args.mock,
+        conference=args.conference, test_engineer=args.test_engineer, out_dir=_P(args.out) if args.out else None, mock=args.mock,
         printer=safe_print, interactive=interactive, quiet=not args.verbose,
     )
     if args.json:
@@ -601,7 +601,7 @@ def main() -> int:
     race_parser.add_argument("--task", "-t", type=str, default=None, help="Task from the bank (see `arity tasks`); brings hidden tests")
     race_parser.add_argument("--variants", "-v", type=str, default="models", help="Preset: models | harness | tools | skills | context, or custom 'model=..+harness=..+tools=..+skills=a/b+ctx=..' list")
     race_parser.add_argument("--role", "-r", type=str, default="builder", help="Builder role (default: builder)")
-    race_parser.add_argument("--tester", action="store_true", help="Have the tester role author hidden tests before the race")
+    race_parser.add_argument("--test-engineer", action="store_true", help="Have the Test Engineer author hidden tests before the race")
     race_parser.add_argument("--test-cmd", type=str, default=None, help="Override the candidate's own test command")
     race_parser.add_argument("--workers", "-w", type=int, default=4, help="Max parallel candidates")
     race_parser.add_argument("--mock", action="store_true", help="Canned providers (good / slow / liar), ephemeral store, no tokens spent")
@@ -643,7 +643,7 @@ def main() -> int:
         help="Blind Judge models on a factual tie (default: the resolved candidates)",
     )
     run_parser.add_argument("--conference", type=int, default=0, metavar="ROUNDS", help="Let the candidates sort out a final draft together")
-    run_parser.add_argument("--tester", action="store_true", help="Have the tester role write hidden acceptance tests first")
+    run_parser.add_argument("--test-engineer", action="store_true", help="Have the Test Engineer write hidden acceptance tests first")
     run_parser.add_argument("--out", "-o", type=str, default=None, help="Where to deliver (default: deliveries/<task_id>/)")
     run_parser.add_argument("--mock", action="store_true", help="Canned providers, no tokens")
     run_parser.add_argument("--verbose", "-v", action="store_true", help="Also print the race table")
