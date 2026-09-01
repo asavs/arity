@@ -807,10 +807,10 @@ class TerrariumDispatcher:
         The tester works in its own sandbox and never sees any builder output. Whatever
         `test_*.py` files it leaves behind become the hidden suite for the race.
         """
-        from .roles import TESTER_ROLE
+        from .roles import TEST_ENGINEER_ROLE
         tester_task = TaskRecord(
             from_role=task.from_role,
-            to_role="tester",
+            to_role="test-engineer",
             brief=(
                 "Author the acceptance tests for the following task. You are NOT implementing it; "
                 "another engineer will, without seeing your tests. Write only `test_*.py` files.\n\n"
@@ -821,7 +821,7 @@ class TerrariumDispatcher:
             task_context=task.task_context,
         )
         if tester.role is None:
-            tester.role = TESTER_ROLE
+            tester.role = TEST_ENGINEER_ROLE
         res = self.dispatch_single(task=tester_task, candidate_or_seat=tester, run_verification=False)
         harvested: dict[str, str] = {}
         if res.workspace_path.exists():

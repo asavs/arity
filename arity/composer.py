@@ -28,9 +28,12 @@ APTITUDE_MATRIX: dict[str, list[str]] = {
     "secretary": ["gemini-3.6-flash", "gpt-4o", "claude-3-5-sonnet", "llama"],
     "voice": ["gemini-3.6-flash", "gpt-4o", "claude-3-5-sonnet", "llama"],
     "engineer": ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-5.6-sol", "gemini-3.1-pro"],
+    "designer": ["claude-3-7-sonnet", "gpt-5.6-sol", "gemini-3.1-pro", "gpt-4o"],
+    "developer": ["gpt-5.6-sol", "gemini-3.6-flash", "nemotron", "llama"],
     "python_developer": ["gpt-5.6-sol", "gemini-3.6-flash", "nemotron", "llama"],
     "builder": ["gpt-5.6-sol", "gemini-3.6-flash", "nemotron", "llama"],
-    "reviewer": ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-5.6-sol", "gemini-3.6-flash"],
+    "test-engineer": ["gpt-5.6-sol", "claude-3-7-sonnet", "gemini-3.6-flash", "claude-3-5-sonnet"],
+    "judge": ["claude-3-7-sonnet", "claude-3-5-sonnet", "gpt-5.6-sol", "gemini-3.6-flash"],
     "scout": ["gemini-3.6-flash", "grok-4.5", "gpt-4o"],
 }
 

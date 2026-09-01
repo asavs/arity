@@ -56,7 +56,7 @@ from .observations import (
     Observation,
     ObservationSubject,
 )
-from .roles import BUILDER_ROLE, TESTER_ROLE, Role, RoleRegistry
+from .roles import BUILDER_ROLE, TEST_ENGINEER_ROLE, Role, RoleRegistry
 from .seams import RecordStore
 from .tasks import RaceTask, TaskBank
 from .telemetry import CachePolicyHint, UsageRecordingContext
@@ -83,7 +83,7 @@ class RaceConfig:
     store_root: Optional[Path] = None
     record_store: Optional[RecordStore] = None
     workspace_root: Optional[Path] = None
-    # Review phase: the reviewer role reads a blind bundle of the candidates and ranks them.
+    # Review phase: the Judge reads a blind bundle of the candidates and ranks them.
     judges: list[str] = field(default_factory=list)  # model names to seat as judges
     review: str = "tie"  # "tie" (only when facts tie) | "always" | "never"
     judge_provider: Optional[Callable[[str], Any]] = None  # tests: model name -> ModelProvider
@@ -727,7 +727,7 @@ def _record_review_attempt(
             report,
             Observation(
                 observer_kind="model",
-                observer_id="arity.reviewer",
+                observer_id="arity.judge",
                 observer_version=__version__,
                 observed_at=review_event.timestamp,
                 phase="review",
@@ -903,11 +903,11 @@ def run_race(cfg: RaceConfig) -> RaceReport:
     tester_spec: Optional[CandidateSpec] = None
     if cfg.tester:
         tester_seat = candidates[0].seat
-        tester_spec = CandidateSpec(seat=tester_seat, name="tester", role=roles.with_type(TESTER_ROLE, type_name),
+        tester_spec = CandidateSpec(seat=tester_seat, name="test-engineer", role=roles.with_type(TEST_ENGINEER_ROLE, type_name),
                                     harness="wire", tool_runner_type="sandbox", skills=["test-engineering"])
         if cfg.mock:
             tester_spec.custom_model_provider = ScriptedProvider(
-                {"test_hidden_by_tester.py": OWN_TEST}, "Wrote test_hidden_by_tester.py.", "tester")
+                {"test_hidden_by_tester.py": OWN_TEST}, "Wrote test_hidden_by_tester.py.", "test-engineer")
     elif not task.hidden_tests:
         notes.append("no hidden tests: candidates are graded only on tests they wrote themselves (use --task or --tester)")
 
@@ -1008,7 +1008,7 @@ def run_race(cfg: RaceConfig) -> RaceReport:
 
 
 # -----------------------------------------------------------------------------
-# Review phase: blind bundle -> reviewer role on each judge seat -> one order each
+# Review phase: blind bundle -> Judge personality on each judge seat -> one order each
 # -----------------------------------------------------------------------------
 
 def blind_bundle(rep: RaceReport) -> tuple[str, dict[str, str]]:
@@ -1173,13 +1173,13 @@ def check_citations(text: str, key: dict[str, str], rep: RaceReport) -> dict[str
 def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher, seats: list[Seat]) -> list[dict[str, Any]]:
     from .roles import RoleRegistry
     roles = RoleRegistry()
-    # The judge takes the same type as the builders: reviewer:python judges a python race.
-    reviewer = roles.with_type(roles.get("reviewer"), (rep.candidates[0].role.type_name if rep.candidates and rep.candidates[0].role else None))
+    # The Judge takes the same type as the builders: judge:python judges a Python race.
+    judge = roles.with_type(roles.get("judge"), (rep.candidates[0].role.type_name if rep.candidates and rep.candidates[0].role else None))
     text, key = blind_bundle(rep)
     review_task = TaskRecord(
         brief=text,
         from_role="Asa",
-        to_role="reviewer",
+        to_role="judge",
         metadata={
             "reviews": rep.task.id,
             "evidence_hash": rep.evidence.evidence_hash if rep.evidence else None,
@@ -1191,7 +1191,7 @@ def run_review(rep: RaceReport, cfg: RaceConfig, dispatcher: TerrariumDispatcher
         if seat is None:
             rep.notes.append(f"no seat for judge '{model}'")
             continue
-        spec = CandidateSpec(seat=seat, name=f"judge:{model}", role=reviewer, harness="wire", tool_runner_type="sandbox", skills=[])
+        spec = CandidateSpec(seat=seat, name=f"judge:{model}", role=judge, harness="wire", tool_runner_type="sandbox", skills=[])
         if cfg.judge_provider:
             spec.custom_model_provider = cfg.judge_provider(model)
         judge_specs.append(spec)
