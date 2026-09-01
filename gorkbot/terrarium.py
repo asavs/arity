@@ -24,10 +24,9 @@ from .handlers import (
     JsonlRecordStore,
     LocalToolRunner,
     MetricsObserver,
-    OMPModelProvider,
     create_model_provider,
 )
-from .tools import SandboxToolRunner, create_mcp_tool_runner
+from .tools import USER_DELIVERY_MARKER, SandboxToolRunner, create_mcp_tool_runner
 from .ledger import Seat, SeatLedger
 from .roles import Role, BUILDER_ROLE, PYTHON_DEVELOPER_ROLE
 from .runtime import Runtime
@@ -507,7 +506,10 @@ class TerrariumDispatcher:
             tool_runner = create_mcp_tool_runner(workspace_root=workspace, role=actual_role)
         elif spec.tool_runner_type in ("shell", "local", "shell_tools") or spec.tool_runner_type is LocalToolRunner:
             tool_runner = LocalToolRunner(workspace_root=workspace)
-        elif isinstance(spec.tool_runner_type, ToolRunner):
+        # ToolRunner is runtime_checkable, so isinstance() only asks whether execute and
+        # get_schemas exist as attributes — true of a runner class as well as an instance.
+        # Without the type guard a class takes this branch and is used uninstantiated.
+        elif isinstance(spec.tool_runner_type, ToolRunner) and not isinstance(spec.tool_runner_type, type):
             tool_runner = spec.tool_runner_type
         elif callable(spec.tool_runner_type):
             try:
@@ -542,7 +544,7 @@ class TerrariumDispatcher:
             cli_harness = spec.harness if spec.harness != "cli" else "codex"
             model_provider = CLIModelProvider(harness=cli_harness, model=seat.model)
         elif spec.harness == "omp":
-            model_provider = OMPModelProvider(model=seat.model)
+            model_provider = CLIModelProvider(harness="omp", model=seat.model)
         else:
             # Default wire / factory provider
             model_provider = self._model_factory(seat)
@@ -647,9 +649,9 @@ class TerrariumDispatcher:
         # Claude in particular delivers rankings and reports this way and then stops with empty content.
         if not (output or "").strip():
             delivered = [m for m in final_state.messages if m.get("role") == "tool"
-                         and str(m.get("content", "")).startswith("[Delivered to Asa]")]
+                         and str(m.get("content", "")).startswith(USER_DELIVERY_MARKER)]
             if delivered:
-                output = str(delivered[-1]["content"]).split("]: ", 1)[-1]
+                output = str(delivered[-1]["content"]).split(f"{USER_DELIVERY_MARKER}: ", 1)[-1]
                 self_report = f"Candidate {spec.name} executed brief in {duration:.2f}s ({total_tokens} tokens).{test_summary} Output: {output}"
 
         # 10. Record trial entry in store
@@ -909,6 +911,10 @@ class TerrariumDispatcher:
         entry_of = {e.candidate_id: e for e in (entries or [])}
         mailbox: dict[str, list[str]] = {L: [] for L in letters}
         current: dict[str, TerrariumCandidateResult] = dict(by_letter)
+        # Each round returns a fresh result carrying only that round's usage, and replaces the
+        # previous one. Totalling here is what keeps rounds 1..n-1 from vanishing from the bill.
+        conf_tokens: dict[str, int] = {L: 0 for L in letters}
+        conf_seconds: dict[str, float] = {L: 0.0 for L in letters}
 
         def facts(L: str) -> str:
             e = entry_of.get(by_letter[L].candidate_id)
@@ -957,11 +963,11 @@ class TerrariumDispatcher:
             for L in letters:
                 mailbox[L] = []
 
-            def run_one(L: str) -> tuple[str, TerrariumCandidateResult]:
+            def run_one(L: str) -> tuple[str, TerrariumCandidateResult, bool]:
                 prev = current[L]
                 spec = prev.spec
                 if spec is None:
-                    return L, prev
+                    return L, prev, False
                 round_spec = CandidateSpec(
                     seat=spec.seat, name=spec.name, role=spec.role, harness=spec.harness,
                     tool_runner_type=spec.tool_runner_type, skills=spec.skills, context="fork",
@@ -980,11 +986,14 @@ class TerrariumDispatcher:
                     mailbox=mailbox, peer_letter=L,
                 )
                 res.brief = task.brief
-                return L, res
+                return L, res, True
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(letters), max_workers)) as ex:
-                for L, res in ex.map(run_one, letters):
+                for L, res, ran in ex.map(run_one, letters):
                     current[L] = res
+                    if ran:
+                        conf_tokens[L] += res.tokens_used
+                        conf_seconds[L] += res.duration_seconds
 
         # Verification only after the staged peer copies are gone: pytest would otherwise collect
         # peers/B/test_*.py and report import mismatches as failures.
@@ -1002,10 +1011,10 @@ class TerrariumDispatcher:
             # cumulative cost a candidate that did nothing in phase 2 looks cheapest and wins the tie.
             after = snapshot(ws)
             res.changed_files = sorted(f for f in set(before[L]) | set(after) if before[L].get(f) != after.get(f))
-            res.phase_tokens = res.tokens_used
-            res.phase_seconds = res.duration_seconds
-            res.tokens_used += by_letter[L].tokens_used
-            res.duration_seconds += by_letter[L].duration_seconds
+            res.phase_tokens = conf_tokens[L]
+            res.phase_seconds = conf_seconds[L]
+            res.tokens_used = conf_tokens[L] + by_letter[L].tokens_used
+            res.duration_seconds = conf_seconds[L] + by_letter[L].duration_seconds
             res.self_report = (
                 f"Candidate {res.spec.name if res.spec else res.candidate_id} after conference: "
                 f"own tests {res.test_results.get('own', {}).get('passed', 0)}/{res.test_results.get('own', {}).get('total', 0)}, "

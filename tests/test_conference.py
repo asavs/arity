@@ -49,6 +49,17 @@ class ConferenceMock:
                               usage={"prompt_tokens": 10, "completion_tokens": 5})
 
 
+class ConstantCostMock:
+    """Answers every turn with no tool calls, so one dispatch costs exactly PROMPT + COMPLETION."""
+
+    PROMPT = 7
+    COMPLETION = 3
+
+    def call(self, effect: CallModel) -> ModelCompleted:
+        return ModelCompleted(content="Keeping my draft as it stands.", tool_calls=[],
+                              usage={"prompt_tokens": self.PROMPT, "completion_tokens": self.COMPLETION})
+
+
 class TestConference(unittest.TestCase):
     def test_conference_wakes_candidates_with_peers_and_queued_notes(self):
         with TemporaryDirectory() as d:
@@ -135,6 +146,34 @@ class TestConference(unittest.TestCase):
         d2 = rep.to_dict()
         self.assertTrue(d2["conference"]["rounds_run"])
         self.assertEqual(len(d2["conference"]["results"]), 3)
+
+
+    def test_conference_bills_every_round_not_just_the_last(self):
+        rounds = 2
+        per_round = ConstantCostMock.PROMPT + ConstantCostMock.COMPLETION
+        with TemporaryDirectory() as d:
+            base = Path(d)
+            disp = TerrariumDispatcher(ledger=SeatLedger(initial_seats=placeholder_seats(), auto_seed=False),
+                                       store=JsonlRecordStore(base / "records"), base_workspace=base / "t")
+            seats = placeholder_seats()
+            # No hidden tests and no files written, so the verification pass finds nothing to run.
+            task = TaskRecord(brief="hold the draft")
+            phase1 = [
+                disp.dispatch_single(
+                    task,
+                    CandidateSpec(seat=seat, name=name, role=BUILDER_ROLE, custom_model_provider=ConstantCostMock()),
+                    run_verification=False,
+                )
+                for seat, name in zip(seats, ("one", "two"))
+            ]
+            phase1_tokens = {r.spec.name: r.tokens_used for r in phase1}
+
+            phase2 = disp.conference(task, phase1, rounds=rounds)
+
+            self.assertEqual(len(phase2), len(phase1))
+            for r in phase2:
+                self.assertEqual(r.phase_tokens, rounds * per_round)
+                self.assertEqual(r.tokens_used, rounds * per_round + phase1_tokens[r.spec.name])
 
 
 if __name__ == "__main__":
