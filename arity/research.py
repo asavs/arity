@@ -401,6 +401,14 @@ class ResearchScope:
                 raise ResearchAccessError(
                     f"research work root is not a directory: {work_root}"
                 )
+            work_broad_roots = {
+                Path(work_root.anchor).resolve(),
+                Path.home().resolve(),
+            }
+            if work_root in work_broad_roots:
+                raise ResearchAccessError(
+                    "research work root must be a specific workspace, not a filesystem or home root"
+                )
             object.__setattr__(self, "work_root", work_root)
         spec = self.record_spec or configured_store_spec()
         path = spec.path if spec.path.is_absolute() else root / spec.path
