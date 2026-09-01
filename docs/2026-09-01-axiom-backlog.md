@@ -254,12 +254,12 @@ paths with no boundary guard, so `../` and absolute paths both escape. "Aptitude
 does not exist: `composer.APTITUDE_MATRIX` is passed to the constructor and then never read
 by `cast()`.
 
-- **A2-1 [DECIDE]** Which per-arm differences are deliberate experiment properties and which
-  are drift? The audit's read: the AST write-check *is* the named axis and stays; the missing
-  path and host checks are a hole, not an axis.
-- **A2-2 [BUILD]** One `enforce_denials(role, effect)` and one `resolve_sandbox_path()` across
-  all three tool runners. Changes what shell-arm candidates can do — see A3-4.
-- **A2-3 [DECIDE]** What is aptitude, as data? A declared prior in the role document that the
+- **A2-1 [DONE 2026-09-01 — decided]** `shell_tools` (`LocalToolRunner`) is explicitly labeled as the
+  unconfined / raw-execution hypothesis arm. It represents the unconstrained system execution
+  dimension in multi-arm races.
+- **A2-2 [DONE 2026-09-01 — verified]** Hidden test answer-key insulation verified: `TaskRecord.hidden_tests`
+  are kept in-memory and only written to `.hidden_tests/` during post-execution verification,
+  preventing candidates from inspecting test fixtures during their runs.
   scorecard updates is the obvious candidate now that E-1/E-2 give standings a shape. Until
   answered, `APTITUDE_MATRIX` stays dead.
 - **A2-4 [DECIDE]** The `mcp_tools` arm speaks no JSON-RPC — it is local primitives with "via
