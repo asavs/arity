@@ -45,13 +45,13 @@ external reports; this file remains the maintainer's near-term roadmap.
       retain disagreements, and feed later analytics.  Mechanical facts remain
       distinct from model hypotheses and human decisions.
 - [ ] Build the analytics consumer that compares those independent observations;
-      `watch` currently shows only bounded counts and never invokes a new reviewer.
+      `watch` currently shows only bounded counts and never invokes a new Judge.
 - [x] Persist every candidate-provider attempt crossing `JournaledModelProvider` at
       the runtime boundary: request-start time, outcome, cache-read/write and token
       counts, and documented retention policy. Invalid results retain a safe failed
       attempt. `watch` only consumes these records; it never probes or prewarms a
       provider.
-- [ ] Extend normalized request telemetry to tester and judge model calls; those
+- [ ] Extend normalized request telemetry to Test Engineer and Judge model calls; those
       call sites do not yet cross the candidate-provider recording boundary.
 - [ ] Add explicit context-reset events for compaction, model switches, and other
       prefix changes so later cache analytics can separate comparison epochs.
@@ -94,7 +94,7 @@ external reports; this file remains the maintainer's near-term roadmap.
       against the fetch_url tool log instead - the scout race scored 0/0 citations.
 - [ ] Citation checker attributes comparative sentences ("C, unlike A's `move_to_end`") to the wrong letter
       (~90% precision). Reported, never scored — improve the attributor or leave it.
-- [ ] Judge with `type` skills for non-code domains (`reviewer:design`?) once a non-code race exists.
+- [ ] Judge with `type` skills for non-code domains (`judge:design`?) once a non-code race exists.
 
 ## Kernel
 - [ ] xAI wire read timeout (60s) tripped four times in one conference round on long tool-heavy turns; the
