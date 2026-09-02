@@ -9,9 +9,9 @@ The system in English, as nested lists. One rule carries the whole design:
 - System text
   - base facts (what every kernel is told when it wakes cold)
   - role
-  - type pack (e.g. typescript)
-  - memory tier for this bot
   - skills
+  - who can be reached with the message tool
+  - the bot's last ledger entries
 - The conversation so far
 - The newest event
 
@@ -20,9 +20,8 @@ Everything else exists to produce these four, or to remember what came back.
 ## 2. Where things live
 
 - **Library** — files, written by people, in git. Keyed by name.
-  - base prompt
+  - the wake line (one sentence; there is no memory tier)
   - roles
-  - type packs
   - skills (text only)
   - tool definitions: a schema the model sees + the name of a runner function
   - a Library entry may point at another Library entry, by name (a skill naming tools). Nothing else.
@@ -30,9 +29,8 @@ Everything else exists to produce these four, or to remember what came back.
   - cast asks it who has quota
   - the wire asks it for a URL and a key
   - a seat is subscription quota or API dollars; the router has to know which
-- **Memory** — per bot, tiered by distance from Asa. Keyed by bot + tier.
-  - biograph at the top, project notes in the middle, task notes at the leaf
-  - written by kernels and archivists over time, never by the moment directly
+- **Bots** — the staff list. Bot name -> role. A bot is a role with a name and a ledger.
+  - anyone not in the list is a person, and messages to them go out the transport
 - **Ledger** — per bot, append-only. Keyed by bot name.
   - name, journal, which kernel holds the bot now
   - read at kernel birth, written at kernel death
@@ -49,13 +47,14 @@ Everything else exists to produce these four, or to remember what came back.
   - seat id, model id, harness, prompt name, skill names, tool names
   - points into Library and Seats only
   - is also the key the scorecard counts by
-- **Cast** — `resolve(task, bot) -> State`. Happens once, at kernel birth.
+- **Cast** — `resolve(spec, bot) -> State`. Happens once, at kernel birth.
+  - look the bot up: its role is the task kind, for now
   - ask the scorecard who has won this kind of task
   - ask Seats who has quota
   - choose a spec
   - read each name in it out of Library
-  - read the bot's tier out of Memory
   - read the bot's journal out of Ledger
+  - add the `message` tool, always
   - copy all of it into a new State
   - after this, nothing is looked up by name again
 - **State** — a kernel's whole memory. All values, all copies.
@@ -72,9 +71,12 @@ Everything else exists to produce these four, or to remember what came back.
   - CallModel: the payload from section 1
   - ExecuteTool
   - StoreRecord: carries session id + seat id, so a record can point back to its conversation and its spec
-  - EmitMessage
-  - Halt
+    - the first record of every turn is a task record: kind (the role) + a one-line summary, so a taxonomy of tasks can be grown from the store later
+  - Send: text to a recipient. With a call id, the model used the `message` tool and waits for the reply. Without one, it is the turn's answer to whoever asked.
 - **The loop** — pop an event, call the moment, hand each effect to its seam, push what comes back
+  - also the post office: a Send to a person goes out the transport; a Send to a bot wakes that bot's kernel, runs it until it answers, and hands the answer back as the tool result
+  - no hierarchy: every bot can message every bot, and the person is just another recipient
+  - woken kernels stay alive until the conversation ends; then each is retired
 - **Seams** — five Protocols, the whole boundary between owned and commodity code
   - Model, Tools, Store, Transport, Observer
 - **Wire** — the plug behind the Model seam
@@ -89,7 +91,7 @@ Everything else exists to produce these four, or to remember what came back.
 - ModelCompleted → State.messages (the moment appends it)
 - StoreRecord → Store[session id]
 - Store → Scorecard[spec] → the next Cast
-- Halt → Ledger[bot]: the kernel's own report + the archivist's account (archivist reads the Store to write it)
+- retire → Ledger[bot]: the kernel's own report + the archivist's account (archivist reads the Store to write it)
 - the next Cast for that bot reads the Ledger
 
 So the pointer graph is a line with one loop:

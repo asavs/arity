@@ -1,24 +1,30 @@
-"""Cast: the one function that crosses the line. resolve(task, bot) -> State.
+"""Cast: the one function that crosses the line. resolve(spec, bot) -> State.
 
 Everything left of this function is a name. Everything right of it is a value.
 
-    1. ask the scorecard who has been winning this kind of task
-    2. ask the seat table who has quota for that model
-    3. choose a Spec
-    4. read every name in the Spec out of the library
-    5. read the bot's recent ledger entries
-    6. copy all of it into a fresh State
+    1. look the bot up: which role is it, and so which kind of task is this
+    2. ask the scorecard who has been winning that kind of task
+    3. ask the seat table who has quota for that model
+    4. choose a Spec
+    5. read every name in the Spec out of the library
+    6. read the bot's recent ledger entries
+    7. copy all of it into a fresh State
 
 This happens once per kernel, at birth. After it returns, nothing in the
 system looks anything up by name again until the next kernel is born.
 
 There is no memory tier. Every kernel wakes with the same one line, then its
 role, then its skills, then what its ledger says it did last time.
+
+Every kernel also gets the `message` tool, because every bot can message
+every bot (and every person). That is the whole staff structure.
 """
 from __future__ import annotations
 
+import json
 import platform
 import uuid
+from pathlib import Path
 
 from . import ledger, library, scorecard, seats
 from .types import Spec, State
@@ -29,16 +35,32 @@ WAKE = (
     "best together!"
 )
 
-DEFAULT = Spec(seat="anthropic-max", model="claude-opus-5", role="generalist")
+BOTS = Path(__file__).parent / "bots.json"
+DEFAULT_SEAT, DEFAULT_MODEL = "anthropic-max", "claude-opus-5"
 
 
-def choose(task_kind: str, bot: str) -> Spec:
-    """Steps 1 to 3. On evidence if there is any, on a default if not.
+def bots() -> dict[str, dict]:
+    """The staff: bot name -> {"role": ...}. A bot is a role with a name and a ledger."""
+    return json.loads(BOTS.read_text())
+
+
+def is_bot(name: str) -> bool:
+    """Anyone who is not a bot is a person, and Sends to them go out the transport."""
+    return name in bots()
+
+
+def choose(bot: str) -> Spec:
+    """Steps 1 to 4. On evidence if there is any, on a default if not.
+
+    Task kind is the bot's role for now. The scorecard keys on it, and every
+    task record also keeps a one-line summary, so a finer taxonomy can be
+    grown from the store later without deciding it here.
 
     The seat is re-chosen even when the scorecard has a favourite, because
     quota moves and the scorecard does not know about it.
     """
-    spec = scorecard.best_spec(task_kind) or DEFAULT
+    role = bots()[bot]["role"]
+    spec = scorecard.best_spec(task_kind=role) or Spec(DEFAULT_SEAT, DEFAULT_MODEL, role)
     able = seats.with_quota(spec.model)
     if not able:
         raise RuntimeError(f"no seat has quota for {spec.model}")
@@ -47,17 +69,19 @@ def choose(task_kind: str, bot: str) -> Spec:
 
 
 def resolve(spec: Spec, bot: str, user: str = "asa") -> State:
-    """Steps 4 to 6. Names in, values out."""
+    """Steps 5 to 7. Names in, values out."""
     # The text blocks, in the order the model will read them.
     system = [WAKE.format(model=spec.model, computer=platform.platform(), user=user)]
     system.append(library.role(spec.role))
     for name in spec.skills:
         system.append(library.skill(name))
+    system.append("You can reach these people and bots with the message tool: "
+                  + ", ".join([user, *bots()]) + ".")
     for entry in ledger.read(bot):
         system.append(f"[{entry['kind']} from a previous kernel] {entry['text']}")
 
-    # The tool block: what the spec names, plus what its skills ask for.
-    wanted = set(spec.tools)
+    # The tool block: message, plus what the spec names, plus what its skills ask for.
+    wanted = {"message", *spec.tools}
     for name in spec.skills:
         wanted.update(library.skill_tools(name))
     tools = [library.tool_schema(name) for name in sorted(wanted)]
@@ -71,6 +95,6 @@ def resolve(spec: Spec, bot: str, user: str = "asa") -> State:
     )
 
 
-def birth(task_kind: str, bot: str) -> State:
+def birth(bot: str) -> State:
     """The whole thing: choose, then resolve."""
-    return resolve(choose(task_kind, bot), bot)
+    return resolve(choose(bot), bot)

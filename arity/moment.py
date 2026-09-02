@@ -21,8 +21,8 @@ import uuid
 from typing import Callable
 
 from .types import (
-    CallModel, Effect, EmitMessage, Event, ExecuteTool, Halt,
-    ModelCompleted, State, Status, StoreRecord, Tick, ToolCompleted, UserMessage,
+    CallModel, Effect, Event, ExecuteTool, Message,
+    ModelCompleted, Send, State, Status, StoreRecord, Tick, ToolCompleted,
 )
 
 
@@ -51,14 +51,21 @@ def transition(
 
     match event:
 
-        # A person typed. Append it, keep it, ask the model.
-        case UserMessage(text):
-            state.messages.append({"role": "user", "content": text})
+        # Someone spoke to this kernel. That is a task. Keep a task record with the
+        # kind (the bot's role, for now) and a one-line summary (the first line, for
+        # now) so a finer taxonomy of tasks can be grown from the store later.
+        # Then append the message, remember who sent it, and ask the model.
+        case Message(sender, text):
+            keep("task", {"kind": state.spec.role, "summary": text.splitlines()[0][:120],
+                          "sender": sender})
+            state.messages.append({"role": "user", "content": f"[{sender}] {text}"})
+            state.talking_to = sender
             state.status = Status.WAITING_MODEL
-            keep("user", {"content": text})
+            keep("user", {"sender": sender, "content": text})
             call_model()
 
         # The model answered and wants tools. Append the turn, keep it, ask for each tool.
+        # A call to `message` is not a tool the loop runs; it is a Send to another bot.
         case ModelCompleted(text, tool_calls, usage) if tool_calls:
             state.messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
             state.status = Status.WAITING_TOOLS
@@ -67,18 +74,22 @@ def transition(
                 args = call["arguments"]
                 if isinstance(args, str):
                     args = json.loads(args)
-                effects.append(ExecuteTool(call.get("id") or new_id(), call["name"], args))
+                call_id = call.get("id") or new_id()
+                if call["name"] == "message":
+                    effects.append(Send(to=args["to"], text=args["content"], call_id=call_id))
+                else:
+                    effects.append(ExecuteTool(call_id, call["name"], args))
 
-        # The model answered and is done talking. Append, keep, show the person, halt.
+        # The model answered and is done. Append, keep, send the answer to whoever asked.
         case ModelCompleted(text, _, usage):
             state.messages.append({"role": "assistant", "content": text})
             state.output = text
-            state.status = Status.HALTED
+            state.status = Status.IDLE
             keep("model", {"content": text, "usage": usage})
-            effects.append(EmitMessage(text))
-            effects.append(Halt("end of turn"))
+            effects.append(Send(to=state.talking_to, text=text))
 
-        # A tool returned. Append its result; if it was the last one, ask the model again.
+        # A tool returned (or another bot replied). Append it; if it was the last one
+        # outstanding, ask the model again.
         case ToolCompleted(call_id, name, output):
             state.messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": output})
             keep("tool", {"name": name, "output": output[:2000]})

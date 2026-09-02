@@ -26,9 +26,8 @@ import copy
 import itertools
 import uuid
 
-from . import cast, scorecard, seams
-from .harness import for_spec
-from .loop import Loop
+from . import cast, scorecard
+from .loop import default_loop
 from .types import Event, Spec, State
 
 
@@ -53,16 +52,20 @@ def fork(base: State, spec: Spec) -> State:
     return fresh
 
 
-def run(base: State, specs: list[Spec], event: Event, task_kind: str, pick: int | None = None):
-    """Fork, run each, score. Returns the scorecard's ranking."""
+def run(base: State, specs: list[Spec], event: Event, pick: int | None = None,
+        make_loop=default_loop):
+    """Fork, run each, score. Returns the scorecard's ranking.
+
+    Task kind is the role, same as everywhere else. `make_loop` is only a
+    parameter so the demo can substitute a mock wire.
+    """
     results = []
     for spec in specs:
         state = fork(base, spec)
-        loop = Loop(model=for_spec(spec), tools=seams.LocalTools(list(spec.tools)))
-        final = loop.run(state, event)
+        final = make_loop(spec).run(state, event)
         results.append(scorecard.Result(
             spec=spec,
-            task_kind=task_kind,
+            task_kind=spec.role,
             session_id=final.session_id,
             output=final.output or "",
             usage={},
