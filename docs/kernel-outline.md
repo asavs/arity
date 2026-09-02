@@ -77,6 +77,8 @@ Everything else exists to produce these four, or to remember what came back.
 - **The loop** — pop an event, call the moment, hand each effect to its seam, push what comes back
   - also the post office: a Send to a person goes out the transport; a Send to a bot wakes that bot's kernel, runs it until it answers, and hands the answer back as the tool result
   - no hierarchy: every bot can message every bot, and the person is just another recipient
+  - a Send to the person mid-turn is delivered and the model is told to finish; the person answers in a later Message
+  - two shapes, both the caller's choice: delegate (ask reception, it messages a teammate and reports back) or transfer (address a teammate by name; reception is out of the loop)
   - woken kernels stay alive until the conversation ends; then each is retired
 - **Seams** — five Protocols, the whole boundary between owned and commodity code
   - Model, Tools, Store, Transport, Observer
@@ -90,9 +92,11 @@ Everything else exists to produce these four, or to remember what came back.
 ## 4. How results flow back
 
 - ModelCompleted → State.messages (the moment appends it)
+- ModelFailed → nothing appended; a one-line "(no answer: ...)" goes to whoever asked, and the kernel goes idle
 - StoreRecord → Store[session id]
 - Store → Scorecard[spec] → the next Cast
-- retire → Ledger[bot]: the kernel's own report + the archivist's account (archivist reads the Store to write it)
+- retire → Ledger[bot]: the kernel's own report + the archivist's account (archivist reads a rendered transcript of the Store, not the raw records)
+  - if the report call fails, the archive is written alone and says so
 - the next Cast for that bot reads the Ledger
 
 So the pointer graph is a line with one loop:
