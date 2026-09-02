@@ -10,7 +10,8 @@
     "url": "https://api.anthropic.com/v1/messages",
     "key_env": "ANTHROPIC_API_KEY",
     "remaining": 0.82,
-    "resets_at": "2026-09-02T23:00:00Z"
+    "resets_at": "2026-09-02T23:00:00Z",
+    "warm_window": 300
   },
   {
     "id": "openai-pro",
@@ -23,7 +24,8 @@
     "url": "https://api.openai.com/v1/chat/completions",
     "key_env": "OPENAI_API_KEY",
     "remaining": 0.4,
-    "resets_at": "2026-09-05T00:00:00Z"
+    "resets_at": "2026-09-05T00:00:00Z",
+    "warm_window": 1800
   },
   {
     "id": "xai-super",
@@ -35,7 +37,8 @@
     "url": "https://api.x.ai/v1/chat/completions",
     "key_env": "XAI_API_KEY",
     "remaining": 0.95,
-    "resets_at": "2026-09-03T12:00:00Z"
+    "resets_at": "2026-09-03T12:00:00Z",
+    "warm_window": 0
   },
   {
     "id": "openrouter-free",
@@ -51,7 +54,8 @@
     "url": "https://openrouter.ai/api/v1/chat/completions",
     "key_env": "OPENROUTER_API_KEY",
     "remaining": 99.988324,
-    "resets_at": null
+    "resets_at": null,
+    "warm_window": 0
   },
   {
     "id": "nvidia-nim",
@@ -64,7 +68,8 @@
     "url": "https://integrate.api.nvidia.com/v1/chat/completions",
     "key_env": "NVIDIA_NIM_API_KEY",
     "remaining": 100.0,
-    "resets_at": null
+    "resets_at": null,
+    "warm_window": 0
   },
   {
     "id": "mock",
@@ -76,6 +81,7 @@
     "url": "",
     "key_env": "",
     "remaining": 1.0,
-    "resets_at": null
+    "resets_at": null,
+    "warm_window": 0
   }
 ]

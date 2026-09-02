@@ -39,8 +39,10 @@ cast it wakes knowing what happened here.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 
-from . import cast, store, trial
+from . import cast, seats, store, trial
 from .loop import Loop
 from .types import Message, Send
 
@@ -57,10 +59,42 @@ class Collect:
         self.sends.append(effect)
 
 
+class Warmer(threading.Thread):
+    """Keeps the current bot's cached prefix warm while you are typing.
+
+    Every few seconds, if the seat's warm window is about to lapse and the
+    seat is a subscription (cheap to ping), send one keepalive. At most a few
+    per silence: a person who has walked away is not worth chasing, and the
+    next real message simply pays cold. See loop.keep_warm.
+    """
+    MARGIN, PINGS_PER_SILENCE = 30, 3
+
+    def __init__(self, loop: Loop):
+        super().__init__(daemon=True)
+        self.loop, self.bot, self.pings = loop, RECEPTION, 0
+
+    def talking_to(self, bot: str) -> None:
+        self.bot, self.pings = bot, 0
+
+    def run(self) -> None:
+        while True:
+            time.sleep(5)
+            state = self.loop.live.get(self.bot)
+            if not state or self.pings >= self.PINGS_PER_SILENCE:
+                continue
+            left = self.loop.warmth(state)
+            if left is not None and left < self.MARGIN and seats.lookup(state.spec.seat).kind == "subscription":
+                if self.loop.keep_warm(state):
+                    self.pings += 1
+                    print("(kept the cache warm)")
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     loop = Loop()
     talking_to = RECEPTION
+    warmer = Warmer(loop)
+    warmer.start()
 
     def say(line: str) -> None:
         nonlocal talking_to
@@ -79,6 +113,7 @@ def main(argv: list[str] | None = None) -> None:
             run_trial(loop, talking_to, int(head), rest)
             return
         loop.run(loop.wake(talking_to), Message(sender=USER, text=line))
+        warmer.talking_to(talking_to)
 
     try:
         if argv and argv[0] == "resume":

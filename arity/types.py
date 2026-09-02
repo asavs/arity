@@ -72,6 +72,7 @@ class State:
     status: Status = Status.IDLE
     talking_to: str = ""                    # who sent the message this turn answers
     output: str | None = None               # the last thing the model said in plain text
+    last_call_at: float = 0.0               # when the wire last touched this prefix (keepalive)
 
     def system_text(self) -> str:
         """The system prompt is just the blocks joined. Order is set by cast."""
@@ -114,13 +115,12 @@ class ToolCompleted:
     output: str
 
 
-@dataclass(frozen=True)
-class Tick:
-    """The pulse fired and nobody said anything. The kernel decides if it means something."""
-    at: str
+Event = Message | ModelCompleted | ModelFailed | ToolCompleted
 
-
-Event = Message | ModelCompleted | ModelFailed | ToolCompleted | Tick
+# There is no pulse. Nothing wakes a kernel on a clock to ask if it has
+# anything to say. What there is instead is a keepalive (loop.py): a cheap
+# throwaway call that keeps a provider's cached prefix warm while the person
+# is still around, so the next real message is not paid for cold.
 
 
 # ---------------------------------------------------------------------------
