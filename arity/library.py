@@ -22,6 +22,18 @@ from typing import Any, Callable
 from . import paths
 
 
+def epoch() -> int:
+    """The ruleset epoch: an integer in library/EPOCH, 1 if the file is absent.
+
+    Bump it by hand when a role, skill or tool changes in a way that makes old
+    trial outcomes incomparable with new ones. Every birth line carries the
+    epoch it was born under, and the scorecard only counts the current one.
+    Old evidence is kept, not deleted; it just stops voting.
+    """
+    path = paths.library() / "EPOCH"
+    return int(path.read_text().strip()) if path.exists() else 1
+
+
 def role(name: str) -> str:
     """The role text. A role is a stable name for an aptitude, not a project."""
     return (paths.library() / "roles" / f"{name}.md").read_text()
