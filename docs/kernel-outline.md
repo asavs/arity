@@ -29,7 +29,8 @@ Everything else exists to produce these four, or to remember what came back.
   - cast asks it who has quota
   - the wire asks it for a URL and a key
   - a seat is subscription quota or API dollars; the router has to know which
-- **Bots** — the staff list. Bot name -> role. A bot is a role with a name and a ledger.
+- **Bots** — the staff list. Bot name -> role (and optionally a pinned harness). A bot is a role with a name and a ledger.
+  - names are tangible on purpose (reception, engineer, designer) so a model needs nothing more than the list to know whom to message
   - anyone not in the list is a person, and messages to them go out the transport
 - **Ledger** — per bot, append-only. Keyed by bot name.
   - name, journal, which kernel holds the bot now

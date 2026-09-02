@@ -40,7 +40,11 @@ DEFAULT_SEAT, DEFAULT_MODEL = "anthropic-max", "claude-opus-5"
 
 
 def bots() -> dict[str, dict]:
-    """The staff: bot name -> {"role": ...}. A bot is a role with a name and a ledger."""
+    """The staff: bot name -> {"role": ..., "harness": ...?}. A bot is a role with a name and a ledger.
+
+    Names are tangible on purpose (reception, engineer, designer) so that a model
+    needs nothing more than this list to know whom to message about a task.
+    """
     return json.loads(BOTS.read_text())
 
 
@@ -59,13 +63,17 @@ def choose(bot: str) -> Spec:
     The seat is re-chosen even when the scorecard has a favourite, because
     quota moves and the scorecard does not know about it.
     """
-    role = bots()[bot]["role"]
+    entry = bots()[bot]
+    role = entry["role"]
     spec = scorecard.best_spec(task_kind=role) or Spec(DEFAULT_SEAT, DEFAULT_MODEL, role)
     able = seats.with_quota(spec.model)
     if not able:
         raise RuntimeError(f"no seat has quota for {spec.model}")
+    # A bot may pin its harness in bots.json (e.g. "claude" to run through Claude Code
+    # on a subscription). Otherwise the scorecard's favourite, otherwise our own loop.
     return Spec(seat=able[0].id, model=spec.model, role=spec.role,
-                skills=spec.skills, tools=spec.tools, harness=spec.harness)
+                skills=spec.skills, tools=spec.tools,
+                harness=entry.get("harness", spec.harness))
 
 
 def resolve(spec: Spec, bot: str, user: str = "asa") -> State:

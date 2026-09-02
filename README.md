@@ -1,5 +1,21 @@
 # arity
 
+```
+                 .  .  .  .
+             .  '  *  *  *  '  .
+          .  *  o  o  o  o  o  *  .
+        .  *  o  x  x  x  x  o  *  .
+       .  *  o  x  +  +  x  o  *  .
+       .  *  o  x  + [1] +  x  o  *  .    r_n = c √n
+       .  *  o  x  +  +  x  o  *  .      θ_n = n × 137.507764° (Golden Angle)
+        .  *  o  x  x  x  x  o  *  .      Fibonacci spirals: 21, 34, 55, 89, 144
+          .  *  o  o  o  o  o  *  .
+             .  '  *  *  *  '  .
+                 '  '  '  '
+```
+
+One moment. N kernels. The best of each.
+
 The simplest implementation of the arity kernel that still has every part.
 It is written to be read, not run. Nothing here is optimised, defended, or tested.
 Each file is one noun from `docs/kernel-outline.md`, and the docstring
