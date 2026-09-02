@@ -18,7 +18,8 @@ evidence across every trial that varied skills, tools, harness or effort. A
 key of the whole Spec would start from zero every time any field changed,
 and the scorecard would look like it works while never having enough trials
 to say anything. To ask about a second factor, ask a second pairwise
-question: standings(role, "skills"), standings(role, "effort").
+question: standings(role, "skills"), standings(role, "effort"), or a row
+field like standings(role, "worked").
 
 What makes a result "win" is deliberately not settled here. Models working
 in parallel usually each do something good, and the real job is cherry
@@ -111,7 +112,12 @@ def standings(role: str, factor: str = "model") -> list[Standing]:
     for row in store.rows():
         if row["won"] is None or row["spec"].role != role or not row.get("current", True):
             continue
-        key = getattr(row["spec"], factor)
+        # A factor is a Spec field (model, skills, effort, harness) or a row field
+        # (worked, tool_calls). Pairing a model with what a task turned out to need
+        # is how, later, the standings can say which tasks nobody on the team is
+        # good at yet, and so who the next team member should be.
+        spec = row["spec"]
+        key = getattr(spec, factor) if hasattr(spec, factor) else row[factor]
         counts[key][1] += 1
         counts[key][0] += int(row["won"])
     table = [Standing(value, w, t) for value, (w, t) in counts.items()]

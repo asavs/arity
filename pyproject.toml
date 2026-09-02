@@ -1,6 +1,6 @@
 [project]
 name = "arity"
-version = "1.0.0a1"
+version = "1.0.0"
 description = "A small kernel for running one model's moment, and forking it."
 requires-python = ">=3.11"
 dependencies = []
