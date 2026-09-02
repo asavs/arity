@@ -34,9 +34,11 @@ Follow one message from the keyboard to the model and back. Each hop is one file
    a placeholder: put results in, get a ranking out. Also the tally over the store
    that cast reads.
 
-7. **`cast.py`** — the one function that crosses the line: `resolve(task, bot) -> State`.
-   Picks a spec, reads every name in it out of the stores, copies the text into a
-   State. After this nothing is looked up by name again.
+7. **`cast.py`** and **`bots.json`** — the one function that crosses the line:
+   `resolve(spec, bot) -> State`. Looks the bot up in the staff list, picks a spec,
+   reads every name in it out of the stores, copies the text into a State. After
+   this nothing is looked up by name again. Every kernel also gets the `message`
+   tool, because every bot can message every bot.
 
 8. **`moment.py`** — `transition(state, event) -> (state, effects)`. Pure. No I/O.
    The whole kernel is this file.
@@ -45,7 +47,10 @@ Follow one message from the keyboard to the model and back. Each hop is one file
    Model, Tools, Store, Transport, Observer.
 
 10. **`loop.py`** — pops an event, calls the moment, hands each effect to its seam,
-    pushes the results back as events. On Halt, performs the death rites.
+    pushes the results back as events. Also the post office: a `Send` to a person
+    goes out the transport, a `Send` to a bot wakes that bot's kernel and runs it
+    until it answers. Keeps every woken kernel alive until `retire` performs the
+    death rites.
 
 11. **`wire_anthropic.py`, `wire_openai.py`** — the plugs behind the Model seam.
     One function per provider: format the payload, send it, read the reply back.
@@ -57,21 +62,28 @@ Follow one message from the keyboard to the model and back. Each hop is one file
 13. **`trial.py`** — a trial is a fork. N copies of one State, one per spec, the same
     event into each, N results keyed by spec, handed to the scorecard.
 
-14. **`demo.py`** — one moment and one three-way trial against a mock wire, so the
-    flow can be followed without a key.
+14. **`main.py`** — the front door. `arity "text"` sends one message to reception
+    and prints the reply; `arity` alone reads lines until you stop. No TUI, no flags.
+
+15. **`demo.py`** — one moment, one bot messaging another, one three-way trial,
+    all against a mock wire, so the flow can be followed without a key.
 
 ## The flow in one paragraph
 
-A person types. The front door wraps the text in a `UserMessage` and asks `cast` for
-a State for the bot that should answer. Cast asks the scorecard who has been winning
-this kind of task, asks the seat table who has quota, picks a `Spec`, and reads every
-name in that spec out of the library and the ledger, copying the text into a fresh
-`State`. The loop hands the State and the event to `transition`, which appends the
-message and returns a `CallModel` effect: the payload. The loop gives the payload to
-the wire, the wire formats it for the provider and sends it, and the reply comes back
-as a `ModelCompleted` event. The loop hands that to `transition` again, which appends
-it, asks for a `StoreRecord`, and either asks for tools or halts. Every record lands in
-the session's JSONL file. When the kernel halts, the loop asks it for its own report,
+A person types. The front door wraps the text in a `Message` to the bot called
+"reception" and asks `cast` for that bot's State. Cast looks the bot up in the staff list,
+asks the scorecard who has been winning that bot's kind of task, asks the seat table
+who has quota, picks a `Spec`, and reads every name in that spec out of the library
+and the ledger, copying the text into a fresh `State`. The loop hands the State and
+the event to `transition`, which keeps a task record, appends the message, and returns
+a `CallModel` effect: the payload. The loop gives the payload to the wire, the wire
+formats it for the provider and sends it, and the reply comes back as a
+`ModelCompleted` event. The loop hands that to `transition` again, which appends it,
+asks for a `StoreRecord`, and then either asks for tools, or asks to `Send` a message
+to another bot, or `Send`s its answer back to the person. A `Send` to a bot is the
+post office's job: wake that bot's kernel, run it until it answers, hand the answer
+back as the tool result. Every record lands in the session's JSONL file. When the
+conversation ends, each woken kernel is retired: the loop asks it for its own report,
 asks the archivist for an impartial one, and appends both to the bot's ledger. Next
 time that bot is cast, it wakes with those entries. The scorecard reads the store,
 counts who won, and cast reads the scorecard. That is the loop closed.

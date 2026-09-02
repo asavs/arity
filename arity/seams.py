@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .types import CallModel, EmitMessage, ExecuteTool, ModelCompleted, State, StoreRecord, ToolCompleted
+from .types import CallModel, ExecuteTool, ModelCompleted, Send, State, StoreRecord, ToolCompleted
 
 
 class ModelSeam(Protocol):
@@ -32,8 +32,8 @@ class StoreSeam(Protocol):
 
 
 class TransportSeam(Protocol):
-    """Show the person something. A console today; a TUI or a phone later."""
-    def emit(self, effect: EmitMessage) -> None: ...
+    """Deliver a Send to a recipient who is not a bot. A console today; a TUI or a phone later."""
+    def emit(self, effect: Send) -> None: ...
 
 
 class ObserverSeam(Protocol):
@@ -67,8 +67,8 @@ class LocalTools:
 
 class Console:
     """TransportSeam. Prints."""
-    def emit(self, effect: EmitMessage) -> None:
-        print(effect.text)
+    def emit(self, effect: Send) -> None:
+        print(f"[to {effect.to}] {effect.text}")
 
 
 class Quiet:

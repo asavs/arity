@@ -43,10 +43,10 @@ class Spec:
 # ---------------------------------------------------------------------------
 
 class Status(Enum):
-    IDLE = "idle"
+    IDLE = "idle"                   # nothing pending; the kernel is between turns
     WAITING_MODEL = "waiting_model"
     WAITING_TOOLS = "waiting_tools"
-    HALTED = "halted"
+    RETIRED = "retired"             # death rites done; never runs again
 
 
 @dataclass
@@ -67,6 +67,7 @@ class State:
     tools: list[dict[str, Any]]             # tool schemas the model will see
     messages: list[dict[str, Any]] = field(default_factory=list)
     status: Status = Status.IDLE
+    talking_to: str = ""                    # who sent the message this turn answers
     output: str | None = None               # the last thing the model said in plain text
 
     def system_text(self) -> str:
@@ -79,8 +80,10 @@ class State:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class UserMessage:
-    """A person typed."""
+class Message:
+    """Someone sent this kernel a message. A person or another bot; the kernel
+    does not care which. `sender` is a name in bots.json, or a person's name."""
+    sender: str
     text: str
 
 
@@ -106,7 +109,7 @@ class Tick:
     at: str
 
 
-Event = UserMessage | ModelCompleted | ToolCompleted | Tick
+Event = Message | ModelCompleted | ToolCompleted | Tick
 
 
 # ---------------------------------------------------------------------------
@@ -141,20 +144,27 @@ class StoreRecord:
     """
     session_id: str
     seat: str
-    kind: str                       # "user" | "model" | "tool"
+    kind: str                       # "task" | "user" | "model" | "tool" | "outcome"
     record: dict[str, Any]
 
 
 @dataclass(frozen=True)
-class EmitMessage:
-    """Show the person something."""
+class Send:
+    """Deliver text to a recipient: a person, or another bot.
+
+    This is the one way anything leaves a kernel. There is no hierarchy: every
+    bot can message every bot, and a person is just a recipient that is not a
+    bot. Two flavours:
+
+        call_id set    the model used the `message` tool mid-turn and is waiting
+                       for a reply; the loop wakes the recipient, gets its answer,
+                       and hands it back as the tool result.
+        call_id None   the model finished its turn; this is its answer to whoever
+                       spoke to it (`State.talking_to`).
+    """
+    to: str
     text: str
+    call_id: str | None = None
 
 
-@dataclass(frozen=True)
-class Halt:
-    """The kernel is done. The loop performs the death rites (see ledger.py)."""
-    reason: str
-
-
-Effect = CallModel | ExecuteTool | StoreRecord | EmitMessage | Halt
+Effect = CallModel | ExecuteTool | StoreRecord | Send
