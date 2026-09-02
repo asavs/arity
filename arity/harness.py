@@ -29,23 +29,29 @@ from .wire_anthropic import AnthropicWire
 from .wire_mock import MockWire
 from .wire_openai import OpenAIWire
 
+# Checked on this machine 2026-09-02. claude and codex read the prompt from
+# stdin; agy only takes it as an argument, which puts the whole payload on the
+# command line (Windows caps that around 32k characters).
 COMMANDS = {
-    "claude": ["claude", "-p", "--output-format", "text"],
-    "codex":  ["codex", "exec", "--quiet"],
-    "agy":    ["agy", "--headless"],
+    "claude": (["claude", "-p", "--output-format", "text"], "stdin"),
+    "codex":  (["codex", "exec"], "stdin"),
+    "agy":    (["agy", "--prompt"], "arg"),
 }
 
 
 class CLIHarness:
-    """ModelSeam. Pipes the whole payload as one prompt into a headless CLI."""
+    """ModelSeam. Hands the whole payload as one prompt to a headless CLI."""
 
     def __init__(self, name: str):
-        self.command = COMMANDS[name]
+        self.command, self.via = COMMANDS[name]
 
     def call(self, effect: CallModel) -> ModelCompleted:
         prompt = effect.system + "\n\n" + "\n\n".join(
             f"[{m['role']}] {m['content']}" for m in effect.messages)
-        done = subprocess.run(self.command, input=prompt, capture_output=True, text=True)
+        if self.via == "stdin":
+            done = subprocess.run(self.command, input=prompt, capture_output=True, text=True)
+        else:
+            done = subprocess.run(self.command + [prompt], capture_output=True, text=True)
         return ModelCompleted(text=done.stdout.strip(), tool_calls=[], usage={})
 
 
