@@ -35,7 +35,7 @@ Everything else exists to produce these four, or to remember what came back.
   - names are tangible on purpose (reception, engineer, designer) so a model needs nothing more than the list to know whom to message
   - anyone not in the list is a person, and messages to them go out the transport
 - **Ledger** — per bot, append-only. Keyed by bot name.
-  - name, journal, which kernel holds the bot now
+  - two kinds of entry: a report (the kernel's own account, first person) and an archive (the archivist's account, third person)
   - read at kernel birth, written at kernel death
   - this is what makes a bot outlive a kernel
 - **Store** — per session, append-only JSONL. Keyed by session id. A journal of events.
@@ -50,7 +50,7 @@ Everything else exists to produce these four, or to remember what came back.
 ## 3. Names become values
 
 - **Spec** — a row of names. No text.
-  - seat id, model id, harness, prompt name, skill names, tool names
+  - seat id, model id, harness, role, effort, skill names, tool names
   - points into Library and Seats only
   - is also the key the scorecard counts by
 - **Cast** — `resolve(spec, bot) -> State`. Happens once, at kernel birth.
@@ -84,6 +84,7 @@ Everything else exists to produce these four, or to remember what came back.
   - a Send to the person mid-turn is delivered and the model is told to finish; the person answers in a later Message
   - two shapes, both the caller's choice: delegate (ask reception, it messages a teammate and reports back) or transfer (address a teammate by name; reception is out of the loop)
   - woken kernels stay alive until the conversation ends; then each is retired
+  - one live kernel per bot across processes: a lock file per bot, taken on wake and released on retire
 - **Seams** — five Protocols, the whole boundary between owned and commodity code
   - Model, Tools, Store, Transport, Observer
 - **Wire** — the plug behind the Model seam
