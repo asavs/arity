@@ -61,6 +61,15 @@ def candidates(base: Spec, n: int) -> list[Spec]:
         chosen.append(Spec(**{**base.__dict__, "seat": seat.id, "model": model}))
         if len(chosen) == n:
             break
+
+    # The exploration slot. With two or more kernels, the last one goes to the
+    # model we know least about, so the standings never stop learning. A trial
+    # that only ever asks the favourites can never find a better one.
+    if n >= 2:
+        pool = {m: s for s, m in pairs if not any(c.model == m for c in chosen)}
+        explore = scorecard.least_tried(base.role, list(pool))
+        if explore:
+            chosen[-1] = Spec(**{**base.__dict__, "seat": pool[explore].id, "model": explore})
     return chosen
 
 
