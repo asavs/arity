@@ -47,8 +47,10 @@ Follow one message from the keyboard to the model and back. Each hop is one file
 5. **`ledger.py`** — what makes a bot outlive a kernel. One append-only file per bot.
    Read at birth, written at death.
 
-6. **`store.py`** — one JSONL file per session. Every message, model turn and tool
-   result. The conversation, and the raw evidence.
+6. **`store.py`** — one JSONL file per session: a birth line, then every event the
+   loop popped, verbatim. The State is a fold over it, which is the crash story
+   (replay and continue), the lineage story (the birth line names the parent), and
+   the evidence story (`rows()` is one row per session for the scorecard).
 
 7. **`scorecard.py`** — the box that turns trial results into a score. Deliberately
    a placeholder: put results in, get a ranking out. Also the tally over the store
@@ -90,7 +92,8 @@ Follow one message from the keyboard to the model and back. Each hop is one file
     transferred: your lines go to the engineer until you address someone else.
     Start a line with a number, `arity 3 "text"`, and whoever you are talking to
     is forked onto the three best models with quota; the answers print side by
-    side, you pick the winner, and the scorecard remembers.
+    side, you pick the winner, and the scorecard remembers. `arity resume` folds
+    the last unfinished session's journal back into a kernel and keeps going.
 
 16. **`demo.py`** — one moment, one bot messaging another, one three-way trial,
     all against a mock wire, so the flow can be followed without a key.
@@ -101,15 +104,16 @@ A person types. The front door wraps the text in a `Message` to the bot called
 "reception" and asks `cast` for that bot's State. Cast looks the bot up in the staff list,
 asks the scorecard who has been winning that bot's kind of task, asks the seat table
 who has quota, picks a `Spec`, and reads every name in that spec out of the library
-and the ledger, copying the text into a fresh `State`. The loop hands the State and
-the event to `transition`, which keeps a task record, appends the message, and returns
-a `CallModel` effect: the payload. The loop gives the payload to the wire, the wire
+and the ledger, copying the text into a fresh `State`. The loop journals the event to
+the session file, then hands the State and the event to `transition`, which appends the
+message and returns a `CallModel` effect: the payload. The loop gives the payload to the wire, the wire
 formats it for the provider and sends it, and the reply comes back as a
-`ModelCompleted` event. The loop hands that to `transition` again, which appends it,
-asks for a `StoreRecord`, and then either asks for tools, or asks to `Send` a message
+`ModelCompleted` event. The loop journals it and hands it to `transition` again, which appends
+it and then either asks for tools, or asks to `Send` a message
 to another bot, or `Send`s its answer back to the person. A `Send` to a bot is the
 post office's job: wake that bot's kernel, run it until it answers, hand the answer
-back as the tool result. Every record lands in the session's JSONL file. When the
+back as the tool result. Every event is on disk before the moment sees it, so the State is
+always a fold over the file and a crash is resumed by folding again. When the
 conversation ends, each woken kernel is retired: the loop asks it for its own report,
 asks the archivist for an impartial one, and appends both to the bot's ledger. Next
 time that bot is cast, it wakes with those entries. The scorecard reads the store,

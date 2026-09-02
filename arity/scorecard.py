@@ -7,17 +7,21 @@ Two halves.
                              be ground on for a long time. Today it is the
                              simplest thing that has the right shape.
 
-    tally() / best_spec()    Count wins per (task kind, spec) over every
-                             session in the store. Cast reads this to choose
-                             a spec on evidence. Can be thrown away and
-                             rebuilt at any time, because the store is the
-                             truth and this is arithmetic over it.
+    best_spec(task_kind)     Who has been winning this kind of task, counted
+                             over store.rows(). Cast reads this to choose a
+                             spec on evidence. Rebuildable any time, because
+                             the store is the truth and this is arithmetic.
 
 What makes a result "win" is deliberately not settled here. Models working
 in parallel usually each do something good, and the real job is cherry
 picking the best of each. Line count is not quality. A judge model might be
 part of it, or might merge into the parent. For now: a box with the right
 signature, and one naive body.
+
+Everything a cleverer selector could want is already in a row: spec, task
+summary, tokens, failures, outcome, parent. Cost-aware ranking, per-kind
+ratings, credit flowing from a winning parent to the child that did the
+work: all of it reads rows and nothing else.
 """
 from __future__ import annotations
 
@@ -66,39 +70,26 @@ def score(results: list[Result], pick: int | None = None) -> list[Scored]:
     return sorted(scored, key=lambda s: -s.score)
 
 
+def record_outcome(scored: list[Scored]) -> None:
+    """Write each result's outcome into its own session file, so the tally can
+    be rebuilt from the store alone."""
+    for s in scored:
+        store.record(s.result.session_id, "outcome", score=s.score, won=s.won)
+
+
 # ---------------------------------------------------------------------------
 # The tally cast reads
 # ---------------------------------------------------------------------------
 
-def record_outcome(scored: list[Scored]) -> None:
-    """Write each result's outcome back into its own session, as one more record.
-
-    This is how a trial's verdict becomes part of the store, so the tally can
-    be rebuilt from the store alone.
-    """
-    from .types import StoreRecord  # local import: store is a plug, not a dependency
-    for s in scored:
-        store.append(StoreRecord(
-            session_id=s.result.session_id,
-            seat=s.result.spec.seat,
-            kind="outcome",
-            record={"task_kind": s.result.task_kind, "spec": s.result.spec.__dict__,
-                    "score": s.score, "won": s.won},
-        ))
-
-
 def tally() -> dict[tuple[str, Spec], tuple[int, int]]:
-    """(task kind, spec) -> (wins, trials), over every outcome line in every session."""
+    """(task kind, spec) -> (wins, trials), over every session that has an outcome."""
     counts: dict[tuple[str, Spec], list[int]] = defaultdict(lambda: [0, 0])
-    for session_id in store.sessions():
-        for line in store.read(session_id):
-            if line["kind"] != "outcome":
-                continue
-            spec = Spec(**{k: tuple(v) if isinstance(v, list) else v
-                           for k, v in line["spec"].items()})
-            key = (line["task_kind"], spec)
-            counts[key][1] += 1
-            counts[key][0] += int(line["won"])
+    for row in store.rows():
+        if row["won"] is None:
+            continue
+        key = (row["spec"].role, row["spec"])
+        counts[key][1] += 1
+        counts[key][0] += int(row["won"])
     return {k: (w, t) for k, (w, t) in counts.items()}
 
 

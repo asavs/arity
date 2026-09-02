@@ -6,7 +6,7 @@ it prints is one hop.
 """
 from __future__ import annotations
 
-from . import cast, trial
+from . import trial
 from .loop import Loop
 from .types import Message, Spec
 from .wire_mock import MockWire
@@ -18,11 +18,11 @@ def mock_spec(role: str = "generalist") -> Spec:
 
 def one_moment() -> None:
     print("\n== one moment: asa -> reception ==")
-    state = cast.resolve(mock_spec(), bot="reception")
+    loop = Loop(model_for=lambda spec: MockWire("reception"))
+    state = loop.wake("reception", spec=mock_spec())
     print(f"  cast -> State session={state.session_id} bot={state.bot} "
           f"blocks={len(state.system)} tools={[t['name'] for t in state.tools]}")
 
-    loop = Loop(model_for=lambda spec: MockWire("reception"))
     final = loop.run(state, Message(sender="asa", text="hi, what are you?"))
     print(f"  loop -> idle with output: {final.output!r}")
 
@@ -37,16 +37,20 @@ def two_bots() -> None:
     ]
     wire = MockWire("shared", script)
     loop = Loop(model_for=lambda spec: wire)
-    loop.live["reception"] = cast.resolve(mock_spec(), bot="reception")
-    loop.live["engineer"] = cast.resolve(mock_spec("typescript-developer"), bot="engineer")
+    reception = loop.wake("reception", spec=mock_spec())
+    loop.wake("engineer", spec=mock_spec("typescript-developer"))
 
-    loop.run(loop.live["reception"], Message(sender="asa", text="get the linter run on app.ts"))
+    loop.run(reception, Message(sender="asa", text="get the linter run on app.ts"))
     print(f"  live kernels: {list(loop.live)}")
+
+    # The journal is the state. Fold it back and compare.
+    replayed = Loop(model_for=lambda spec: wire).resume(reception.session_id)
+    print(f"  resume -> same conversation: {replayed.messages == reception.messages}")
 
 
 def three_way() -> None:
     print("\n== three-way trial: same conversation, three skill sets ==")
-    base = cast.resolve(mock_spec(), bot="reception")
+    base = Loop(model_for=lambda spec: MockWire("base")).wake("reception", spec=mock_spec())
     base.messages.append({"role": "user", "content": "[asa] earlier context the forks all share"})
 
     specs = trial.product(

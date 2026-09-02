@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .types import CallModel, ExecuteTool, ModelCompleted, Send, State, StoreRecord, ToolCompleted
+from .types import CallModel, ExecuteTool, ModelCompleted, Send, State, ToolCompleted
 
 
 class ModelSeam(Protocol):
@@ -27,8 +27,11 @@ class ToolSeam(Protocol):
 
 
 class StoreSeam(Protocol):
-    """Keep one record. store.py plugs in here."""
-    def append(self, effect: StoreRecord) -> None: ...
+    """The journal. store.py plugs in here. A birth line per kernel, an event
+    line per event, a record line for anything else worth keeping."""
+    def birth(self, state: State, parent: dict | None) -> None: ...
+    def event(self, session_id: str, event: Any) -> None: ...
+    def record(self, session_id: str, kind: str, **fields: Any) -> None: ...
 
 
 class TransportSeam(Protocol):
