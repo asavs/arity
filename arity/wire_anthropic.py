@@ -19,18 +19,21 @@ from .types import CallModel, ModelCompleted
 
 
 class AnthropicWire:
-    def __init__(self, seat_id: str, model: str):
+    def __init__(self, seat_id: str, model: str, effort: str | None = None):
         self.seat = seats.lookup(seat_id)
         self.model = model
+        self.effort = effort
 
     def call(self, effect: CallModel) -> ModelCompleted:
         body = {
             "model": self.model,
-            "max_tokens": 16000,
+            "max_tokens": effect.max_tokens or 16000,
             "system": effect.system,
             "tools": [_tool(t) for t in effect.tools],
             "messages": [_message(m) for m in effect.messages],
         }
+        if self.effort:
+            body["output_config"] = {"effort": self.effort}
         request = urllib.request.Request(
             self.seat.url,
             data=json.dumps(body).encode(),

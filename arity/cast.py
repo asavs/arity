@@ -86,7 +86,8 @@ def choose(bot: str) -> Spec:
             return Spec(seat=able[0].id, model=model, role=role,
                         skills=tuple(entry.get("skills", ())),
                         tools=tuple(entry.get("tools", ())),
-                        harness=entry.get("harness", "kernel"))
+                        harness=entry.get("harness", "kernel"),
+                        effort=entry.get("effort"))
     raise RuntimeError(f"no seat has quota for any of {[*ordered, DEFAULT_MODEL]}")
 
 

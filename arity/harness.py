@@ -61,7 +61,7 @@ def for_spec(spec: Spec):
         return CLIHarness(spec.harness)
     provider = seats.lookup(spec.seat).provider
     if provider == "anthropic":
-        return AnthropicWire(spec.seat, spec.model)
+        return AnthropicWire(spec.seat, spec.model, spec.effort)
     if provider == "mock":
         return MockWire(spec.model)
-    return OpenAIWire(spec.seat, spec.model)
+    return OpenAIWire(spec.seat, spec.model, spec.effort)
