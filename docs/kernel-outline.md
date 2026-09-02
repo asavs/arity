@@ -38,9 +38,12 @@ Everything else exists to produce these four, or to remember what came back.
   - name, journal, which kernel holds the bot now
   - read at kernel birth, written at kernel death
   - this is what makes a bot outlive a kernel
-- **Store** — per session, append-only JSONL. Keyed by session id.
-  - every message, model turn, tool result the moment asked to keep
-  - this is the conversation, and the raw evidence
+- **Store** — per session, append-only JSONL. Keyed by session id. A journal of events.
+  - first line is a birth: bot, spec, parent pointer (the session and call that woke it, or the session a fork was copied from)
+  - then every event the loop popped, verbatim, before the moment saw it
+  - `State = fold(transition, birth, events)`: replay is resume, and a file is always valid up to its last line
+  - outcome and retired lines are records, written by the scorecard and the loop
+  - `rows()`: one row per session (spec, task, tokens, failures, outcome, parent) is the whole dataset any selector reads
 - **Scorecard** — not a store. Derived by reading the Store and counting. Can be rebuilt any time.
   - wins per (task kind, spec)
 
@@ -73,10 +76,9 @@ Everything else exists to produce these four, or to remember what came back.
 - **Effects** — values the loop executes
   - CallModel: the payload from section 1
   - ExecuteTool
-  - StoreRecord: carries session id + seat id, so a record can point back to its conversation and its spec
-    - the first record of every turn is a task record: kind (the role) + a one-line summary, so a taxonomy of tasks can be grown from the store later
   - Send: text to a recipient. With a call id, the model used the `message` tool and waits for the reply. Without one, it is the turn's answer to whoever asked.
-- **The loop** — pop an event, call the moment, hand each effect to its seam, push what comes back
+- **The loop** — pop an event, journal it, call the moment, hand each effect to its seam, push what comes back
+  - `resume(session)`: fold the journal, redo the last event, carry on
   - also the post office: a Send to a person goes out the transport; a Send to a bot wakes that bot's kernel, runs it until it answers, and hands the answer back as the tool result
   - no hierarchy: every bot can message every bot, and the person is just another recipient
   - a Send to the person mid-turn is delivered and the model is told to finish; the person answers in a later Message
@@ -93,9 +95,9 @@ Everything else exists to produce these four, or to remember what came back.
 
 ## 4. How results flow back
 
+- every Event → Store[session id], before the moment sees it
 - ModelCompleted → State.messages (the moment appends it)
 - ModelFailed → nothing appended; a one-line "(no answer: ...)" goes to whoever asked, and the kernel goes idle
-- StoreRecord → Store[session id]
 - Store → Scorecard[spec] → the next Cast
 - retire → Ledger[bot]: the kernel's own report + the archivist's account (archivist reads a rendered transcript of the Store, not the raw records)
   - if the report call fails, the archive is written alone and says so

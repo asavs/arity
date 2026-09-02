@@ -3,6 +3,7 @@
     arity "fix the linter on app.ts"      one message to reception, print the reply, exit
     arity 3 "fix the linter on app.ts"    the same message to three kernels; you pick the winner
     arity                                 read lines from the keyboard until you stop
+    arity resume [session]                fold a crashed session's journal back and keep going
 
 All three are the same thing: a person sending a Message to a bot, and the
 bot's answer coming back out through the Console transport. There is no TUI
@@ -39,7 +40,7 @@ from __future__ import annotations
 
 import sys
 
-from . import cast, trial
+from . import cast, store, trial
 from .loop import Loop
 from .types import Message, Send
 
@@ -80,7 +81,20 @@ def main(argv: list[str] | None = None) -> None:
         loop.run(loop.wake(talking_to), Message(sender=USER, text=line))
 
     try:
-        if argv:
+        if argv and argv[0] == "resume":
+            # `arity resume [session]`: fold a journal back into a live kernel and keep going.
+            unfinished = store.unfinished()
+            session = argv[1] if len(argv) > 1 else (unfinished[-1] if unfinished else None)
+            if not session:
+                print("(nothing to resume)")
+                return
+            state = loop.resume(session)
+            talking_to = state.bot
+            print(f"(resumed {session} as {talking_to}; {len(state.messages)} messages)")
+            for raw in sys.stdin:
+                if raw.strip():
+                    say(raw.rstrip("\n"))
+        elif argv:
             say(" ".join(argv))
         else:
             for raw in sys.stdin:
@@ -121,7 +135,10 @@ def ask_pick(n: int) -> int | None:
     """Which one won? Enter for none. Skipped when nobody is at the keyboard."""
     if not sys.stdin.isatty():
         return None
-    raw = input(f"\nwhich won? (1-{n}, enter for none) ").strip()
+    try:
+        raw = input(f"\nwhich won? (1-{n}, enter for none) ").strip()
+    except EOFError:
+        return None
     return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
 
 

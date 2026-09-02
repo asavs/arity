@@ -144,19 +144,6 @@ class ExecuteTool:
 
 
 @dataclass(frozen=True)
-class StoreRecord:
-    """One line for the session's JSONL file.
-
-    Carries session_id and seat so that, later, a record can point back to
-    both the conversation it came from and the spec that produced it.
-    """
-    session_id: str
-    seat: str
-    kind: str                       # "task" | "user" | "model" | "tool" | "outcome"
-    record: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class Send:
     """Deliver text to a recipient: a person, or another bot.
 
@@ -175,4 +162,8 @@ class Send:
     call_id: str | None = None
 
 
-Effect = CallModel | ExecuteTool | StoreRecord | Send
+Effect = CallModel | ExecuteTool | Send
+
+# There is no "keep a record" effect. The loop journals every Event to the
+# store before the moment sees it (store.py), so the conversation is on disk
+# by construction and the moment has nothing to remember.

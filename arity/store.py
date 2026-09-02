@@ -1,50 +1,144 @@
-"""Store: one JSONL file per session. Keyed by session id.
+"""Store: one JSONL file per session. Keyed by session id. Append-only.
 
-    store/<session_id>.jsonl
+    ~/.arity/store/<session_id>.jsonl
 
-Every message, model turn and tool result the moment asked to keep, one
-line each, in the order they happened. This is the conversation, and it is
-the raw evidence: the scorecard counts over it, the archivist reads it.
+The file is a journal of Events, and the State is a fold over it:
 
-The moment never touches this file. It emits a StoreRecord effect and the
-loop hands the effect here (this module is the plug behind the Store seam).
+    State = fold(transition, birth, events)
 
-Naive version: open, write one line, close. Reading is a loop over lines.
+That single property is the crash story (replay the file and continue), the
+lineage story (the first line says who this kernel's parent is), and the
+evidence story (one row per session for the scorecard to count). Nothing is
+ever edited in place, so a file is always a valid replay up to its last line,
+which is exactly what a crash leaves behind.
+
+Three kinds of line:
+
+    birth      first line. bot, spec, parent pointer, when.
+    event      one per Event the loop popped, verbatim. Message, ModelCompleted,
+               ModelFailed, ToolCompleted, Tick.
+    record     anything else worth keeping that is not an event: an outcome
+               from the scorecard, the retired mark from the loop.
+
+The moment never touches this file. The loop journals every event before
+handing it to the moment (this module is the plug behind the Store seam).
 """
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Any
 
 from . import paths
-from .types import StoreRecord
+from . import types
+from .types import Event, Spec, State
+
+EVENTS = {cls.__name__: cls for cls in (types.Message, types.ModelCompleted, types.ModelFailed,
+                                         types.ToolCompleted, types.Tick)}
 
 
-def append(effect: StoreRecord) -> None:
-    """The Store seam. One record in, one line out."""
-    paths.store().mkdir(exist_ok=True)
-    line = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "session_id": effect.session_id,
-        "seat": effect.seat,
-        "kind": effect.kind,
-        **effect.record,
-    }
-    with (paths.store() / f"{effect.session_id}.jsonl").open("a") as f:
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append(session_id: str, line: dict) -> None:
+    with (paths.store() / f"{session_id}.jsonl").open("a") as f:
         f.write(json.dumps(line) + "\n")
 
 
+# -- writing ------------------------------------------------------------------
+
+def birth(state: State, parent: dict | None = None) -> None:
+    """First line of a session. `parent` is {"session": ..., "call": ...} for a bot
+    woken by another bot's message, {"session": ...} for a trial fork, None for a
+    kernel the person woke directly."""
+    _append(state.session_id, {"kind": "birth", "at": _now(), "bot": state.bot,
+                               "spec": asdict(state.spec), "parent": parent})
+
+
+def fork(base_session: str, new_session: str) -> None:
+    """A fork's file starts as a copy of its parent's events, so it replays on its own."""
+    for line in read(base_session):
+        if line["kind"] == "event":
+            _append(new_session, line)
+
+
+def event(session_id: str, ev: Event) -> None:
+    """The Store seam. One event in, one line out."""
+    _append(session_id, {"kind": "event", "at": _now(), "event": type(ev).__name__, **asdict(ev)})
+
+
+def record(session_id: str, kind: str, **fields: Any) -> None:
+    _append(session_id, {"kind": kind, "at": _now(), **fields})
+
+
+# -- reading ------------------------------------------------------------------
+
 def read(session_id: str) -> list[dict]:
-    """The whole conversation back, oldest first."""
     path = paths.store() / f"{session_id}.jsonl"
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def birth_of(session_id: str) -> dict | None:
+    lines = read(session_id)
+    return lines[0] if lines and lines[0]["kind"] == "birth" else None
+
+
+def events(session_id: str) -> list[Event]:
+    """The journal back as Event objects, in order, ready to fold."""
+    out = []
+    for line in read(session_id):
+        if line["kind"] != "event":
+            continue
+        cls = EVENTS[line["event"]]
+        fields = {k: v for k, v in line.items() if k not in ("kind", "at", "event")}
+        out.append(cls(**fields))
+    return out
+
+
 def sessions() -> list[str]:
-    """Every session id we have a file for. The scorecard walks these."""
-    if not paths.store().exists():
-        return []
-    return [p.stem for p in paths.store().glob("*.jsonl")]
+    return sorted(p.stem for p in paths.store().glob("*.jsonl"))
+
+
+def unfinished() -> list[str]:
+    """Sessions with no retired mark: crashed, or still open somewhere."""
+    return [s for s in sessions() if not any(l["kind"] == "retired" for l in read(s))]
+
+
+def rows() -> list[dict]:
+    """One row per session: the whole dataset the scorecard, and any cleverer
+    selector later, ever needs. It reads this and nothing else.
+
+        session, bot, spec, parent, task, calls, tokens_in, tokens_out,
+        failures, won, score, retired, started, ended
+    """
+    out = []
+    for session_id in sessions():
+        lines = read(session_id)
+        if not lines or lines[0]["kind"] != "birth":
+            continue
+        b = lines[0]
+        row = {"session": session_id, "bot": b["bot"], "spec": Spec(**{
+                   k: tuple(v) if isinstance(v, list) else v for k, v in b["spec"].items()}),
+               "parent": b["parent"], "task": None, "calls": 0, "tokens_in": 0, "tokens_out": 0,
+               "failures": 0, "won": None, "score": None, "retired": False,
+               "started": b["at"], "ended": lines[-1]["at"]}
+        for l in lines[1:]:
+            if l["kind"] == "event" and l["event"] == "Message" and row["task"] is None:
+                row["task"] = l["text"].splitlines()[0][:120]
+            elif l["kind"] == "event" and l["event"] == "ModelCompleted":
+                row["calls"] += 1
+                u = l.get("usage") or {}
+                row["tokens_in"] += u.get("input_tokens", u.get("prompt_tokens", 0)) or 0
+                row["tokens_out"] += u.get("output_tokens", u.get("completion_tokens", 0)) or 0
+            elif l["kind"] == "event" and l["event"] == "ModelFailed":
+                row["failures"] += 1
+            elif l["kind"] == "outcome":
+                row["won"], row["score"] = l["won"], l["score"]
+            elif l["kind"] == "retired":
+                row["retired"] = True
+        out.append(row)
+    return out

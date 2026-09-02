@@ -1,16 +1,20 @@
-"""The loop. Pop an event, call the moment, hand each effect to its seam, push what
-comes back. Repeat until there is nothing left to pop.
+"""The loop. Pop an event, journal it, call the moment, hand each effect to its
+seam, push what comes back. Repeat until there is nothing left to pop.
 
 This is the only place that knows which concrete plug is behind each seam.
 The moment never does. That is the whole point of the split: the moment can
 be read as a single pure function, and the loop can be read as a switch
-over four kinds of effect.
+over three kinds of effect.
 
 The loop is also the post office. A Send addressed to a person goes out the
 Transport seam. A Send addressed to a bot wakes that bot's kernel (cast, if
 it has none yet), runs it until it answers, and hands the answer back to the
 sender as a tool result. Kernels stay alive between messages, in `live`,
 until `retire` performs their death rites (ledger.py).
+
+And the loop is where a kernel comes back from a crash. Every event was
+journaled before the moment saw it, so `resume` folds the journal into a
+State and redoes the last event, whose effects may not have happened.
 
 One loop serves every bot. Because each bot's kernel may sit on a different
 seat, the Model and Tools seams are looked up per State, from its spec.
@@ -25,8 +29,7 @@ from .harness import for_spec
 from .moment import transition
 from .seams import Console, LocalTools, ModelSeam, ObserverSeam, Quiet, StoreSeam, ToolSeam, TransportSeam
 from .types import (
-    CallModel, Event, ExecuteTool, Message, ModelFailed, Send, Spec, State, Status, StoreRecord,
-    ToolCompleted,
+    CallModel, Event, ExecuteTool, Message, ModelFailed, Send, Spec, State, Status, ToolCompleted,
 )
 
 MAX_TURNS = 40      # model calls per incoming message before we stop and say so
@@ -42,27 +45,29 @@ class Loop:
         model_for: Callable[[Spec], ModelSeam] = for_spec,
         tools_for: Callable[[Spec], ToolSeam] = local_tools_for,
         archivist: ModelSeam | None = None,     # a different model is better; None means "same as the kernel"
-        records: StoreSeam = store,             # the module itself is the naive plug
+        journal: StoreSeam = store,             # the module itself is the naive plug
         transport: TransportSeam = Console(),
         observer: ObserverSeam = Quiet(),
     ):
         self.model_for = model_for
         self.tools_for = tools_for
         self.archivist = archivist
-        self.records = records
+        self.journal = journal
         self.transport = transport
         self.observer = observer
         self.live: dict[str, State] = {}        # bot name -> its kernel, while it lives
 
     # -- one kernel, one incoming message, until it answers ------------------
 
-    def run(self, state: State, first: Event) -> State:
+    def run(self, state: State, first: Event, first_is_new: bool = True) -> State:
         model = self.model_for(state.spec)
         tools = self.tools_for(state.spec)
         queue: deque[Event] = deque([first])
         turns = 0
         while queue:
             event = queue.popleft()
+            if first_is_new or event is not first:
+                self.journal.event(state.session_id, event)     # on disk before the moment sees it
             self.observer.on_event(state, event)
 
             state, effects = transition(state, event)
@@ -81,8 +86,6 @@ class Loop:
                             queue.append(ModelFailed(str(exc)[:200]))
                     case ExecuteTool():
                         queue.append(tools.execute(effect))
-                    case StoreRecord():
-                        self.records.append(effect)
                     case Send():
                         reply = self.deliver(state, effect)
                         if reply is not None:
@@ -111,21 +114,46 @@ class Loop:
             return None
 
         # A bot messaged a bot mid-turn and is waiting. Wake the recipient and run it.
-        recipient = self.wake(send.to)
+        recipient = self.wake(send.to, parent={"session": sender.session_id, "call": send.call_id})
         recipient = self.run(recipient, Message(sender=sender.bot, text=send.text))
         return ToolCompleted(send.call_id, "message", recipient.output or "")
 
-    def wake(self, bot: str) -> State:
-        """The bot's live kernel, or a new one from cast."""
+    # -- births and deaths ---------------------------------------------------
+
+    def wake(self, bot: str, parent: dict | None = None, spec: Spec | None = None) -> State:
+        """The bot's live kernel, or a new one from cast. A new one gets a birth line."""
         if bot not in self.live:
-            self.live[bot] = cast.birth(bot)
+            state = cast.resolve(spec, bot) if spec else cast.birth(bot)
+            self.journal.birth(state, parent)
+            self.live[bot] = state
         return self.live[bot]
+
+    def resume(self, session_id: str) -> State:
+        """Fold the journal back into a State and redo its last event.
+
+        The system text and tools are re-resolved from the spec, so a resumed
+        kernel wakes with today's library and ledger, not the ones it was born
+        with. The conversation is exact. The last event is redone because its
+        effects (a model call, a tool run) may be what the crash interrupted.
+        """
+        b = store.birth_of(session_id)
+        state = cast.resolve(Spec(**{k: tuple(v) if isinstance(v, list) else v
+                                     for k, v in b["spec"].items()}), b["bot"])
+        state.session_id = session_id
+        events = store.events(session_id)
+        for ev in events[:-1]:
+            state, _ = transition(state, ev)            # effects already happened
+        self.live[state.bot] = state
+        if events:
+            state = self.run(state, events[-1], first_is_new=False)
+        return state
 
     def retire(self, bot: str) -> None:
         """Death rites for one bot's kernel. Called when the conversation ends."""
         state = self.live.pop(bot)
         model = self.model_for(state.spec)
         ledger.death_rites(state, model, self.archivist or model)
+        self.journal.record(state.session_id, "retired")
         state.status = Status.RETIRED
 
     def retire_all(self) -> None:

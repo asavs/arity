@@ -7,12 +7,17 @@ It reads a State and one Event, appends to the messages, changes the status,
 and returns a list of effects it would like done. It never does them. It
 never opens a file, never makes a request, never sleeps. The loop does those.
 
+It also never asks for anything to be recorded. The loop journals every
+event before calling this, so the State is always a fold over the journal:
+
+    State = fold(transition, birth, events)
+
 Because it is pure, a moment can be forked: copy the State, change one
 field, feed the same event, and you have two moments to compare. That fork
-is what a trial is (see trial.py).
+is what a trial is (see trial.py). And a crashed kernel is resumed by
+folding its journal again (see loop.py).
 
-The only freshness is `new_id`, passed in, so a session can be replayed by
-passing a deterministic one.
+The only freshness is `new_id`, passed in, so a replay gives the same ids.
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from typing import Callable
 
 from .types import (
     CallModel, Effect, Event, ExecuteTool, Message, ModelCompleted, ModelFailed,
-    Send, State, Status, StoreRecord, Tick, ToolCompleted,
+    Send, State, Status, Tick, ToolCompleted,
 )
 
 
@@ -37,10 +42,6 @@ def transition(
 ) -> tuple[State, list[Effect]]:
     effects: list[Effect] = []
 
-    def keep(kind: str, record: dict) -> None:
-        """Ask the loop to write one line to the session's store."""
-        effects.append(StoreRecord(state.session_id, state.spec.seat, kind, record))
-
     def call_model() -> None:
         """Ask the loop to send the payload. This is the four things and nothing else."""
         effects.append(CallModel(
@@ -51,25 +52,18 @@ def transition(
 
     match event:
 
-        # Someone spoke to this kernel. That is a task. Keep a task record with the
-        # kind (the bot's role, for now) and a one-line summary (the first line, for
-        # now) so a finer taxonomy of tasks can be grown from the store later.
-        # Then append the message, remember who sent it, and ask the model.
+        # Someone spoke to this kernel. Append it, remember who, ask the model.
         case Message(sender, text):
-            keep("task", {"kind": state.spec.role, "summary": text.splitlines()[0][:120],
-                          "sender": sender})
             state.messages.append({"role": "user", "content": f"[{sender}] {text}"})
             state.talking_to = sender
             state.status = Status.WAITING_MODEL
-            keep("user", {"sender": sender, "content": text})
             call_model()
 
-        # The model answered and wants tools. Append the turn, keep it, ask for each tool.
+        # The model answered and wants tools. Append the turn, ask for each tool.
         # A call to `message` is not a tool the loop runs; it is a Send to another bot.
-        case ModelCompleted(text, tool_calls, usage) if tool_calls:
+        case ModelCompleted(text, tool_calls, _) if tool_calls:
             state.messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
             state.status = Status.WAITING_TOOLS
-            keep("model", {"content": text, "tool_calls": len(tool_calls), "usage": usage})
             for call in tool_calls:
                 args = call["arguments"]
                 if isinstance(args, str):
@@ -80,27 +74,24 @@ def transition(
                 else:
                     effects.append(ExecuteTool(call_id, call["name"], args))
 
-        # The model answered and is done. Append, keep, send the answer to whoever asked.
-        case ModelCompleted(text, _, usage):
+        # The model answered and is done. Append, send the answer to whoever asked.
+        case ModelCompleted(text, _, _):
             state.messages.append({"role": "assistant", "content": text})
             state.output = text
             state.status = Status.IDLE
-            keep("model", {"content": text, "usage": usage})
             effects.append(Send(to=state.talking_to, text=text))
 
-        # The wire could not get an answer. Say so to whoever asked, keep it, go idle.
+        # The wire could not get an answer. Say so to whoever asked, go idle.
         # Nothing is appended to messages: the conversation is exactly as it was.
         case ModelFailed(reason):
             state.output = f"(no answer: {reason})"
             state.status = Status.IDLE
-            keep("failure", {"reason": reason})
             effects.append(Send(to=state.talking_to, text=state.output))
 
         # A tool returned (or another bot replied). Append it; if it was the last one
         # outstanding, ask the model again.
         case ToolCompleted(call_id, name, output):
             state.messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": output})
-            keep("tool", {"name": name, "output": output[:2000]})
             if _all_tools_answered(state):
                 state.status = Status.WAITING_MODEL
                 call_model()

@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import paths, store
 from .seams import ModelSeam
-from .types import CallModel, State
+from .types import CallModel, Message, ModelCompleted, ModelFailed, State, ToolCompleted
 
 
 def read(bot: str, last: int = 5) -> list[dict]:
@@ -71,18 +71,22 @@ ARCHIVE_PROMPT = (
 
 def transcript(session_id: str) -> str:
     """The session as the archivist should see it: who said what, in order.
-    Not the raw records; those carry seat ids and usage counts that an
+    Not the raw journal; that carries usage counts and call ids that an
     archivist would only narrate back at us."""
     lines = []
-    for r in store.read(session_id):
-        if r["kind"] == "user":
-            lines.append(f"[{r['sender']}] {r['content']}")
-        elif r["kind"] == "model" and r.get("content"):
-            lines.append(f"[model] {r['content']}")
-        elif r["kind"] == "tool":
-            lines.append(f"[tool {r['name']}] {r['output'][:300]}")
-        elif r["kind"] == "failure":
-            lines.append(f"[failure] {r['reason']}")
+    for ev in store.events(session_id):
+        match ev:
+            case Message(sender, text):
+                lines.append(f"[{sender}] {text}")
+            case ModelCompleted(text, calls, _):
+                if text:
+                    lines.append(f"[model] {text}")
+                for c in calls:
+                    lines.append(f"[model called {c['name']}]")
+            case ToolCompleted(_, name, output):
+                lines.append(f"[{name} returned] {output[:300]}")
+            case ModelFailed(reason):
+                lines.append(f"[failure] {reason}")
     return "\n".join(lines)
 
 

@@ -30,7 +30,7 @@ import copy
 import itertools
 import uuid
 
-from . import cast, scorecard, seats
+from . import cast, scorecard, seats, store
 from .loop import Loop
 from .types import Event, Spec, State
 
@@ -73,6 +73,10 @@ def fork(base: State, spec: Spec) -> State:
     fresh = cast.resolve(spec, base.bot)
     fresh.messages = copy.deepcopy(base.messages)
     fresh.session_id = f"{base.session_id}-{uuid.uuid4().hex[:4]}"
+    # Its own journal: a birth line pointing at the base, then the base's
+    # events so far, so the fork replays on its own.
+    store.birth(fresh, parent={"session": base.session_id})
+    store.fork(base.session_id, fresh.session_id)
     return fresh
 
 
