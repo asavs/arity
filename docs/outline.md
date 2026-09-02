@@ -1,4 +1,4 @@
-# Kernel outline
+# Outline
 
 The system in English, as nested lists. One rule carries the whole design:
 **everything is a name until cast, and everything is a value after.**

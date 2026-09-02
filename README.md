@@ -16,9 +16,9 @@
 
 One moment. N kernels. The best of each.
 
-The simplest implementation of the arity kernel that still has every part.
+The simplest implementation of arity that still has every part.
 It is written to be read, not run. Nothing here is optimised, defended, or tested.
-Each file is one noun from `docs/kernel-outline.md`, and the docstring
+Each file is one noun from `docs/outline.md`, and the docstring
 at the top of each file is that noun's paragraph from the outline.
 
 One rule carries the whole design:
