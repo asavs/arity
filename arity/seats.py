@@ -13,6 +13,7 @@ Naive version: a table in a JSON file, refreshed by hand or by one call.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from . import paths
 
@@ -47,7 +48,8 @@ def with_quota(model: str) -> list[Seat]:
     Ordered so the seat closest to its reset comes first. Quota that is about
     to reset is quota that would otherwise be wasted, so spend it first.
     """
-    able = [s for s in all_seats() if model in s.models and s.remaining > 0]
+    able = [s for s in all_seats() if model in s.models and s.remaining > 0
+            and (not s.key_env or s.key_env in os.environ)]
     return sorted(able, key=lambda s: (s.resets_at or "9999", -s.remaining))
 
 

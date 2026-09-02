@@ -48,6 +48,6 @@ def seed(root: Path) -> None:
 def library() -> Path: return home() / "library"
 def bots() -> Path: return home() / "bots.json"
 def seats() -> Path: return home() / "seats.json"
-def store() -> Path: return home() / "store"
-def ledger() -> Path: return home() / "ledger"
-def locks() -> Path: return home() / "locks"
+def store() -> Path: p = home() / "store"; p.mkdir(exist_ok=True); return p
+def ledger() -> Path: p = home() / "ledger"; p.mkdir(exist_ok=True); return p
+def locks() -> Path: p = home() / "locks"; p.mkdir(exist_ok=True); return p

@@ -62,8 +62,8 @@
     "provider": "openai",
     "kind": "api",
     "models": [
-      "meta/llama-3.1-8b-instruct",
-      "mistralai/mistral-7b-instruct-v0.3"
+      "mistralai/mistral-7b-instruct-v0.3",
+      "deepseek-ai/deepseek-v4-flash-0731"
     ],
     "url": "https://integrate.api.nvidia.com/v1/chat/completions",
     "key_env": "NVIDIA_NIM_API_KEY",

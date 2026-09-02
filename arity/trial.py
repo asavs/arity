@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import copy
 import itertools
+import os
 import uuid
-
 from . import cast, scorecard, seats, store
 from .loop import Loop
 from .types import Event, Spec, State
@@ -51,7 +51,8 @@ def candidates(base: Spec, n: int) -> list[Spec]:
     because that quota is the quota most likely to go to waste.
     """
     pairs = [(seat, model)
-             for seat in seats.all_seats() if seat.remaining > 0 and seat.provider != "mock"
+             for seat in seats.all_seats()
+             if seat.remaining > 0 and seat.provider != "mock" and (not seat.key_env or seat.key_env in os.environ)
              for model in seat.models]
     pairs.sort(key=lambda p: (p[0].resets_at or "9999", -p[0].remaining))
     chosen: list[Spec] = []
