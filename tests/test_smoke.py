@@ -23,7 +23,7 @@ from arity.types import Message, Spec              # noqa: E402
 from arity.wire_mock import MockWire               # noqa: E402
 
 # Cast picks the mock seat, so bots woken by the post office need no key.
-cast.DEFAULT_SEAT, cast.DEFAULT_MODEL = "mock", "mock-1"
+cast.DEFAULT_MODEL = "mock-1"
 MOCK = Spec(seat="mock", model="mock-1", role="generalist")
 
 
@@ -58,7 +58,7 @@ def test_trial_records_an_outcome_the_scorecard_counts():
     ranked = trial.judge(forks, pick=1)
 
     assert ranked[0].won and ranked[0].result.spec.model == "mock-2"
-    assert scorecard.best_spec("generalist").model == "mock-2"
+    assert scorecard.ranked("generalist")[0] == "mock-2"
     assert store.birth_of(forks[0].session_id)["parent"] == {"session": base.session_id}
 
 
