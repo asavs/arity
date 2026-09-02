@@ -7,6 +7,16 @@ tomorrow; a JSONL file today, a database if reading it back ever gets slow.
 
 1.0.0 ships with the naive plug behind every seam.
 1.0.1 is the release where the plugs get better and the seams do not move.
+
+On failure. Three kinds, three rules, and no fourth:
+
+    the model could not answer     becomes a ModelFailed event; the person hears it
+    a tool blew up                 becomes its ToolCompleted output; the model hears it
+    a death rite could not run     the ledger entry says so, in words
+
+Nothing is caught and dropped. A handler that swallows an error and carries
+on is the one bug this codebase is not allowed to have, because a scorecard
+built on records that silently went missing is wrong forever and looks fine.
 """
 from __future__ import annotations
 
