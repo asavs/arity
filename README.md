@@ -68,8 +68,9 @@ Follow one message from the keyboard to the model and back. Each hop is one file
     until it answers. Keeps every woken kernel alive until `retire` performs the
     death rites.
 
-11. **`wire_anthropic.py`, `wire_openai.py`** — the plugs behind the Model seam.
-    One function per provider: format the payload, send it, read the reply back.
+11. **`wire_anthropic.py`, `wire_openai.py`, `wire_mock.py`** — the plugs behind the
+    Model seam. One per provider: format the payload, send it, read the reply back.
+    The mock answers from a script so the loop can be watched for free.
 
 12. **`harness.py`** — where a kernel runs. Our own loop is one harness. A headless
     CLI (`claude -p`, `codex exec`, `agy`) is another, and from the moment's point
@@ -80,6 +81,9 @@ Follow one message from the keyboard to the model and back. Each hop is one file
 
 14. **`main.py`** — the front door. `arity "text"` sends one message to reception
     and prints the reply; `arity` alone reads lines until you stop. No TUI, no flags.
+    You start at reception. Ask reception for something and it delegates with the
+    message tool and reports back. Start a line with `@engineer` and you are
+    transferred: your lines go to the engineer until you address someone else.
 
 15. **`demo.py`** — one moment, one bot messaging another, one three-way trial,
     all against a mock wire, so the flow can be followed without a key.
