@@ -1,197 +1,160 @@
-"""Arity core types — events, effects, state, and messages.
+"""The nouns.
 
-Transitions update state and return effect descriptions: transition(state, event) -> (state, effects).
-Effects describe what side-effects need to happen (I/O, network, disk, timers).
+Every other file in this package only moves these around. There are four kinds:
+
+    Spec    a row of names. No text. Points into the library and the seat table.
+    State   a kernel's whole memory. All values, all copies. Forkable.
+    Event   the only thing that moves a moment forward.
+    Effect  what a moment asks the loop to do on its behalf.
+
+Spec is the last thing that is "by name". State is the first thing that is
+"by value". Cast is the function that turns one into the other (see cast.py).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any
 
 
-class Status(str, Enum):
+# ---------------------------------------------------------------------------
+# Spec: a row of names
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Spec:
+    """Which seat, which model, which harness, which role, which skills, which tools.
+
+    Frozen so it can be a dictionary key: the scorecard counts wins per spec,
+    and a trial varies one field at a time to make N specs from one.
+
+    Nothing in here is text. Every field is a name that resolves in a store.
+    """
+    seat: str                       # key into seats.py      e.g. "anthropic-max"
+    model: str                      # a model id              e.g. "claude-opus-5"
+    role: str                       # key into library/roles  e.g. "typescript-developer"
+    skills: tuple[str, ...] = ()    # keys into library/skills
+    tools: tuple[str, ...] = ()     # keys into library/tools
+    harness: str = "kernel"         # where the kernel runs; "kernel" is our own loop
+
+
+# ---------------------------------------------------------------------------
+# State: a kernel's whole memory
+# ---------------------------------------------------------------------------
+
+class Status(Enum):
     IDLE = "idle"
     WAITING_MODEL = "waiting_model"
     WAITING_TOOLS = "waiting_tools"
-    WAITING_HANDOFF = "waiting_handoff"
     HALTED = "halted"
 
 
-# -----------------------------------------------------------------------------
-# Events: Inputs to the state machine (from user, model, tools, timers, subagents)
-# -----------------------------------------------------------------------------
+@dataclass
+class State:
+    """Everything a kernel knows. Copies, not references.
+
+    The two ids are its only pointers:
+        session_id  -> the file in store.py where its records go
+        bot         -> the file in ledger.py it wakes from and dies into
+
+    Everything else is text or schemas that cast already copied in.
+    Because it is all values, a State can be forked with copy.deepcopy.
+    """
+    session_id: str
+    bot: str
+    spec: Spec
+    system: list[str]                       # resolved text blocks, in order
+    tools: list[dict[str, Any]]             # tool schemas the model will see
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    status: Status = Status.IDLE
+    output: str | None = None               # the last thing the model said in plain text
+
+    def system_text(self) -> str:
+        """The system prompt is just the blocks joined. Order is set by cast."""
+        return "\n\n".join(self.system)
+
+
+# ---------------------------------------------------------------------------
+# Events: what happened
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class UserMessage:
-    """A message arriving from a human or client channel."""
+    """A person typed."""
     text: str
-    sender: str = "user"
-    channel: str = "main"
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ModelCompleted:
-    """The model finished a completion turn."""
-    content: Optional[str]
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
-    finish_reason: str = "stop"
-    seat_id: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class ModelFailed:
-    """A model call failed (network, 4xx/5xx, rate limit, quota)."""
-    error: str
-    seat_id: Optional[str] = None
-    retryable: bool = True
+    """A model answered. tool_calls is empty when it just talked."""
+    text: str
+    tool_calls: list[dict[str, Any]]
+    usage: dict[str, int]
 
 
 @dataclass(frozen=True)
 class ToolCompleted:
-    """A tool finished execution."""
+    """A tool returned."""
     call_id: str
-    tool_name: str
+    name: str
     output: str
-    is_error: bool = False
 
 
 @dataclass(frozen=True)
-class PulseTick:
-    """A keepalive or heartbeat timer tick."""
-    timestamp: float = 0.0
+class Tick:
+    """The pulse fired and nobody said anything. The kernel decides if it means something."""
+    at: str
 
 
-@dataclass(frozen=True)
-class HandoffRequested:
-    """Request to delegate a subtask to a specialized role/subagent."""
-    target_role: str
-    brief: str
-    budget: float = 1.0
+Event = UserMessage | ModelCompleted | ToolCompleted | Tick
 
 
-@dataclass(frozen=True)
-class HandoffCompleted:
-    """A delegated subagent completed its work."""
-    child_session_id: str
-    output: str
-    status: str = "completed"
-
-
-@dataclass(frozen=True)
-class Interrupt:
-    """External interruption or cancellation request."""
-    reason: str = "user_cancel"
-
-
-Event = Union[
-    UserMessage,
-    ModelCompleted,
-    ModelFailed,
-    ToolCompleted,
-    PulseTick,
-    HandoffRequested,
-    HandoffCompleted,
-    Interrupt,
-]
-
-
-# -----------------------------------------------------------------------------
-# Effects: Side-effect descriptions returned by the transition function
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Effects: what the moment would like done
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CallModel:
-    """Call a model provider with current conversation and available tools."""
+    """The payload. The four things the model receives, and nothing else.
+
+    tool schemas + system text + the conversation so far + the newest event
+    (the newest event is the last entry in messages).
+    """
+    system: str
+    tools: list[dict[str, Any]]
     messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    seat: Optional[str] = None
-    temperature: float = 0.7
-    max_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class ExecuteTool:
-    """Execute a single tool call."""
     call_id: str
     name: str
     arguments: dict[str, Any]
 
 
 @dataclass(frozen=True)
-class EmitMessage:
-    """Send a message out to a human or transport channel."""
-    channel: str
-    recipient: str
-    text: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class StoreRecord:
-    """Persist an audit, scorecard, friction, or memory record."""
-    kind: str
+    """One line for the session's JSONL file.
+
+    Carries session_id and seat so that, later, a record can point back to
+    both the conversation it came from and the spec that produced it.
+    """
+    session_id: str
+    seat: str
+    kind: str                       # "user" | "model" | "tool"
     record: dict[str, Any]
 
 
 @dataclass(frozen=True)
-class SpawnHandoff:
-    """Spawn a subagent statechart to handle a delegated brief."""
-    session_id: str
-    target_role: str
-    brief: str
-    budget: float
-
-
-@dataclass(frozen=True)
-class SchedulePulse:
-    """Schedule a future pulse tick."""
-    delay_seconds: float
+class EmitMessage:
+    """Show the person something."""
+    text: str
 
 
 @dataclass(frozen=True)
 class Halt:
-    """Halt the statechart session with a final reason and optional output."""
+    """The kernel is done. The loop performs the death rites (see ledger.py)."""
     reason: str
-    output: Optional[str] = None
 
 
-Effect = Union[
-    CallModel,
-    ExecuteTool,
-    EmitMessage,
-    StoreRecord,
-    SpawnHandoff,
-    SchedulePulse,
-    Halt,
-]
-
-
-# -----------------------------------------------------------------------------
-# State: The session data container
-# -----------------------------------------------------------------------------
-
-@dataclass
-class State:
-    session_id: str
-    status: Status = Status.IDLE
-    role: str = "assistant"
-    system_prompt: str = ""
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    pending_tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
-    active_tools: list[dict[str, Any]] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    output: Optional[str] = None
-    error_count: int = 0
-    max_errors: int = 3
-
-    def is_active(self) -> bool:
-        return self.status != Status.HALTED
-
-    def get_full_messages(self) -> list[dict[str, Any]]:
-        """Return full messages list including system prompt if set."""
-        if self.system_prompt:
-            return [{"role": "system", "content": self.system_prompt}] + self.messages
-        return list(self.messages)
+Effect = CallModel | ExecuteTool | StoreRecord | EmitMessage | Halt

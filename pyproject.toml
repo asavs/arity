@@ -1,43 +1,13 @@
-[build-system]
-requires = ["setuptools>=77.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "arity"
-dynamic = ["version"]
-description = "A small, provider-agnostic trial kernel for agent harnesses"
-readme = "README.md"
-requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
-authors = [
-    { name = "Asa Schaeffer" }
-]
-classifiers = [
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3 :: Only",
-]
+version = "1.0.0a1"
+description = "A small kernel for running one model's moment, and forking it."
+requires-python = ">=3.11"
 dependencies = []
 
-[tool.setuptools.dynamic]
-version = { attr = "arity._version.__version__" }
-
 [project.scripts]
-arity = "arity.cli:main"
-[project.urls]
-Homepage = "https://github.com/asavs/arity"
-Repository = "https://github.com/asavs/arity"
-Issues = "https://github.com/asavs/arity/issues"
-Changelog = "https://github.com/asavs/arity/blob/main/RELEASE.md"
-Security = "https://github.com/asavs/arity/security/policy"
+arity = "arity.main:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["arity*"]
-
-[tool.setuptools.package-data]
-arity = [
-    "definitions/**/*.md",
-    "definitions/**/*.py",
-]
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

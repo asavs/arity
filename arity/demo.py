@@ -27,7 +27,7 @@ class MockWire:
 def one_moment() -> None:
     print("\n== one moment ==")
     spec = Spec(seat="mock", model="mock-1", role="generalist")
-    state = cast.resolve(spec, bot="voice")
+    state = cast.resolve(spec, bot="reception")
     print(f"  cast -> State session={state.session_id} bot={state.bot} "
           f"blocks={len(state.system)} tools={len(state.tools)}")
 
@@ -38,7 +38,7 @@ def one_moment() -> None:
 
 def three_way() -> None:
     print("\n== three-way trial ==")
-    base = cast.resolve(Spec(seat="mock", model="mock-1", role="generalist"), bot="voice")
+    base = cast.resolve(Spec(seat="mock", model="mock-1", role="generalist"), bot="reception")
     base.messages.append({"role": "user", "content": "earlier context the forks all share"})
 
     specs = trial.product(
@@ -49,7 +49,7 @@ def three_way() -> None:
 
     # In real use trial.run picks the Model seam per spec via harness.for_spec.
     # Here we monkeypatch it so every fork talks to a labelled mock.
-    import naive.trial as t
+    import arity.trial as t
     t.for_spec = lambda spec: MockWire(",".join(spec.skills) or "no-skill")
 
     ranked = trial.run(base, specs, UserMessage("lint this file"), task_kind="lint", pick=1)
