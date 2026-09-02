@@ -17,11 +17,13 @@ from pathlib import Path
 os.environ["ARITY_HOME"] = tempfile.mkdtemp(prefix="arity-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from arity import scorecard, store, trial          # noqa: E402
+from arity import cast, scorecard, store, trial    # noqa: E402
 from arity.loop import Loop                        # noqa: E402
 from arity.types import Message, Spec              # noqa: E402
 from arity.wire_mock import MockWire               # noqa: E402
 
+# Cast picks the mock seat, so bots woken by the post office need no key.
+cast.DEFAULT_SEAT, cast.DEFAULT_MODEL = "mock", "mock-1"
 MOCK = Spec(seat="mock", model="mock-1", role="generalist")
 
 
@@ -36,12 +38,12 @@ def test_one_moment_answers():
 def test_bot_messages_bot_and_journal_folds_back():
     wire = MockWire("shared", [("message", "engineer", "lint it"), "done: 0 errors", "engineer says done"])
     loop = Loop(model_for=lambda spec: wire)
-    reception = loop.wake("reception", spec=MOCK)
-    loop.wake("engineer", spec=Spec("mock", "mock-1", "typescript-developer"))
-    loop.run(reception, Message("asa", "get it linted"))
+    reception = loop.wake("reception")
+    loop.run(reception, Message("asa", "get it linted"))     # the post office wakes the engineer
 
     assert reception.output == "engineer says done"
     engineer = loop.live["engineer"]
+    assert engineer.spec.role == "typescript-developer"
     assert store.birth_of(engineer.session_id)["parent"]["session"] == reception.session_id
 
     replayed = Loop(model_for=lambda spec: wire).resume(reception.session_id)
