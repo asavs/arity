@@ -25,16 +25,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import store
+from . import paths, store
 from .seams import ModelSeam
 from .types import CallModel, State
-
-ROOT = Path(__file__).parent / "ledger"
 
 
 def read(bot: str, last: int = 5) -> list[dict]:
     """The most recent entries, oldest first. Cast puts these in the wake text."""
-    path = ROOT / f"{bot}.jsonl"
+    path = paths.ledger() / f"{bot}.jsonl"
     if not path.exists():
         return []
     lines = path.read_text().splitlines()
@@ -42,14 +40,14 @@ def read(bot: str, last: int = 5) -> list[dict]:
 
 
 def append(bot: str, kind: str, text: str, session_id: str) -> None:
-    ROOT.mkdir(exist_ok=True)
+    paths.ledger().mkdir(exist_ok=True)
     entry = {
         "at": datetime.now(timezone.utc).isoformat(),
         "kind": kind,
         "session_id": session_id,
         "text": text,
     }
-    with (ROOT / f"{bot}.jsonl").open("a") as f:
+    with (paths.ledger() / f"{bot}.jsonl").open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
 

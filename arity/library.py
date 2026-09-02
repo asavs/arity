@@ -17,15 +17,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 from typing import Any, Callable
 
-ROOT = Path(__file__).parent / "library"
+from . import paths
 
 
 def role(name: str) -> str:
     """The role text. A role is a stable name for an aptitude, not a project."""
-    return (ROOT / "roles" / f"{name}.md").read_text()
+    return (paths.library() / "roles" / f"{name}.md").read_text()
 
 
 def skill(name: str) -> str:
@@ -36,7 +35,7 @@ def skill(name: str) -> str:
     skills name. This keeps the tool block stable when two skills are A/B'd
     (see trial.py for why that matters).
     """
-    return (ROOT / "skills" / f"{name}.md").read_text()
+    return (paths.library() / "skills" / f"{name}.md").read_text()
 
 
 def skill_tools(name: str) -> tuple[str, ...]:
@@ -53,7 +52,7 @@ def skill_tools(name: str) -> tuple[str, ...]:
 
 def tool_schema(name: str) -> dict[str, Any]:
     """What the model sees: name, description, input schema."""
-    return json.loads((ROOT / "tools" / f"{name}.json").read_text())
+    return json.loads((paths.library() / "tools" / f"{name}.json").read_text())
 
 
 def tool_runner(name: str) -> Callable[..., str]:
@@ -62,7 +61,7 @@ def tool_runner(name: str) -> Callable[..., str]:
     Loaded from the file next to the schema. This is the one place a name in
     the library resolves to code rather than text.
     """
-    path = ROOT / "tools" / f"{name}.py"
+    path = paths.library() / "tools" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

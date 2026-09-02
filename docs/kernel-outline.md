@@ -19,6 +19,8 @@ Everything else exists to produce these four, or to remember what came back.
 
 ## 2. Where things live
 
+- On disk: the package holds code and seeds; `~/.arity` holds everything a person edits and everything the system writes (`ARITY_HOME` overrides)
+
 - **Library** — files, written by people, in git. Keyed by name.
   - the wake line (one sentence; there is no memory tier)
   - roles

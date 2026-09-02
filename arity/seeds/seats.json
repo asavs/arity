@@ -50,7 +50,7 @@
     ],
     "url": "https://openrouter.ai/api/v1/chat/completions",
     "key_env": "OPENROUTER_API_KEY",
-    "remaining": 99.991024,
+    "remaining": 99.988324,
     "resets_at": null
   },
   {
