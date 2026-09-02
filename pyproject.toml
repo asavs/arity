@@ -1,0 +1,13 @@
+[project]
+name = "arity"
+version = "1.0.0a1"
+description = "A small kernel for running one model's moment, and forking it."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+arity = "arity.main:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

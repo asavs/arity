@@ -1,0 +1,77 @@
+# arity
+
+The simplest implementation of the arity kernel that still has every part.
+It is written to be read, not run. Nothing here is optimised, defended, or tested.
+Each file is one noun from `docs/kernel-outline.md`, and the docstring
+at the top of each file is that noun's paragraph from the outline.
+
+One rule carries the whole design:
+
+> everything is a name until cast, and everything is a value after.
+
+## Reading order
+
+Follow one message from the keyboard to the model and back. Each hop is one file.
+
+1. **`types.py`** — the nouns as dataclasses. Spec (names), State (values), the events
+   that move a moment forward, the effects a moment asks for. Read this first; every
+   other file only moves these around.
+
+2. **`library.py`** — where the human-written text lives: roles, skills, tool
+   definitions. A folder of markdown, keyed by name. This is the only store a
+   person edits by hand.
+
+3. **`seats.py`** — which provider seats exist and how much quota each has left.
+   Keyed by seat id.
+
+4. **`ledger.py`** — what makes a bot outlive a kernel. One append-only file per bot.
+   Read at birth, written at death.
+
+5. **`store.py`** — one JSONL file per session. Every message, model turn and tool
+   result. The conversation, and the raw evidence.
+
+6. **`scorecard.py`** — the box that turns trial results into a score. Deliberately
+   a placeholder: put results in, get a ranking out. Also the tally over the store
+   that cast reads.
+
+7. **`cast.py`** — the one function that crosses the line: `resolve(task, bot) -> State`.
+   Picks a spec, reads every name in it out of the stores, copies the text into a
+   State. After this nothing is looked up by name again.
+
+8. **`moment.py`** — `transition(state, event) -> (state, effects)`. Pure. No I/O.
+   The whole kernel is this file.
+
+9. **`seams.py`** — the five Protocols between the owned code and the commodity code:
+   Model, Tools, Store, Transport, Observer.
+
+10. **`loop.py`** — pops an event, calls the moment, hands each effect to its seam,
+    pushes the results back as events. On Halt, performs the death rites.
+
+11. **`wire_anthropic.py`, `wire_openai.py`** — the plugs behind the Model seam.
+    One function per provider: format the payload, send it, read the reply back.
+
+12. **`harness.py`** — where a kernel runs. Our own loop is one harness. A headless
+    CLI (`claude -p`, `codex exec`, `agy`) is another, and from the moment's point
+    of view it is just a different plug behind the Model seam.
+
+13. **`trial.py`** — a trial is a fork. N copies of one State, one per spec, the same
+    event into each, N results keyed by spec, handed to the scorecard.
+
+14. **`demo.py`** — one moment and one three-way trial against a mock wire, so the
+    flow can be followed without a key.
+
+## The flow in one paragraph
+
+A person types. The front door wraps the text in a `UserMessage` and asks `cast` for
+a State for the bot that should answer. Cast asks the scorecard who has been winning
+this kind of task, asks the seat table who has quota, picks a `Spec`, and reads every
+name in that spec out of the library and the ledger, copying the text into a fresh
+`State`. The loop hands the State and the event to `transition`, which appends the
+message and returns a `CallModel` effect: the payload. The loop gives the payload to
+the wire, the wire formats it for the provider and sends it, and the reply comes back
+as a `ModelCompleted` event. The loop hands that to `transition` again, which appends
+it, asks for a `StoreRecord`, and either asks for tools or halts. Every record lands in
+the session's JSONL file. When the kernel halts, the loop asks it for its own report,
+asks the archivist for an impartial one, and appends both to the bot's ledger. Next
+time that bot is cast, it wakes with those entries. The scorecard reads the store,
+counts who won, and cast reads the scorecard. That is the loop closed.
