@@ -56,7 +56,8 @@ def three_way() -> None:
     print(f"  product -> {len(specs)} specs, varying skills only")
 
     loop = Loop(model_for=lambda spec: MockWire(",".join(spec.skills) or "no-skill"))
-    ranked = trial.run(base, specs, Message(sender="asa", text="lint this file"), pick=1, loop=loop)
+    forks = trial.run(base, specs, Message(sender="asa", text="lint this file"), loop=loop)
+    ranked = trial.judge(forks, pick=1)
     for s in ranked:
         print(f"  {'WIN ' if s.won else '    '} {s.result.spec.skills or '()'} -> {s.result.output}")
 
