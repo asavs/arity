@@ -30,8 +30,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
-from . import paths
-from . import types
+from . import library, paths, types
 from .types import Event, Spec, State
 
 EVENTS = {cls.__name__: cls for cls in (types.Message, types.ModelCompleted, types.ModelFailed,
@@ -54,7 +53,8 @@ def birth(state: State, parent: dict | None = None) -> None:
     woken by another bot's message, {"session": ...} for a trial fork, None for a
     kernel the person woke directly."""
     _append(state.session_id, {"kind": "birth", "at": _now(), "bot": state.bot,
-                               "spec": asdict(state.spec), "parent": parent})
+                               "spec": asdict(state.spec), "parent": parent,
+                               "epoch": library.epoch()})
 
 
 def fork(base_session: str, new_session: str) -> None:
@@ -113,7 +113,10 @@ def rows() -> list[dict]:
     selector later, ever needs. It reads this and nothing else.
 
         session, bot, spec, parent, task, calls, tokens_in, tokens_out,
-        failures, won, score, retired, started, ended
+        failures, won, score, retired, epoch, current, started, ended
+
+    `current` is whether the session was born under the library's present
+    ruleset epoch; the scorecard only counts current rows.
     """
     out = []
     for session_id in sessions():
@@ -125,6 +128,7 @@ def rows() -> list[dict]:
                    k: tuple(v) if isinstance(v, list) else v for k, v in b["spec"].items()}),
                "parent": b["parent"], "task": None, "calls": 0, "tokens_in": 0, "tokens_out": 0,
                "failures": 0, "won": None, "score": None, "retired": False,
+               "epoch": b.get("epoch", 1), "current": b.get("epoch", 1) == library.epoch(),
                "started": b["at"], "ended": lines[-1]["at"]}
         for l in lines[1:]:
             if l["kind"] == "event" and l["event"] == "Message" and row["task"] is None:
