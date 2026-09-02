@@ -35,6 +35,19 @@ WAKE = (
     "best together!"
 )
 
+HOW_MESSAGES_WORK = (
+    "How messages work here. Every message you receive starts with [name]: the "
+    "person or bot who sent it. Your plain reply goes back to that name. The team is: "
+    "{team}. The person is {user}. Use the message tool only when a task needs a "
+    "teammate's aptitude; their answer comes back to you as the tool result, and you "
+    "then answer the person yourself in your own words. If you message the person "
+    "mid-task, they will answer later, so finish your turn. Do not relay for its own "
+    "sake: if the person would be better off talking to a teammate directly, say so "
+    "and tell them to address that teammate by name."
+)
+
+LEDGER_CAP = 600        # characters of each ledger entry that make it into the wake text
+
 BOTS = Path(__file__).parent / "bots.json"
 DEFAULT_SEAT, DEFAULT_MODEL = "openrouter-free", "minimax/minimax-m2.7:free"
 
@@ -85,10 +98,9 @@ def resolve(spec: Spec, bot: str, user: str = "asa") -> State:
     system.append(library.role(spec.role))
     for name in spec.skills:
         system.append(library.skill(name))
-    system.append("You can reach these people and bots with the message tool: "
-                  + ", ".join([user, *bots()]) + ".")
+    system.append(HOW_MESSAGES_WORK.format(team=", ".join(bots()), user=user))
     for entry in ledger.read(bot):
-        system.append(f"[{entry['kind']} from a previous kernel] {entry['text']}")
+        system.append(f"[{entry['kind']} from a previous kernel] {entry['text'][:LEDGER_CAP]}")
 
     # The tool block: message, plus what the spec names, plus what its skills ask for.
     wanted = {"message", *spec.tools}
