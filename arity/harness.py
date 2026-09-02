@@ -26,6 +26,7 @@ import subprocess
 from . import seats
 from .types import CallModel, ModelCompleted, Spec
 from .wire_anthropic import AnthropicWire
+from .wire_mock import MockWire
 from .wire_openai import OpenAIWire
 
 COMMANDS = {
@@ -56,6 +57,5 @@ def for_spec(spec: Spec):
     if provider == "anthropic":
         return AnthropicWire(spec.seat, spec.model)
     if provider == "mock":
-        from .demo import MockWire
         return MockWire(spec.model)
     return OpenAIWire(spec.seat, spec.model)
