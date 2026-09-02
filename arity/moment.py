@@ -21,8 +21,8 @@ import uuid
 from typing import Callable
 
 from .types import (
-    CallModel, Effect, Event, ExecuteTool, Message,
-    ModelCompleted, Send, State, Status, StoreRecord, Tick, ToolCompleted,
+    CallModel, Effect, Event, ExecuteTool, Message, ModelCompleted, ModelFailed,
+    Send, State, Status, StoreRecord, Tick, ToolCompleted,
 )
 
 
@@ -87,6 +87,14 @@ def transition(
             state.status = Status.IDLE
             keep("model", {"content": text, "usage": usage})
             effects.append(Send(to=state.talking_to, text=text))
+
+        # The wire could not get an answer. Say so to whoever asked, keep it, go idle.
+        # Nothing is appended to messages: the conversation is exactly as it was.
+        case ModelFailed(reason):
+            state.output = f"(no answer: {reason})"
+            state.status = Status.IDLE
+            keep("failure", {"reason": reason})
+            effects.append(Send(to=state.talking_to, text=state.output))
 
         # A tool returned (or another bot replied). Append it; if it was the last one
         # outstanding, ask the model again.

@@ -96,6 +96,14 @@ class ModelCompleted:
 
 
 @dataclass(frozen=True)
+class ModelFailed:
+    """The wire could not get an answer: a 429, a timeout, a bad key. The moment
+    treats it like a very short answer that says so, so the person hears
+    something and the kernel goes idle instead of the whole program dying."""
+    reason: str
+
+
+@dataclass(frozen=True)
 class ToolCompleted:
     """A tool returned."""
     call_id: str
@@ -109,7 +117,7 @@ class Tick:
     at: str
 
 
-Event = Message | ModelCompleted | ToolCompleted | Tick
+Event = Message | ModelCompleted | ModelFailed | ToolCompleted | Tick
 
 
 # ---------------------------------------------------------------------------

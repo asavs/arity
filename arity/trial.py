@@ -27,7 +27,7 @@ import itertools
 import uuid
 
 from . import cast, scorecard
-from .loop import default_loop
+from .loop import Loop
 from .types import Event, Spec, State
 
 
@@ -53,16 +53,17 @@ def fork(base: State, spec: Spec) -> State:
 
 
 def run(base: State, specs: list[Spec], event: Event, pick: int | None = None,
-        make_loop=default_loop):
+        loop: Loop | None = None):
     """Fork, run each, score. Returns the scorecard's ranking.
 
-    Task kind is the role, same as everywhere else. `make_loop` is only a
-    parameter so the demo can substitute a mock wire.
+    Task kind is the role, same as everywhere else. `loop` is only a parameter
+    so the demo can pass one wired to a mock.
     """
+    loop = loop or Loop()
     results = []
     for spec in specs:
         state = fork(base, spec)
-        final = make_loop(spec).run(state, event)
+        final = loop.run(state, event)
         results.append(scorecard.Result(
             spec=spec,
             task_kind=spec.role,
