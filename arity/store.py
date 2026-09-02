@@ -124,10 +124,14 @@ def rows() -> list[dict]:
     selector later, ever needs. It reads this and nothing else.
 
         session, bot, spec, parent, task, calls, tokens_in, tokens_out,
-        failures, won, score, retired, epoch, current, started, ended
+        failures, tool_calls, worked, won, score, retired, epoch, current,
+        started, ended
 
     `current` is whether the session was born under the library's present
-    ruleset epoch; the scorecard only counts current rows.
+    ruleset epoch; the scorecard only counts current rows. `worked` is whether
+    any tool ran: the one split between kinds of task that is true by
+    construction rather than by someone's label. Task kind beyond the role is
+    otherwise undecided; `task` keeps the raw material for deciding it later.
     """
     out = []
     for session_id in sessions():
@@ -139,6 +143,7 @@ def rows() -> list[dict]:
                    k: tuple(v) if isinstance(v, list) else v for k, v in b["spec"].items()}),
                "parent": b["parent"], "task": None, "calls": 0, "tokens_in": 0, "tokens_out": 0,
                "failures": 0, "won": None, "score": None, "retired": False,
+               "tool_calls": 0, "worked": False,
                "epoch": b.get("epoch", 1), "current": b.get("epoch", 1) == library.epoch(),
                "started": b["at"], "ended": lines[-1]["at"]}
         for l in lines[1:]:
@@ -149,6 +154,9 @@ def rows() -> list[dict]:
                 u = l.get("usage") or {}
                 row["tokens_in"] += u.get("input_tokens", u.get("prompt_tokens", 0)) or 0
                 row["tokens_out"] += u.get("output_tokens", u.get("completion_tokens", 0)) or 0
+            elif l["kind"] == "event" and l["event"] == "ToolCompleted":
+                row["tool_calls"] += 1
+                row["worked"] = True            # it did something, not just said something
             elif l["kind"] == "event" and l["event"] == "ModelFailed":
                 row["failures"] += 1
             elif l["kind"] == "outcome":
