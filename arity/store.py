@@ -16,7 +16,7 @@ Three kinds of line:
 
     birth      first line. bot, spec, parent pointer, when.
     event      one per Event the loop popped, verbatim. Message, ModelCompleted,
-               ModelFailed, ToolCompleted, Tick.
+               ModelFailed, ToolCompleted.
     record     anything else worth keeping that is not an event: an outcome
                from the scorecard, the retired mark from the loop.
 
@@ -34,7 +34,7 @@ from . import library, paths, types
 from .types import Event, Spec, State
 
 EVENTS = {cls.__name__: cls for cls in (types.Message, types.ModelCompleted, types.ModelFailed,
-                                         types.ToolCompleted, types.Tick)}
+                                         types.ToolCompleted)}
 
 
 def _now() -> str:
@@ -97,6 +97,17 @@ def events(session_id: str) -> list[Event]:
         fields = {k: v for k, v in line.items() if k not in ("kind", "at", "event")}
         out.append(cls(**fields))
     return out
+
+
+def usage(session_id: str) -> dict[str, int]:
+    """Tokens in and out for one session, summed over its model turns."""
+    tokens_in = tokens_out = 0
+    for line in read(session_id):
+        if line["kind"] == "event" and line["event"] == "ModelCompleted":
+            u = line.get("usage") or {}
+            tokens_in += u.get("input_tokens", u.get("prompt_tokens", 0)) or 0
+            tokens_out += u.get("output_tokens", u.get("completion_tokens", 0)) or 0
+    return {"tokens_in": tokens_in, "tokens_out": tokens_out}
 
 
 def sessions() -> list[str]:

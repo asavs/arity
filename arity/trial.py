@@ -102,7 +102,7 @@ def judge(forks: list[State], pick: int | None) -> list[scorecard.Scored]:
     into each fork's own session so the tally can be rebuilt from the store.
     """
     results = [scorecard.Result(spec=f.spec, task_kind=f.spec.role, session_id=f.session_id,
-                                output=f.output or "", usage={})
+                                output=f.output or "", usage=store.usage(f.session_id))
                for f in forks]
     ranked = scorecard.score(results, pick=pick)
     scorecard.record_outcome(ranked)
