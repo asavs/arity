@@ -1,0 +1,42 @@
+[
+  {
+    "id": "anthropic-max",
+    "provider": "anthropic",
+    "kind": "subscription",
+    "models": ["claude-opus-5", "claude-sonnet-5"],
+    "url": "https://api.anthropic.com/v1/messages",
+    "key_env": "ANTHROPIC_API_KEY",
+    "remaining": 0.82,
+    "resets_at": "2026-09-02T23:00:00Z"
+  },
+  {
+    "id": "openai-pro",
+    "provider": "openai",
+    "kind": "subscription",
+    "models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+    "url": "https://api.openai.com/v1/chat/completions",
+    "key_env": "OPENAI_API_KEY",
+    "remaining": 0.4,
+    "resets_at": "2026-09-05T00:00:00Z"
+  },
+  {
+    "id": "xai-super",
+    "provider": "xai",
+    "kind": "subscription",
+    "models": ["grok-4.5"],
+    "url": "https://api.x.ai/v1/chat/completions",
+    "key_env": "XAI_API_KEY",
+    "remaining": 0.95,
+    "resets_at": "2026-09-03T12:00:00Z"
+  },
+  {
+    "id": "mock",
+    "provider": "mock",
+    "kind": "api",
+    "models": ["mock-1"],
+    "url": "",
+    "key_env": "",
+    "remaining": 1.0,
+    "resets_at": null
+  }
+]

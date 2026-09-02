@@ -1,0 +1,9 @@
+{
+  "name": "run_oxlint",
+  "description": "Run oxlint on one file and return its report.",
+  "input_schema": {
+    "type": "object",
+    "properties": { "path": { "type": "string" } },
+    "required": ["path"]
+  }
+}
