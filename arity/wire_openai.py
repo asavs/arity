@@ -15,9 +15,10 @@ from .types import CallModel, ModelCompleted
 
 
 class OpenAIWire:
-    def __init__(self, seat_id: str, model: str):
+    def __init__(self, seat_id: str, model: str, effort: str | None = None):
         self.seat = seats.lookup(seat_id)
         self.model = model
+        self.effort = effort
 
     def call(self, effect: CallModel) -> ModelCompleted:
         body = {
@@ -26,6 +27,10 @@ class OpenAIWire:
         }
         if effect.tools:
             body["tools"] = [_tool(t) for t in effect.tools]
+        if effect.max_tokens:
+            body["max_tokens"] = effect.max_tokens
+        if self.effort:
+            body["reasoning_effort"] = self.effort
 
         request = urllib.request.Request(
             self.seat.url,

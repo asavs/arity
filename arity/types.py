@@ -36,6 +36,9 @@ class Spec:
     skills: tuple[str, ...] = ()    # keys into library/skills
     tools: tuple[str, ...] = ()     # keys into library/tools
     harness: str = "kernel"         # where the kernel runs; "kernel" is our own loop
+    effort: str | None = None       # paired with the model, not the provider: "low",
+                                    # "medium", "high", or the model's own vocabulary.
+                                    # None sends nothing and lets the model default.
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +137,7 @@ class CallModel:
     system: str
     tools: list[dict[str, Any]]
     messages: list[dict[str, Any]]
+    max_tokens: int | None = None   # the wire's default unless a caller has a reason
 
 
 @dataclass(frozen=True)
