@@ -70,3 +70,7 @@ if __name__ == "__main__":
     one_moment()
     two_bots()
     three_way()
+    # Demo kernels are never retired, so release their presence locks by hand.
+    from .loop import release
+    for bot in ("reception", "engineer"):
+        release(bot)

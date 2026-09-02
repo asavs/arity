@@ -21,10 +21,12 @@ seat, the Model and Tools seams are looked up per State, from its spec.
 """
 from __future__ import annotations
 
+import os
+import time
 from collections import deque
 from typing import Callable
 
-from . import cast, ledger, store
+from . import cast, ledger, paths, store
 from .harness import for_spec
 from .moment import transition
 from .seams import Console, LocalTools, ModelSeam, ObserverSeam, Quiet, StoreSeam, ToolSeam, TransportSeam
@@ -123,6 +125,7 @@ class Loop:
     def wake(self, bot: str, parent: dict | None = None, spec: Spec | None = None) -> State:
         """The bot's live kernel, or a new one from cast. A new one gets a birth line."""
         if bot not in self.live:
+            claim(bot)
             state = cast.resolve(spec, bot) if spec else cast.birth(bot)
             self.journal.birth(state, parent)
             self.live[bot] = state
@@ -143,6 +146,7 @@ class Loop:
         events = store.events(session_id)
         for ev in events[:-1]:
             state, _ = transition(state, ev)            # effects already happened
+        claim(state.bot)                                # the process that held it is gone
         self.live[state.bot] = state
         if events:
             state = self.run(state, events[-1], first_is_new=False)
@@ -155,7 +159,44 @@ class Loop:
         ledger.death_rites(state, model, self.archivist or model)
         self.journal.record(state.session_id, "retired")
         state.status = Status.RETIRED
+        release(bot)
 
     def retire_all(self) -> None:
         for bot in list(self.live):
             self.retire(bot)
+
+
+# ---------------------------------------------------------------------------
+# Presence: one live kernel per bot, across processes
+# ---------------------------------------------------------------------------
+
+LOCK_TTL = 12 * 3600    # a lock older than this is assumed abandoned
+
+
+def claim(bot: str) -> None:
+    """Take the bot's lock, or refuse if another living process holds it.
+
+    Two `arity` processes on one home would otherwise cast the same bot twice
+    and interleave its ledger. The lock is a file holding a pid; a lock whose
+    process is dead, or which is older than LOCK_TTL, is taken over.
+    """
+    path = paths.locks() / f"{bot}.lock"
+    if path.exists():
+        pid = int(path.read_text() or 0)
+        fresh = time.time() - path.stat().st_mtime < LOCK_TTL
+        if fresh and pid != os.getpid() and _alive(pid):
+            raise RuntimeError(f"{bot} is live in process {pid}. Retire it there, "
+                               f"or delete {path} if that process is gone.")
+    path.write_text(str(os.getpid()))
+
+
+def release(bot: str) -> None:
+    (paths.locks() / f"{bot}.lock").unlink(missing_ok=True)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False

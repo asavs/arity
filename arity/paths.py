@@ -10,6 +10,7 @@ Two kinds of files, two homes:
         ~/.arity/seats.json   seats and quota left         (edited by people, updated by the wire)
         ~/.arity/store/       one JSONL per session        (written by the loop)
         ~/.arity/ledger/      one JSONL per bot            (written at death)
+        ~/.arity/locks/       one file per live bot        (presence; see loop.py)
 
 The first time anything asks for the home folder, the seeds are copied in.
 `ARITY_HOME` overrides the location, which is how a test or a second
@@ -41,6 +42,7 @@ def seed(root: Path) -> None:
         shutil.copytree(SEEDS / "library", root / "library")
     (root / "store").mkdir(exist_ok=True)
     (root / "ledger").mkdir(exist_ok=True)
+    (root / "locks").mkdir(exist_ok=True)
 
 
 def library() -> Path: return home() / "library"
@@ -48,3 +50,4 @@ def bots() -> Path: return home() / "bots.json"
 def seats() -> Path: return home() / "seats.json"
 def store() -> Path: return home() / "store"
 def ledger() -> Path: return home() / "ledger"
+def locks() -> Path: return home() / "locks"
