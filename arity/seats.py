@@ -27,6 +27,8 @@ class Seat:
     key_env: str            # name of the environment variable holding the key
     remaining: float        # fraction of quota left (subscription) or dollars (api)
     resets_at: str | None   # ISO timestamp, subscription only
+    warm_window: int = 0    # seconds the provider keeps a cached prefix warm after a
+                            # call; 0 means unknown or none, and no keepalive is sent
 
 
 def all_seats() -> list[Seat]:

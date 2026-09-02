@@ -27,7 +27,7 @@ from typing import Callable
 
 from .types import (
     CallModel, Effect, Event, ExecuteTool, Message, ModelCompleted, ModelFailed,
-    Send, State, Status, Tick, ToolCompleted,
+    Send, State, Status, ToolCompleted,
 )
 
 
@@ -95,12 +95,6 @@ def transition(
             if _all_tools_answered(state):
                 state.status = Status.WAITING_MODEL
                 call_model()
-
-        # The pulse fired. Tell the model the time and let it decide if that means anything.
-        case Tick(at):
-            state.messages.append({"role": "user", "content": f"[tick] {at}"})
-            state.status = Status.WAITING_MODEL
-            call_model()
 
     return state, effects
 

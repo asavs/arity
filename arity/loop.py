@@ -26,7 +26,7 @@ import time
 from collections import deque
 from typing import Callable
 
-from . import cast, ledger, paths, store
+from . import cast, ledger, paths, seats, store
 from .harness import for_spec
 from .moment import transition
 from .seams import Console, LocalTools, ModelSeam, ObserverSeam, Quiet, StoreSeam, ToolSeam, TransportSeam
@@ -84,6 +84,7 @@ class Loop:
                             continue
                         try:
                             queue.append(model.call(effect))
+                            state.last_call_at = time.time()
                         except Exception as exc:        # a 429, a timeout, a bad key
                             queue.append(ModelFailed(str(exc)[:200]))
                     case ExecuteTool():
@@ -164,6 +165,31 @@ class Loop:
     def retire_all(self) -> None:
         for bot in list(self.live):
             self.retire(bot)
+
+    # -- keeping the cache warm ---------------------------------------------
+
+    def warmth(self, state: State) -> float | None:
+        """Seconds until this kernel's cached prefix goes cold at the provider.
+        None when the seat has no known warm window."""
+        window = seats.lookup(state.spec.seat).warm_window
+        if not window or not state.last_call_at:
+            return None
+        return window - (time.time() - state.last_call_at)
+
+    def keep_warm(self, state: State) -> bool:
+        """One throwaway call on the same prefix, so the provider's cache is
+        touched and its clock restarts. Not journaled, not appended: the
+        conversation is exactly as it was. Worth it only when the next real
+        message is likely and the seat is cheap to ping (a subscription)."""
+        ping = {"role": "user", "content": "[arity] keepalive. Reply with one character."}
+        try:
+            self.model_for(state.spec).call(CallModel(
+                system=state.system_text(), tools=state.tools,
+                messages=state.messages + [ping], max_tokens=1))
+            state.last_call_at = time.time()
+            return True
+        except Exception:
+            return False            # a failed ping costs nothing; the next real call reports
 
 
 # ---------------------------------------------------------------------------
