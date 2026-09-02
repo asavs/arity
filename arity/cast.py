@@ -24,9 +24,8 @@ from __future__ import annotations
 import json
 import platform
 import uuid
-from pathlib import Path
 
-from . import ledger, library, scorecard, seats
+from . import ledger, library, paths, scorecard, seats
 from .types import Spec, State
 
 WAKE = (
@@ -48,7 +47,6 @@ HOW_MESSAGES_WORK = (
 
 LEDGER_CAP = 600        # characters of each ledger entry that make it into the wake text
 
-BOTS = Path(__file__).parent / "bots.json"
 DEFAULT_SEAT, DEFAULT_MODEL = "openrouter-free", "minimax/minimax-m2.7:free"
 
 
@@ -58,7 +56,7 @@ def bots() -> dict[str, dict]:
     Names are tangible on purpose (reception, engineer, designer) so that a model
     needs nothing more than this list to know whom to message about a task.
     """
-    return json.loads(BOTS.read_text())
+    return json.loads(paths.bots().read_text())
 
 
 def is_bot(name: str) -> bool:

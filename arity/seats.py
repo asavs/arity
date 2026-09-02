@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
-
-TABLE = Path(__file__).parent / "seats.json"
+from . import paths
 
 
 @dataclass(frozen=True)
@@ -32,7 +30,7 @@ class Seat:
 
 
 def all_seats() -> list[Seat]:
-    rows = json.loads(TABLE.read_text())
+    rows = json.loads(paths.seats().read_text())
     return [Seat(**row) for row in rows]
 
 
@@ -53,8 +51,8 @@ def with_quota(model: str) -> list[Seat]:
 
 def spend(seat_id: str, amount: float) -> None:
     """Record that a call was made. Naive: subtract and rewrite the table."""
-    rows = json.loads(TABLE.read_text())
+    rows = json.loads(paths.seats().read_text())
     for row in rows:
         if row["id"] == seat_id:
             row["remaining"] -= amount
-    TABLE.write_text(json.dumps(rows, indent=2))
+    paths.seats().write_text(json.dumps(rows, indent=2))
