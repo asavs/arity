@@ -47,7 +47,7 @@ HOW_MESSAGES_WORK = (
 
 LEDGER_CAP = 600        # characters of each ledger entry that make it into the wake text
 
-DEFAULT_SEAT, DEFAULT_MODEL = "openrouter-free", "minimax/minimax-m2.7:free"
+DEFAULT_MODEL = "minimax/minimax-m2.7:free"     # used only when nothing with evidence has quota
 
 
 def bots() -> dict[str, dict]:
@@ -65,28 +65,29 @@ def is_bot(name: str) -> bool:
 
 
 def choose(bot: str) -> Spec:
-    """Steps 1 to 4. On evidence if there is any, on a default if not.
+    """Steps 1 to 4. Aptitude orders, quota filters.
 
-    Task kind is the bot's role for now. The scorecard keys on it, and every
-    task record also keeps a one-line summary, so a finer taxonomy can be
-    grown from the store later without deciding it here.
+    Two questions, asked in a fixed order. Question A, to the scorecard: which
+    models have won this bot's kind of task, best first? Question B, to the
+    seat table: which of those can be paid for right now? B may strike models
+    from A's list; B never reorders it. The default model is the last entry,
+    so it is used only when nothing with evidence has quota.
 
-    The seat is re-chosen even when the scorecard has a favourite, because
-    quota moves and the scorecard does not know about it.
+    Task kind is the bot's role for now. Skills, tools, harness and effort
+    come from the bot's entry in bots.json; they are the bot's, not the
+    model's, and a trial varies them on purpose rather than by accident.
     """
     entry = bots()[bot]
     role = entry["role"]
-    spec = scorecard.best_spec(task_kind=role)
-    if not spec or not seats.with_quota(spec.model):
-        spec = Spec(DEFAULT_SEAT, DEFAULT_MODEL, role)
-    able = seats.with_quota(spec.model)
-    if not able:
-        raise RuntimeError(f"no seat has quota for {spec.model}")
-    # A bot may pin its harness in bots.json (e.g. "claude" to run through Claude Code
-    # on a subscription). Otherwise the scorecard's favourite, otherwise our own loop.
-    return Spec(seat=able[0].id, model=spec.model, role=spec.role,
-                skills=spec.skills, tools=spec.tools,
-                harness=entry.get("harness", spec.harness))
+    ordered = scorecard.ranked(role)                          # question A
+    for model in [*ordered, DEFAULT_MODEL]:
+        able = seats.with_quota(model)                        # question B
+        if able:
+            return Spec(seat=able[0].id, model=model, role=role,
+                        skills=tuple(entry.get("skills", ())),
+                        tools=tuple(entry.get("tools", ())),
+                        harness=entry.get("harness", "kernel"))
+    raise RuntimeError(f"no seat has quota for any of {[*ordered, DEFAULT_MODEL]}")
 
 
 def resolve(spec: Spec, bot: str, user: str = "asa") -> State:
