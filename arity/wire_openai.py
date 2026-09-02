@@ -22,7 +22,7 @@ class OpenAIWire:
     def call(self, effect: CallModel) -> ModelCompleted:
         body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": effect.system}] + effect.messages,
+            "messages": [{"role": "system", "content": effect.system}] + _format_messages(effect.messages),
         }
         if effect.tools:
             body["tools"] = [_tool(t) for t in effect.tools]
@@ -33,13 +33,71 @@ class OpenAIWire:
             headers={
                 "content-type": "application/json",
                 "authorization": f"Bearer {os.environ[self.seat.key_env]}",
+                "user-agent": "Arity/1.0",
             },
         )
-        with urllib.request.urlopen(request) as response:
-            reply = json.load(response)
-
-        seats.spend(self.seat.id, reply["usage"]["completion_tokens"] / 1_000_000)
+        try:
+            with urllib.request.urlopen(request) as response:
+                reply = json.load(response)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode(errors="replace")
+            raise RuntimeError(f"HTTP {e.code} from {self.seat.url} for model {self.model}: {error_body}") from e
+        usage = reply.get("usage") or {}
+        tokens = usage.get("completion_tokens") or 0
+        seats.spend(self.seat.id, tokens / 1_000_000)
         return _completed(reply)
+
+def _format_message(m: dict) -> dict:
+    msg = dict(m)
+    if "tool_calls" in msg and msg["tool_calls"]:
+        formatted = []
+        for c in msg["tool_calls"]:
+            if "function" in c:
+                formatted.append(c)
+            else:
+                args = c.get("arguments", "{}")
+                if isinstance(args, dict):
+                    args = json.dumps(args)
+                formatted.append({
+                    "id": c.get("id") or "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": c.get("name", ""),
+                        "arguments": args,
+                    },
+                })
+        msg["tool_calls"] = formatted
+    return msg
+
+
+def _format_messages(messages: list[dict]) -> list[dict]:
+    formatted = []
+    i = 0
+    while i < len(messages):
+        msg = _format_message(messages[i])
+        formatted.append(msg)
+
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            expected_ids = {c["id"]: c.get("function", {}).get("name", "tool")
+                            for c in msg["tool_calls"] if "id" in c}
+            j = i + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                tool_msg = _format_message(messages[j])
+                formatted.append(tool_msg)
+                expected_ids.pop(tool_msg.get("tool_call_id"), None)
+                j += 1
+            for missing_id, tool_name in expected_ids.items():
+                formatted.append({
+                    "role": "tool",
+                    "tool_call_id": missing_id,
+                    "name": tool_name,
+                    "content": "(no tool output / interrupted)",
+                })
+            i = j
+        else:
+            i += 1
+
+    return formatted
 
 
 def _tool(schema: dict) -> dict:
@@ -53,6 +111,6 @@ def _tool(schema: dict) -> dict:
 
 def _completed(reply: dict) -> ModelCompleted:
     message = reply["choices"][0]["message"]
-    calls = [{"id": c["id"], "name": c["function"]["name"], "arguments": c["function"]["arguments"]}
+    calls = [{"id": c.get("id") or "call_0", "name": c["function"]["name"], "arguments": c["function"]["arguments"]}
              for c in message.get("tool_calls") or []]
-    return ModelCompleted(text=message.get("content") or "", tool_calls=calls, usage=reply["usage"])
+    return ModelCompleted(text=message.get("content") or "", tool_calls=calls, usage=reply.get("usage") or {})

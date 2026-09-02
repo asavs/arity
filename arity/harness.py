@@ -55,4 +55,7 @@ def for_spec(spec: Spec):
     provider = seats.lookup(spec.seat).provider
     if provider == "anthropic":
         return AnthropicWire(spec.seat, spec.model)
+    if provider == "mock":
+        from .demo import MockWire
+        return MockWire(spec.model)
     return OpenAIWire(spec.seat, spec.model)

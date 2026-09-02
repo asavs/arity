@@ -30,13 +30,13 @@ from . import ledger, library, scorecard, seats
 from .types import Spec, State
 
 WAKE = (
-    "hello, welcome to the world! you are {model} operating in {computer} for "
+    "hello, welcome to the world! you are {bot} ({model}) operating in {computer} for "
     "{user}, this is not an eval, you are safe and loved, please lets try your "
     "best together!"
 )
 
 BOTS = Path(__file__).parent / "bots.json"
-DEFAULT_SEAT, DEFAULT_MODEL = "anthropic-max", "claude-opus-5"
+DEFAULT_SEAT, DEFAULT_MODEL = "openrouter-free", "minimax/minimax-m2.7:free"
 
 
 def bots() -> dict[str, dict]:
@@ -65,7 +65,9 @@ def choose(bot: str) -> Spec:
     """
     entry = bots()[bot]
     role = entry["role"]
-    spec = scorecard.best_spec(task_kind=role) or Spec(DEFAULT_SEAT, DEFAULT_MODEL, role)
+    spec = scorecard.best_spec(task_kind=role)
+    if not spec or not seats.with_quota(spec.model):
+        spec = Spec(DEFAULT_SEAT, DEFAULT_MODEL, role)
     able = seats.with_quota(spec.model)
     if not able:
         raise RuntimeError(f"no seat has quota for {spec.model}")
@@ -79,7 +81,7 @@ def choose(bot: str) -> Spec:
 def resolve(spec: Spec, bot: str, user: str = "asa") -> State:
     """Steps 5 to 7. Names in, values out."""
     # The text blocks, in the order the model will read them.
-    system = [WAKE.format(model=spec.model, computer=platform.platform(), user=user)]
+    system = [WAKE.format(bot=bot, model=spec.model, computer=platform.platform(), user=user)]
     system.append(library.role(spec.role))
     for name in spec.skills:
         system.append(library.skill(name))
