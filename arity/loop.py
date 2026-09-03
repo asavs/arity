@@ -58,7 +58,7 @@ class Loop:
         self.transport = transport
         self.observer = observer
         self.live: dict[str, State] = {}        # bot name -> its kernel, while it lives
-
+        self.waiting: set[str] = set()          # bot names currently waiting on a synchronous call
     # -- one kernel, one incoming message, until it answers ------------------
 
     def run(self, state: State, first: Event, first_is_new: bool = True) -> State:
@@ -93,6 +93,8 @@ class Loop:
                         reply = self.deliver(state, effect)
                         if reply is not None:
                             queue.append(reply)
+            if not queue and state.status == Status.IDLE and state.pending:
+                queue.append(state.pending.pop(0))
         return state
 
     # -- the post office -----------------------------------------------------
@@ -111,16 +113,32 @@ class Loop:
                                  "finish your turn now.")
 
         if send.call_id is None:
-            # A bot finished its turn talking to another bot. That bot is waiting
-            # on this kernel's `output` (see the last line of this method), so
-            # there is nothing to route.
+            # A bot finished its turn talking to another bot.
+            if send.to in self.waiting:
+                # That bot is waiting on this kernel's `output` on the stack.
+                return None
+            # Nobody is waiting synchronously on the stack.
+            # Deliver cleanly to the recipient's pending queue so it processes on its next turn.
+            recipient = self.wake(send.to)
+            recipient.pending.append(Message(sender=sender.bot, text=send.text))
             return None
 
-        # A bot messaged a bot mid-turn and is waiting. Wake the recipient and run it.
+        # A bot messaged a bot mid-turn and is waiting.
         recipient = self.wake(send.to, parent={"session": sender.session_id, "call": send.call_id})
-        recipient = self.run(recipient, Message(sender=sender.bot, text=send.text))
-        return ToolCompleted(send.call_id, "message", recipient.output or "")
+        if recipient.status != Status.IDLE:
+            recipient.pending.append(Message(sender=sender.bot, text=send.text))
+            return ToolCompleted(
+                send.call_id, "message",
+                f"{send.to} is currently busy (status: {recipient.status.value}). "
+                "Message queued for next turn boundary; finish your turn now."
+            )
 
+        self.waiting.add(sender.bot)
+        try:
+            recipient = self.run(recipient, Message(sender=sender.bot, text=send.text))
+        finally:
+            self.waiting.discard(sender.bot)
+        return ToolCompleted(send.call_id, "message", recipient.output or "")
     # -- births and deaths ---------------------------------------------------
 
     def wake(self, bot: str, parent: dict | None = None, spec: Spec | None = None) -> State:
