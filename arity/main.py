@@ -35,19 +35,28 @@ won this kind of task.
 When the conversation ends, every kernel the loop woke is retired: its own
 report and the archivist's account go to its ledger, and the next time it is
 cast it wakes knowing what happened here.
+
+`ARITY_TRACE=1` prints one line per hop to stderr (seams.Trace), so the
+conversation on stdout can be read next to the events and effects behind it.
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
 
 from . import cast, seats, store, trial
 from .loop import Loop
+from .seams import ObserverSeam, Quiet, Trace
 from .types import Message, Send
 
 RECEPTION = "reception"
 USER = "asa"
+
+
+def observer() -> ObserverSeam:
+    return Trace() if os.environ.get("ARITY_TRACE") else Quiet()
 
 
 class Collect:
@@ -91,7 +100,7 @@ class Warmer(threading.Thread):
 
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
-    loop = Loop()
+    loop = Loop(observer=observer())
     talking_to = RECEPTION
     warmer = Warmer(loop)
     warmer.start()
@@ -150,7 +159,7 @@ def run_trial(loop: Loop, bot: str, n: int, text: str) -> None:
 
     # The forks talk into a bucket, not the console, so the answers can be
     # printed side by side with a number in front of each.
-    quiet = Loop(transport=Collect())
+    quiet = Loop(transport=Collect(), observer=observer())
     forks = trial.run(base, specs, Message(sender=USER, text=text), loop=quiet)
 
     for i, fork in enumerate(forks, 1):

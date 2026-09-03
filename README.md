@@ -66,7 +66,8 @@ Follow one message from the keyboard to the model and back. Each hop is one file
    The whole kernel is this file.
 
 10. **`seams.py`**: the five Protocols between the owned code and the commodity code:
-   Model, Tools, Store, Transport, Observer.
+   Model, Tools, Store, Transport, Observer. `ARITY_TRACE=1` plugs `Trace` into the
+   Observer seam and prints one line per hop, which is this reading order, live.
 
 11. **`loop.py`**: pops an event, calls the moment, hands each effect to its seam,
     pushes the results back as events. Also the post office: a `Send` to a person
