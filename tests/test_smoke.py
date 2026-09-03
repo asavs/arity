@@ -98,6 +98,27 @@ def test_busy_bot_queues_message_for_next_turn():
     assert len(reception.pending) == 1
     assert reception.pending[0].text == "next turn processed"
 
+def test_addressing_new_bot_spawns_clean_desk():
+    wire = MockWire("shared", ["first answer", "second answer"])
+    loop = Loop(model_for=lambda spec: wire)
+    reception = loop.wake("reception")
+
+    # 1. First interaction with engineer builds up context:
+    res1 = loop.deliver(reception, Send(to="engineer", text="first task", call_id="c1"))
+    eng1 = loop.live["engineer"]
+    assert res1 is not None and res1.output == "first answer"
+    assert len(eng1.messages) >= 2
+    first_session = eng1.session_id
+
+    # 2. Reception asks for new:engineer (fresh worker with clean desk):
+    res2 = loop.deliver(reception, Send(to="new:engineer", text="fresh task", call_id="c2"))
+    eng2 = loop.live["engineer"]
+    assert res2 is not None and res2.output == "second answer"
+    assert eng2.session_id != first_session
+    # eng2 has only the fresh task and its answer (no baggage from task 1):
+    assert not any("first task" in str(m.get("content", "")) for m in eng2.messages)
+    assert any("fresh task" in str(m.get("content", "")) for m in eng2.messages)
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
