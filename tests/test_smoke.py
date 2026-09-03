@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arity import cast, scorecard, store, trial    # noqa: E402
 from arity.loop import Loop                        # noqa: E402
-from arity.types import Message, Send, Spec, Status
+from arity.types import ExecuteTool, Message, Send, Spec, Status
 from arity.wire_mock import MockWire               # noqa: E402
 
 # Cast picks the mock seat, so bots woken by the post office need no key.
@@ -118,6 +118,23 @@ def test_addressing_new_bot_spawns_clean_desk():
     # eng2 has only the fresh task and its answer (no baggage from task 1):
     assert not any("first task" in str(m.get("content", "")) for m in eng2.messages)
     assert any("fresh task" in str(m.get("content", "")) for m in eng2.messages)
+
+def test_engineer_has_hands_read_file_and_bash():
+    loop = Loop(model_for=lambda spec: MockWire("m"))
+    engineer = loop.wake("engineer")
+    tool_names = [t["name"] for t in engineer.tools]
+    assert "read_file" in tool_names
+    assert "bash" in tool_names
+
+    tools = loop.tools_for(engineer.spec)
+
+    # 1. Dedicated tool: read_file
+    res_read = tools.execute(ExecuteTool(call_id="c1", name="read_file", arguments={"path": "pyproject.toml"}))
+    assert "project" in res_read.output or "build-system" in res_read.output
+
+    # 2. Shell tool: bash
+    res_bash = tools.execute(ExecuteTool(call_id="c2", name="bash", arguments={"command": "echo arity-hands"}))
+    assert "arity-hands" in res_bash.output
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

@@ -1,0 +1,14 @@
+{
+  "name": "read_file",
+  "description": "Read the text content of a file from disk.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Relative or absolute path to the file."
+      }
+    },
+    "required": ["path"]
+  }
+}

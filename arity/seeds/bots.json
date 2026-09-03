@@ -1,4 +1,7 @@
 {
   "reception": { "role": "generalist" },
-  "engineer":  { "role": "typescript-developer" }
+  "engineer": {
+    "role": "typescript-developer",
+    "tools": ["read_file", "bash", "run_oxlint"]
+  }
 }
