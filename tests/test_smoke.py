@@ -61,6 +61,13 @@ def test_trial_records_an_outcome_the_scorecard_counts():
     assert scorecard.ranked("generalist")[0] == "mock-2"
     assert store.birth_of(forks[0].session_id)["parent"] == {"session": base.session_id}
 
+    # A fork is retired when it answers, and the winner's turn folds into the base.
+    assert not any(f.session_id in store.unfinished() for f in forks)
+    store.adopt(base.session_id, forks[1].session_id)
+    base.messages = list(forks[1].messages)
+    replayed = Loop(model_for=lambda spec: MockWire("mock-2")).resume(base.session_id)
+    assert replayed.messages == base.messages
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

@@ -172,11 +172,16 @@ def run_trial(loop: Loop, bot: str, n: int, text: str) -> None:
     pick = ask_pick(len(forks))
     trial.judge(forks, pick)
 
-    if pick is not None:
-        # The winner's answer becomes this conversation's answer.
-        base.messages = list(forks[pick].messages)
-        base.output = forks[pick].output
-        print(f"(kept {forks[pick].spec.model}'s answer)")
+    if pick is None:
+        print("(no winner; nothing kept)")
+        return
+    # The winner's turn becomes this conversation's turn: its events go into
+    # the base's journal, so the base is still a fold over its own file.
+    winner = forks[pick]
+    store.adopt(base.session_id, winner.session_id)
+    base.messages = list(winner.messages)
+    base.output = winner.output
+    print(f"(kept {winner.spec.model}'s answer)")
 
 
 def doctor() -> None:

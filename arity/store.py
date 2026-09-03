@@ -64,6 +64,18 @@ def fork(base_session: str, new_session: str) -> None:
             _append(new_session, line)
 
 
+def adopt(base_session: str, fork_session: str) -> None:
+    """The base takes the fork's turn as its own: every event line the fork has
+    that the base does not is appended to the base, so the base's State stays a
+    fold over its own file after a trial. The fork's file is left alone."""
+    had = sum(1 for line in read(base_session) if line["kind"] == "event")
+    new = [line for line in read(fork_session) if line["kind"] == "event"][had:]
+    for line in new:
+        _append(base_session, line)
+    _append(base_session, {"kind": "adopted", "at": _now(), "fork": fork_session,
+                           "events": len(new)})
+
+
 def event(session_id: str, ev: Event) -> None:
     """The Store seam. One event in, one line out."""
     _append(session_id, {"kind": "event", "at": _now(), "event": type(ev).__name__, **asdict(ev)})
