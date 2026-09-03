@@ -143,13 +143,14 @@ class Loop:
 
     def wake(self, bot: str, parent: dict | None = None, spec: Spec | None = None) -> State:
         """The bot's live kernel, or a new one from cast. A new one gets a birth line."""
-        if bot not in self.live:
-            claim(bot)
-            state = cast.resolve(spec, bot) if spec else cast.birth(bot)
+        is_fresh = bot.startswith("new:")
+        name = bot.removeprefix("new:")
+        if is_fresh or name not in self.live:
+            claim(name)
+            state = cast.resolve(spec, name) if spec else cast.birth(name)
             self.journal.birth(state, parent)
-            self.live[bot] = state
-        return self.live[bot]
-
+            self.live[name] = state
+        return self.live[name]
     def resume(self, session_id: str) -> State:
         """Fold the journal back into a State and redo its last event.
 

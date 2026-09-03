@@ -37,7 +37,9 @@ WAKE = (
 HOW_MESSAGES_WORK = (
     "How messages work here. Every message you receive starts with [name]: the "
     "person or bot who sent it. Your plain reply goes back to that name. The team is: "
-    "{team}. The person is {user}. Use the message tool only when a task needs a "
+    "{team}. The person is {user}. To follow up with an existing teammate, address them by name "
+    "(e.g. 'engineer'). To start fresh with a clean desk, address 'new:name' (e.g. 'new:engineer'). "
+    "Use the message tool only when a task needs a "
     "teammate's aptitude; their answer comes back to you as the tool result, and you "
     "then answer the person yourself in your own words. If you message the person "
     "mid-task, they will answer later, so finish your turn. Do not relay for its own "
@@ -61,7 +63,7 @@ def bots() -> dict[str, dict]:
 
 def is_bot(name: str) -> bool:
     """Anyone who is not a bot is a person, and Sends to them go out the transport."""
-    return name in bots()
+    return name.removeprefix("new:") in bots()
 
 
 def choose(bot: str) -> Spec:
