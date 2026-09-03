@@ -30,8 +30,8 @@ One rule carries the whole design:
 Follow one message from the keyboard to the model and back. Each hop is one file.
 
 1. **`types.py`**: the nouns as dataclasses. Spec (names), State (values), the events
-   that move a moment forward, the effects a moment asks for. Read this first; every
-   other file only moves these around.
+   that move a moment forward, the effects a moment asks for, and the `pending` queue
+   holding messages until the current turn boundary resolves.
 
 2. **`paths.py`**: where things live on disk. The package holds code and seeds;
    `~/.arity` holds everything a person edits (library, staff list, seats) and
@@ -66,27 +66,30 @@ Follow one message from the keyboard to the model and back. Each hop is one file
    The whole kernel is this file.
 
 10. **`seams.py`**: the five Protocols between the owned code and the commodity code:
-   Model, Tools, Store, Transport, Observer. `ARITY_TRACE=1` plugs `Trace` into the
-   Observer seam and prints one line per hop, which is this reading order, live.
+   Model, Tools, Store, Transport, Observer. Includes `ParFold`, the n-arity composite
+   plug that fans any effect out to N runners concurrently and folds them into 1 event.
+   `ARITY_TRACE=1` plugs `Trace` into the Observer seam and prints one line per hop.
 
-11. **`loop.py`**: pops an event, calls the moment, hands each effect to its seam,
-    pushes the results back as events. Also the post office: a `Send` to a person
-    goes out the transport, a `Send` to a bot wakes that bot's kernel and runs it
-    until it answers. Keeps every woken kernel alive until `retire` performs the
-    death rites.
+11. **`judge.py`**: the Grader. Reduces N model candidates down to 1 using deterministic
+   filtering (dropping crashes and empty outputs with zero model calls) and semantic
+   evaluation (prompting an impartial judge model to select the best candidate).
 
-12. **`wire_anthropic.py`, `wire_openai.py`, `wire_mock.py`**: the plugs behind the
+12. **`loop.py`**: pops an event, calls the moment, hands each effect to its seam,
+   pushes the results back as events. Messages to busy bots wait cleanly in `pending`
+   for the turn boundary, avoiding recursion or caller blocking. Supports `new:role`
+   to birth a fresh worker with a clean desk on demand.
+13. **`wire_anthropic.py`, `wire_openai.py`, `wire_mock.py`**: the plugs behind the
     Model seam. One per provider: format the payload, send it, read the reply back.
     The mock answers from a script so the loop can be watched for free.
 
-13. **`harness.py`**: where a kernel runs. Our own loop is one harness. A headless
+14. **`harness.py`**: where a kernel runs. Our own loop is one harness. A headless
     CLI (`claude -p`, `codex exec`, `agy`) is another, and from the moment's point
     of view it is just a different plug behind the Model seam.
 
-14. **`trial.py`**: a trial is a fork. N copies of one State, one per spec, the same
+15. **`trial.py`**: a trial is a fork. N copies of one State, one per spec, the same
     event into each, N results keyed by spec, handed to the scorecard.
 
-15. **`main.py`**: the front door. `arity "text"` sends one message to reception
+16. **`main.py`**: the front door. `arity "text"` sends one message to reception
     and prints the reply; `arity` alone reads lines until you stop. No TUI, no flags.
     You start at reception. Ask reception for something and it delegates with the
     message tool and reports back. Start a line with `@engineer` and you are
@@ -98,9 +101,8 @@ Follow one message from the keyboard to the model and back. Each hop is one file
     `arity doctor` says what is and is not in place before a model is called:
     keys, seats, locks, unfinished sessions, library, CLIs. It spends no tokens.
 
-16. **`demo.py`**: one moment, one bot messaging another, one three-way trial,
+17. **`demo.py`**: one moment, one bot messaging another, one three-way trial,
     all against a mock wire, so the flow can be followed without a key.
-
 ## The flow in one paragraph
 
 A person types. The front door wraps the text in a `Message` to the bot called
