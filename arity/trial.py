@@ -91,9 +91,17 @@ def fork(base: State, spec: Spec) -> State:
 
 
 def run(base: State, specs: list[Spec], event: Event, loop: Loop | None = None) -> list[State]:
-    """Fork once per spec, feed every fork the same event, return the forks."""
+    """Fork once per spec, feed every fork the same event, return the forks.
+
+    A fork is retired the moment it answers. It is not a bot: no death rites,
+    no ledger entry, just the mark, so `store.unfinished()` does not list it."""
     loop = loop or Loop()
-    return [loop.run(fork(base, spec), event) for spec in specs]
+    forks = []
+    for spec in specs:
+        f = loop.run(fork(base, spec), event)
+        store.record(f.session_id, "retired")
+        forks.append(f)
+    return forks
 
 
 def judge(forks: list[State], pick: int | None) -> list[scorecard.Scored]:

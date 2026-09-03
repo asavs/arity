@@ -3,14 +3,44 @@
 Next work, roughly in order. What 1.0.0 deliberately left out is in
 `docs/1.0.0-checklist.md`; this is what to pick up first.
 
+## Is this a fold?
+
+The question to ask of every change: can this value be rebuilt from the
+session file? If not, it goes into the file, or the docstring says it is
+disposable. Each item below is the template for the next.
+
+- `store.children(session)`: the bots a session woke, read off the birth
+  lines' parent pointers. Derivable, so no new write. `resume` re-wakes them,
+  which closes the gap that `loop.live` is not journaled. ~5 lines.
+- The authority table: a short doc listing every piece of state, where it
+  lives, and whether resume rebuilds it. Known entries: the trial winner,
+  `loop.live`, seat quota (the wire spends it mid-run, so a replay spends it
+  again), the presence lock, `last_call_at` (disposable). The doctor can
+  check it later.
+
 ## Follow one value through every seam
 
-- `message(to, content, kind)`: let the sender label the task. `kind` on the
-  tool schema, on `Message` and on `Send`; the moment copies it into the Send,
-  the post office copies it into the Message, the store journals it for free,
-  `rows()` reads it off the first Message, and `standings(role, "kind")`
-  already works. The vocabulary the taxonomy should grow from is the models'
-  own. ~8 lines across five files.
+- Intent on every call. `message(to, content, kind)` and an `i` argument on
+  every tool schema are one change: the caller says what the call is for, in
+  its own words, before it runs. `kind` on the message schema, `i` required
+  on every tool schema; carried on `Send` and `ExecuteTool`; the moment copies
+  it from the arguments, the post office copies it into the Message, the store
+  journals it for free, the transcript prints it, `rows()` reads it off the
+  first Message, and `standings(role, "kind")` already works. The vocabulary
+  the taxonomy should grow from is the models' own. ~8 lines across five files.
+
+## Limits belong to the seam
+
+- Truncation in `LocalTools`: cap tool output at one layer, with a per-schema
+  opt-out. No runner knows about it. ~4 lines.
+- A version on each tool schema, carried onto the row, so outcomes stay
+  comparable after a schema edit. The epoch idea per tool. ~5 lines.
+- One more question at death: "what confused you" in the report prompt. One
+  line. The answers say which operation confuses models and which repair
+  belongs in the harness.
+- Every tool definition taxes every turn. Keep the roster small, keep the
+  fan-out invisible to the model, and treat a schema change as a cold start in
+  the cost column. A habit, not a change.
 
 ## Trials below the seam
 
@@ -52,8 +82,11 @@ Next work, roughly in order. What 1.0.0 deliberately left out is in
   Its cousin is a fallback plug: try seat A, on failure try seat B. Plugs
   compose; nothing demonstrates that yet.
 - A sandbox behind the Tools seam: run the runner as a subprocess in a temp
-  folder with the arguments as JSON. ~20 lines, same shape as the fan-out.
-  A container later.
+  folder with the arguments as JSON and a timeout. A process, because a
+  timeout on an in-process call is a wish; cancellation needs a boundary
+  whose death cannot touch the session. This is the host-and-stub split at
+  its smallest: policy in the loop, an obedient stub in the subprocess, the
+  Tools seam the only door. ~25 lines. A container later is a swap.
 - The person is a Model plug. Put the person in the staff list with a harness
   called `human`; the plug reads stdin and returns a `ModelCompleted`. A Send
   to a person is then a wake, the Transport seam disappears, and the phone is
@@ -99,6 +132,12 @@ Next work, roughly in order. What 1.0.0 deliberately left out is in
 - Threads. The nested-call post office is what makes the program readable as
   a stack. Everything above runs without a scheduler; the inbox folder covers
   the one case that looks like it needs one.
+- Directors, ConVars, a model-compatibility compiler, a materialized session
+  DOM, a bash interpreter, a polymorphic Read, a verified renderer. Each is
+  the right answer to an operating mode this program does not run: a
+  spectator, a phone, an untrusted factory, a provider zoo. The seams say
+  where each would plug in. For any change, ask which of those modes would
+  break it and write the answer in the docstring; do not build for the mode.
 
 ## Research, cheapest first
 
