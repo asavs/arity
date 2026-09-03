@@ -95,6 +95,8 @@ Follow one message from the keyboard to the model and back. Each hop is one file
     is forked onto the three best models with quota; the answers print side by
     side, you pick the winner, and the scorecard remembers. `arity resume` folds
     the last unfinished session's journal back into a kernel and keeps going.
+    `arity doctor` says what is and is not in place before a model is called:
+    keys, seats, locks, unfinished sessions, library, CLIs. It spends no tokens.
 
 16. **`demo.py`**: one moment, one bot messaging another, one three-way trial,
     all against a mock wire, so the flow can be followed without a key.

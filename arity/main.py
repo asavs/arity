@@ -4,6 +4,7 @@
     arity 3 "fix the linter on app.ts"    the same message to three kernels; you pick the winner
     arity                                 read lines from the keyboard until you stop
     arity resume [session]                fold a crashed session's journal back and keep going
+    arity doctor                          keys, seats, locks, library, CLIs: what is and is not in place
 
 All three are the same thing: a person sending a Message to a bot, and the
 bot's answer coming back out through the Console transport. There is no TUI
@@ -46,8 +47,8 @@ import sys
 import threading
 import time
 
-from . import cast, seats, store, trial
-from .loop import Loop
+from . import cast, library, paths, seats, store, trial
+from .loop import Loop, LOCK_TTL, _alive
 from .seams import ObserverSeam, Quiet, Trace
 from .types import Message, Send
 
@@ -125,6 +126,9 @@ def main(argv: list[str] | None = None) -> None:
         warmer.talking_to(talking_to)
 
     try:
+        if argv and argv[0] == "doctor":
+            doctor()
+            return
         if argv and argv[0] == "resume":
             # `arity resume [session]`: fold a journal back into a live kernel and keep going.
             unfinished = store.unfinished()
@@ -173,6 +177,81 @@ def run_trial(loop: Loop, bot: str, n: int, text: str) -> None:
         base.messages = list(forks[pick].messages)
         base.output = forks[pick].output
         print(f"(kept {forks[pick].spec.model}'s answer)")
+
+
+def doctor() -> None:
+    """One line per thing that can be wrong before a model is ever called.
+
+    Nothing here spends tokens: a seat "answers" if its URL returns any HTTP
+    status at all, which a bare GET gets for free. Nothing is fixed, only said.
+    """
+    import shutil
+    import urllib.error
+    import urllib.request
+    from datetime import datetime, timezone
+
+    def line(ok: bool | None, text: str) -> None:
+        print(f"  {'ok' if ok else '--' if ok is None else '!!'}  {text}")
+
+    print(f"home  {paths.home()}")
+
+    print("seats")
+    now = datetime.now(timezone.utc).isoformat()
+    for s in seats.all_seats():
+        if s.provider == "mock":
+            continue
+        keyed = not s.key_env or s.key_env in os.environ
+        line(keyed, f"{s.id}: {s.key_env or 'no key needed'} {'set' if keyed else 'missing'}")
+        if s.kind == "subscription" and s.resets_at and s.resets_at < now:
+            line(None, f"{s.id}: quota reset at {s.resets_at} has passed; remaining still says {s.remaining}")
+        elif s.remaining <= 0:
+            line(False, f"{s.id}: no quota left")
+        if keyed and s.url:
+            try:
+                urllib.request.urlopen(urllib.request.Request(s.url, method="GET"), timeout=5)
+                line(True, f"{s.id}: {s.url} answers")
+            except urllib.error.HTTPError as e:      # any status is an answer; the endpoint is there
+                line(True, f"{s.id}: {s.url} answers (HTTP {e.code} to a bare GET)")
+            except Exception as e:
+                line(False, f"{s.id}: {s.url} unreachable: {str(e)[:80]}")
+
+    print("locks")
+    locks = list(paths.locks().glob("*.lock"))
+    if not locks:
+        line(True, "no bot is live")
+    for lock in locks:
+        pid = int(lock.read_text() or 0)
+        age = time.time() - lock.stat().st_mtime
+        stale = age > LOCK_TTL or not _alive(pid)
+        line(not stale, f"{lock.stem}: pid {pid} {'gone' if not _alive(pid) else 'alive'}, "
+                        f"{age / 60:.0f} min old{' (stale; delete it)' if stale else ''}")
+
+    print("store")
+    open_sessions = store.unfinished()
+    line(not open_sessions, f"{len(store.sessions())} sessions, {len(open_sessions)} unfinished"
+                            + (f": {' '.join(open_sessions[-5:])}" if open_sessions else ""))
+
+    print("library")
+    for bot, entry in cast.bots().items():
+        role = paths.library() / "roles" / f"{entry['role']}.md"
+        line(role.exists(), f"{bot}: role {entry['role']}{'' if role.exists() else ' missing'}")
+        for skill in entry.get("skills", ()):
+            line((paths.library() / "skills" / f"{skill}.md").exists(), f"{bot}: skill {skill}")
+    for schema in sorted((paths.library() / "tools").glob("*.json")):
+        if schema.stem == "message":            # the post office runs this one, not a runner
+            continue
+        runner = schema.with_suffix(".py").exists()
+        line(runner, f"tool {schema.stem}: schema{' and runner' if runner else ', no runner'}")
+    for skill in sorted((paths.library() / "skills").rglob("*.md")):
+        name = skill.relative_to(paths.library() / "skills").with_suffix("").as_posix()
+        for tool in library.skill_tools(name):
+            exists = (paths.library() / "tools" / f"{tool}.json").exists()
+            line(exists, f"skill {name} wants tool {tool}{'' if exists else ', which is missing'}")
+
+    print("commands")
+    for name in ("claude", "codex", "agy", "oxlint"):
+        found = shutil.which(name)
+        line(bool(found) or None, f"{name}: {found or 'not on PATH'}")
 
 
 def ask_pick(n: int) -> int | None:

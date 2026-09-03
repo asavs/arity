@@ -3,11 +3,6 @@
 Next work, roughly in order. What 1.0.0 deliberately left out is in
 `docs/1.0.0-checklist.md`; this is what to pick up first.
 
-## First
-
-- `arity doctor`: which key env vars are set, which seats answer, which lock
-  files are stale. Where most debugging will end.
-
 ## Follow one value through every seam
 
 - `message(to, content, kind)`: let the sender label the task. `kind` on the
