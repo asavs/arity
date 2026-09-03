@@ -13,9 +13,10 @@ from typing import Any, Callable
 
 from .types import CallModel, ModelCompleted
 
-
-def is_clean(candidate: ModelCompleted) -> bool:
-    """True if the candidate returned meaningful text or tool calls without an error."""
+def is_clean(candidate: Any) -> bool:
+    """True if candidate is a ModelCompleted with meaningful content and no errors."""
+    if not isinstance(candidate, ModelCompleted):
+        return False
     text = (candidate.text or "").strip()
     if not text and not candidate.tool_calls:
         return False

@@ -11,7 +11,7 @@ import os
 import urllib.request
 
 from . import seats
-from .types import CallModel, ModelCompleted
+from .types import CallModel, ModelCompleted, ModelFailed
 
 
 class OpenAIWire:
@@ -46,7 +46,9 @@ class OpenAIWire:
                 reply = json.load(response)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode(errors="replace")
-            raise RuntimeError(f"HTTP {e.code} from {self.seat.url} for model {self.model}: {error_body}") from e
+            return ModelFailed(f"HTTP {e.code} from {self.seat.url} for model {self.model}: {error_body[:200]}")
+        except Exception as e:
+            return ModelFailed(f"transport error from {self.seat.url} for model {self.model}: {e}")
         usage = reply.get("usage") or {}
         tokens = usage.get("completion_tokens") or 0
         seats.spend(self.seat.id, tokens / 1_000_000)
@@ -114,13 +116,13 @@ def _tool(schema: dict) -> dict:
     }}
 
 
-def _completed(reply: dict) -> ModelCompleted:
+def _completed(reply: dict) -> ModelCompleted | ModelFailed:
     if "error" in reply:
         err = reply["error"]
         msg = err.get("message") if isinstance(err, dict) else str(err)
-        return ModelCompleted(text=f"error: {msg}", tool_calls=[], usage={})
+        return ModelFailed(f"API error: {msg}")
     if "choices" not in reply or not reply["choices"]:
-        return ModelCompleted(text=f"error: unexpected reply: {str(reply)[:100]}", tool_calls=[], usage={})
+        return ModelFailed(f"unexpected reply: {str(reply)[:100]}")
     message = reply["choices"][0]["message"]
     calls = [{"id": c.get("id") or "call_0", "name": c["function"]["name"], "arguments": c["function"]["arguments"]}
              for c in message.get("tool_calls") or []]
