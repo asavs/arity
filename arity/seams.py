@@ -66,6 +66,8 @@ class ObserverSeam(Protocol):
 class LocalTools:
     """ToolSeam. Runs library tools as plain Python functions in this process."""
 
+    MAX_OUTPUT = 20_000
+
     def __init__(self, names: list[str]):
         from . import library
         self._schemas = [library.tool_schema(n) for n in names]
@@ -76,10 +78,12 @@ class LocalTools:
 
     def execute(self, effect: ExecuteTool) -> ToolCompleted:
         try:
-            output = self._runners[effect.name](**effect.arguments)
+            output = str(self._runners[effect.name](**effect.arguments))
+            if len(output) > self.MAX_OUTPUT:
+                output = output[:self.MAX_OUTPUT] + f"\n...[truncated to {self.MAX_OUTPUT} characters]"
         except Exception as exc:  # the model should hear about it, not the loop
             output = f"error: {exc}"
-        return ToolCompleted(effect.call_id, effect.name, str(output))
+        return ToolCompleted(effect.call_id, effect.name, output)
 
 
 class Console:

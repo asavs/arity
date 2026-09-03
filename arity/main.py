@@ -46,7 +46,7 @@ import os
 import sys
 import threading
 import time
-
+from concurrent.futures import ThreadPoolExecutor
 from . import cast, library, paths, seats, store, trial
 from .loop import Loop, LOCK_TTL, _alive
 from .seams import ObserverSeam, Quiet, Trace
@@ -108,23 +108,44 @@ def main(argv: list[str] | None = None) -> None:
 
     def say(line: str) -> None:
         nonlocal talking_to
-        # @name switches who you are talking to.
-        if line.startswith("@"):
-            name, _, rest = line[1:].partition(" ")
-            if cast.is_bot(name):
-                talking_to = name
-                line = rest
+
+        # Extract any @bot mentions anywhere in the line
+        tokens = line.split()
+        mentioned = [t[1:] for t in tokens if t.startswith("@") and cast.is_bot(t[1:])]
+        if mentioned:
+            line = " ".join(t for t in tokens if not (t.startswith("@") and cast.is_bot(t[1:])))
+
+        # Leading number check (e.g. `2 "prompt"` or `2 "prompt" @dijkstra @hickey`)
+        head, _, rest = line.partition(" ")
+        num = int(head) if head.isdigit() and rest.strip() else None
+        if num is not None:
+            line = rest
+
+        if len(mentioned) > 1:
+            # Multi-bot fan-out: run all specified bots concurrently
+            print(f"(running {len(mentioned)} bots in parallel: {', '.join('@' + b for b in mentioned)})")
+            with ThreadPoolExecutor(max_workers=len(mentioned)) as pool:
+                def run_one(b_name: str) -> tuple[str, str]:
+                    k = loop.wake(b_name)
+                    res = loop.run(k, Message(sender=USER, text=line))
+                    return b_name, res.output or ""
+                results = list(pool.map(run_one, mentioned))
+            for b_name, out in results:
+                print(f"\n[@{b_name}]\n{out}")
+            return
+
+        if len(mentioned) == 1:
+            talking_to = mentioned[0]
             if not line.strip():
                 print(f"(now talking to {talking_to})")
                 return
-        # A leading number is a trial.
-        head, _, rest = line.partition(" ")
-        if head.isdigit() and rest.strip():
-            run_trial(loop, talking_to, int(head), rest)
+
+        if num is not None:
+            run_trial(loop, talking_to, num, line)
             return
+
         loop.run(loop.wake(talking_to), Message(sender=USER, text=line))
         warmer.talking_to(talking_to)
-
     try:
         if argv and argv[0] == "doctor":
             doctor()

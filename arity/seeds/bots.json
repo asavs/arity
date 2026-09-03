@@ -13,5 +13,13 @@
   "hickey": {
     "role": "hickey",
     "tools": ["read_file"]
+  },
+  "namer": {
+    "role": "namer",
+    "tools": ["read_file"]
+  },
+  "writer": {
+    "role": "writer",
+    "tools": ["read_file", "bash"]
   }
 }
