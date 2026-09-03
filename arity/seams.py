@@ -146,11 +146,28 @@ class Trace:
 # ParFold: the n-arity composite plug
 # ---------------------------------------------------------------------------
 
+def _safe_call(runner: Any, effect: CallModel) -> ModelCompleted:
+    try:
+        fn = getattr(runner, "call", runner)
+        return fn(effect)
+    except Exception as exc:
+        return ModelCompleted(text=f"error: {exc}", tool_calls=[], usage={})
+
+
+def _safe_execute(runner: Any, effect: ExecuteTool) -> ToolCompleted:
+    try:
+        fn = getattr(runner, "execute", runner)
+        return fn(effect)
+    except Exception as exc:
+        return ToolCompleted(effect.call_id, effect.name, f"error: {exc}")
+
+
 class ParFold:
     """Parallel fold: fans an effect out across N runners, folds the results into 1.
 
-    Works behind any seam. The runners execute concurrently in a thread pool,
-    and `reduce` folds the list of candidate results into one final event.
+    Works behind any seam. The runners execute concurrently in a thread pool.
+    Individual runner failures are caught as error events, allowing the reducer/judge
+    to gracefully select from surviving clean candidates.
     """
 
     def __init__(self, runners: list[Any], reduce: Callable[[list[Any]], Any]):
@@ -159,17 +176,17 @@ class ParFold:
 
     def __call__(self, effect: Any) -> Any:
         with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
-            candidates = list(pool.map(lambda r: r(effect), self.runners))
+            candidates = list(pool.map(lambda r: _safe_call(r, effect) if isinstance(effect, CallModel) else _safe_execute(r, effect), self.runners))
         return self.reduce(candidates)
 
     def call(self, effect: CallModel) -> ModelCompleted:
         """ModelSeam: fans CallModel to N wires, reduces to 1 ModelCompleted."""
         with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
-            candidates = list(pool.map(lambda r: r.call(effect) if hasattr(r, "call") else r(effect), self.runners))
+            candidates = list(pool.map(lambda r: _safe_call(r, effect), self.runners))
         return self.reduce(candidates)
 
     def execute(self, effect: ExecuteTool) -> ToolCompleted:
         """ToolSeam: fans ExecuteTool to N runners, reduces to 1 ToolCompleted."""
         with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
-            candidates = list(pool.map(lambda r: r.execute(effect) if hasattr(r, "execute") else r(effect), self.runners))
+            candidates = list(pool.map(lambda r: _safe_execute(r, effect), self.runners))
         return self.reduce(candidates)

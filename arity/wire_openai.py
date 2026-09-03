@@ -42,7 +42,7 @@ class OpenAIWire:
             },
         )
         try:
-            with urllib.request.urlopen(request) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 reply = json.load(response)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode(errors="replace")
@@ -115,6 +115,12 @@ def _tool(schema: dict) -> dict:
 
 
 def _completed(reply: dict) -> ModelCompleted:
+    if "error" in reply:
+        err = reply["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        return ModelCompleted(text=f"error: {msg}", tool_calls=[], usage={})
+    if "choices" not in reply or not reply["choices"]:
+        return ModelCompleted(text=f"error: unexpected reply: {str(reply)[:100]}", tool_calls=[], usage={})
     message = reply["choices"][0]["message"]
     calls = [{"id": c.get("id") or "call_0", "name": c["function"]["name"], "arguments": c["function"]["arguments"]}
              for c in message.get("tool_calls") or []]
