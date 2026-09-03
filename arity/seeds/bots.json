@@ -1,7 +1,17 @@
 {
-  "reception": { "role": "generalist" },
+  "reception": {
+    "role": "generalist"
+  },
   "engineer": {
     "role": "typescript-developer",
     "tools": ["read_file", "bash", "run_oxlint"]
+  },
+  "dijkstra": {
+    "role": "dijkstra",
+    "tools": ["read_file"]
+  },
+  "hickey": {
+    "role": "hickey",
+    "tools": ["read_file"]
   }
 }
