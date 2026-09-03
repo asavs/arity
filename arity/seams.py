@@ -21,7 +21,8 @@ built on records that silently went missing is wrong forever and looks fine.
 from __future__ import annotations
 
 import sys
-from typing import Any, Protocol
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Protocol
 
 from .types import (
     CallModel, ExecuteTool, Message, ModelCompleted, ModelFailed, Send, State, ToolCompleted,
@@ -135,3 +136,36 @@ class Trace:
     def _clip(self, text: str) -> str:
         text = " ".join(text.split())
         return text if len(text) <= self.WIDTH else text[: self.WIDTH - 3] + "..."
+
+
+# ---------------------------------------------------------------------------
+# ParFold: the n-arity composite plug
+# ---------------------------------------------------------------------------
+
+class ParFold:
+    """Parallel fold: fans an effect out across N runners, folds the results into 1.
+
+    Works behind any seam. The runners execute concurrently in a thread pool,
+    and `reduce` folds the list of candidate results into one final event.
+    """
+
+    def __init__(self, runners: list[Any], reduce: Callable[[list[Any]], Any]):
+        self.runners = runners
+        self.reduce = reduce
+
+    def __call__(self, effect: Any) -> Any:
+        with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
+            candidates = list(pool.map(lambda r: r(effect), self.runners))
+        return self.reduce(candidates)
+
+    def call(self, effect: CallModel) -> ModelCompleted:
+        """ModelSeam: fans CallModel to N wires, reduces to 1 ModelCompleted."""
+        with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
+            candidates = list(pool.map(lambda r: r.call(effect) if hasattr(r, "call") else r(effect), self.runners))
+        return self.reduce(candidates)
+
+    def execute(self, effect: ExecuteTool) -> ToolCompleted:
+        """ToolSeam: fans ExecuteTool to N runners, reduces to 1 ToolCompleted."""
+        with ThreadPoolExecutor(max_workers=max(1, len(self.runners))) as pool:
+            candidates = list(pool.map(lambda r: r.execute(effect) if hasattr(r, "execute") else r(effect), self.runners))
+        return self.reduce(candidates)

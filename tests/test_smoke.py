@@ -19,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arity import cast, scorecard, store, trial    # noqa: E402
 from arity.loop import Loop                        # noqa: E402
-from arity.types import ExecuteTool, Message, Send, Spec, Status
+from arity.seams import ParFold                    # noqa: E402
+from arity.types import (                          # noqa: E402
+    CallModel, ExecuteTool, Message, ModelCompleted, Send, Spec, Status, ToolCompleted,
+)
 from arity.wire_mock import MockWire               # noqa: E402
 
 # Cast picks the mock seat, so bots woken by the post office need no key.
@@ -135,6 +138,30 @@ def test_engineer_has_hands_read_file_and_bash():
     # 2. Shell tool: bash
     res_bash = tools.execute(ExecuteTool(call_id="c2", name="bash", arguments={"command": "echo arity-hands"}))
     assert "arity-hands" in res_bash.output
+
+def test_parfold_behind_model_and_tool_seams():
+    # 1. Model Seam: fan out CallModel across 2 models, reduce to best
+    wire_fast = MockWire("fast", ["short"])
+    wire_deep = MockWire("deep", ["a much more detailed explanation"])
+    pick_longest = lambda candidates: max(candidates, key=lambda c: len(c.text))
+    model_arity = ParFold(runners=[wire_fast, wire_deep], reduce=pick_longest)
+
+    eff = CallModel(system="", tools=[], messages=[{"role": "user", "content": "hi"}])
+    result = model_arity.call(eff)
+    assert result.text == "a much more detailed explanation"
+
+    # 2. Tool Seam: fan out ExecuteTool across 2 search runners, merge
+    tool_a = lambda eff: ToolCompleted(eff.call_id, eff.name, "Exa: doc1, doc2")
+    tool_b = lambda eff: ToolCompleted(eff.call_id, eff.name, "Perplexity: doc3")
+    merge_search = lambda results: ToolCompleted(
+        results[0].call_id, results[0].name, "\n".join(r.output for r in results)
+    )
+    tool_arity = ParFold(runners=[tool_a, tool_b], reduce=merge_search)
+
+    tool_eff = ExecuteTool(call_id="c1", name="web_search", arguments={"q": "arity"})
+    tool_res = tool_arity.execute(tool_eff)
+    assert "Exa: doc1, doc2" in tool_res.output
+    assert "Perplexity: doc3" in tool_res.output
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
