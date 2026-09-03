@@ -20,9 +20,12 @@ built on records that silently went missing is wrong forever and looks fine.
 """
 from __future__ import annotations
 
+import sys
 from typing import Any, Protocol
 
-from .types import CallModel, ExecuteTool, ModelCompleted, Send, State, ToolCompleted
+from .types import (
+    CallModel, ExecuteTool, Message, ModelCompleted, ModelFailed, Send, State, ToolCompleted,
+)
 
 
 class ModelSeam(Protocol):
@@ -88,3 +91,47 @@ class Quiet:
     """ObserverSeam. Watches nothing. The default."""
     def on_event(self, state: State, event: Any) -> None: ...
     def on_effect(self, state: State, effect: Any) -> None: ...
+
+
+class Trace:
+    """ObserverSeam. One line per hop, to stderr, so stdout stays the conversation.
+
+    An event line starts with `<-` (something arrived at the kernel), an effect
+    line with `->` (the kernel asked for something). Read next to the README's
+    flow paragraph, the trace is that paragraph with the bot's name on each line.
+    `ARITY_TRACE=1` turns it on at the front door.
+    """
+    WIDTH = 60
+
+    def on_event(self, state: State, event: Any) -> None:
+        self._line(state, "<-", type(event).__name__, self._summary(event))
+
+    def on_effect(self, state: State, effect: Any) -> None:
+        self._line(state, "->", type(effect).__name__, self._summary(effect))
+
+    def _line(self, state: State, arrow: str, kind: str, summary: str) -> None:
+        print(f"  {state.bot:<10} {arrow} {kind:<14} {summary}", file=sys.stderr)
+
+    def _summary(self, x: Any) -> str:
+        match x:
+            case Message(sender, text):
+                return f"from {sender}: {self._clip(text)}"
+            case ModelCompleted(text, calls, usage):
+                names = ", ".join(c["name"] for c in calls)
+                used = f" ({usage.get('input_tokens', usage.get('prompt_tokens', '?'))} in)" if usage else ""
+                return (f"calls {names}" if calls else self._clip(text)) + used
+            case ModelFailed(reason):
+                return self._clip(reason)
+            case ToolCompleted(_, name, output):
+                return f"{name}: {self._clip(output)}"
+            case CallModel(system, tools, messages, _):
+                return f"{len(tools)} tools, {len(system)} chars of system, {len(messages)} messages"
+            case ExecuteTool(_, name, arguments):
+                return f"{name} {self._clip(str(arguments))}"
+            case Send(to, text, call_id):
+                return f"to {to} ({'waits' if call_id else 'answer'}): {self._clip(text)}"
+        return ""
+
+    def _clip(self, text: str) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= self.WIDTH else text[: self.WIDTH - 3] + "..."
