@@ -70,6 +70,7 @@ class State:
     tools: list[dict[str, Any]]             # tool schemas the model will see
     messages: list[dict[str, Any]] = field(default_factory=list)
     status: Status = Status.IDLE
+    pending: list[Message] = field(default_factory=list)  # held until current turn boundary
     talking_to: str = ""                    # who sent the message this turn answers
     output: str | None = None               # the last thing the model said in plain text
     last_call_at: float = 0.0               # when the wire last touched this prefix (keepalive)
