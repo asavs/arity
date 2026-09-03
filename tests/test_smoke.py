@@ -18,6 +18,7 @@ os.environ["ARITY_HOME"] = tempfile.mkdtemp(prefix="arity-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arity import cast, scorecard, store, trial    # noqa: E402
+from arity.judge import Judge                      # noqa: E402
 from arity.loop import Loop                        # noqa: E402
 from arity.seams import ParFold                    # noqa: E402
 from arity.types import (                          # noqa: E402
@@ -162,6 +163,31 @@ def test_parfold_behind_model_and_tool_seams():
     tool_res = tool_arity.execute(tool_eff)
     assert "Exa: doc1, doc2" in tool_res.output
     assert "Perplexity: doc3" in tool_res.output
+
+def test_judge_deterministic_filter_and_semantic_choice():
+    # 1. Deterministic filter: errors and blanks dropped; lone survivor wins with 0 calls
+    c_err = ModelCompleted("error: timeout", [], {})
+    c_empty = ModelCompleted("", [], {})
+    c_clean = ModelCompleted("def add(a, b): return a + b", [], {})
+    judge_no_wire = Judge()
+    assert judge_no_wire([c_err, c_empty, c_clean]) == c_clean
+
+    # 2. Semantic evaluation: 2 clean answers, judge model picks #2
+    c1 = ModelCompleted("sloppy answer", [], {})
+    c2 = ModelCompleted("elegant concise answer", [], {})
+    judge_wire = MockWire("judge", ["WINNER: 2\nREASON: Candidate 2 is much more concise."])
+    judge = Judge(wire=judge_wire, task="explain code")
+    winner = judge([c1, c2])
+    assert winner == c2
+
+    # 3. Full integration: ParFold + Judge behind ModelSeam
+    w1 = MockWire("model-1", ["answer 1"])
+    w2 = MockWire("model-2", ["answer 2"])
+    judge_wire2 = MockWire("judge", ["WINNER: 1\nREASON: 1 is clearer."])
+    parfold = ParFold(runners=[w1, w2], reduce=Judge(wire=judge_wire2, task="test"))
+
+    eff = CallModel(system="", tools=[], messages=[{"role": "user", "content": "hi"}])
+    assert parfold.call(eff).text == "answer 1"
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
