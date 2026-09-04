@@ -1,0 +1,14 @@
+{
+  "name": "bash",
+  "description": "Run a shell command and return stdout and stderr.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The shell command to execute."
+      }
+    },
+    "required": ["command"]
+  }
+}

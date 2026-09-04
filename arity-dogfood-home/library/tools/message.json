@@ -1,0 +1,12 @@
+{
+  "name": "message",
+  "description": "Send a message to a person or another bot and wait for their reply. Use it to ask a colleague for work in their aptitude, or to ask the person a question.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "to": { "type": "string", "description": "a bot name or a person's name" },
+      "content": { "type": "string" }
+    },
+    "required": ["to", "content"]
+  }
+}
