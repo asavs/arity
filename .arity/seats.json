@@ -1,0 +1,87 @@
+[
+  {
+    "id": "anthropic-max",
+    "provider": "anthropic",
+    "kind": "subscription",
+    "models": [
+      "claude-opus-5",
+      "claude-sonnet-5"
+    ],
+    "url": "https://api.anthropic.com/v1/messages",
+    "key_env": "ANTHROPIC_API_KEY",
+    "remaining": 0.82,
+    "resets_at": "2026-09-02T23:00:00Z",
+    "warm_window": 300
+  },
+  {
+    "id": "openai-pro",
+    "provider": "openai",
+    "kind": "subscription",
+    "models": [
+      "gpt-5.6-sol",
+      "gpt-5.6-terra"
+    ],
+    "url": "https://api.openai.com/v1/chat/completions",
+    "key_env": "OPENAI_API_KEY",
+    "remaining": 0.4,
+    "resets_at": "2026-09-05T00:00:00Z",
+    "warm_window": 1800
+  },
+  {
+    "id": "xai-super",
+    "provider": "xai",
+    "kind": "subscription",
+    "models": [
+      "grok-4.5"
+    ],
+    "url": "https://api.x.ai/v1/chat/completions",
+    "key_env": "XAI_API_KEY",
+    "remaining": 0.95,
+    "resets_at": "2026-09-03T12:00:00Z",
+    "warm_window": 0
+  },
+  {
+    "id": "openrouter-free",
+    "provider": "openai",
+    "kind": "api",
+    "models": [
+      "minimax/minimax-m2.7:free",
+      "nvidia/nemotron-3.5-lightning:free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "cohere/north-mini-code:free",
+      "liquid/lfm-2.5-2.6b:free"
+    ],
+    "url": "https://openrouter.ai/api/v1/chat/completions",
+    "key_env": "OPENROUTER_API_KEY",
+    "remaining": 99.96889299999998,
+    "resets_at": null,
+    "warm_window": 0
+  },
+  {
+    "id": "nvidia-nim",
+    "provider": "openai",
+    "kind": "api",
+    "models": [
+      "mistralai/mistral-7b-instruct-v0.3",
+      "deepseek-ai/deepseek-v4-flash-0731"
+    ],
+    "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+    "key_env": "NVIDIA_NIM_API_KEY",
+    "remaining": 100.0,
+    "resets_at": null,
+    "warm_window": 0
+  },
+  {
+    "id": "mock",
+    "provider": "mock",
+    "kind": "api",
+    "models": [
+      "mock-1"
+    ],
+    "url": "",
+    "key_env": "",
+    "remaining": 1.0,
+    "resets_at": null,
+    "warm_window": 0
+  }
+]
