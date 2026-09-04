@@ -1,0 +1,2 @@
+{"kind": "birth", "at": "2026-09-04T18:34:41.261005+00:00", "bot": "python-developer", "spec": {"seat": "openrouter-free", "model": "minimax/minimax-m2.7:free", "role": "python-developer", "skills": [], "tools": ["read_file", "bash", "search"], "harness": "kernel", "effort": null}, "parent": null, "epoch": 1}
+{"kind": "retired", "at": "2026-09-04T18:39:52.062112+00:00"}
