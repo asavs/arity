@@ -49,7 +49,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from . import cast, library, paths, seats, store, trial
+from . import cast, library, linker, paths, seats, sources, store, trial
 from .loop import Loop, LOCK_TTL, _alive
 from .seams import ObserverSeam, Quiet, Trace
 from .types import Message, Send
@@ -264,21 +264,25 @@ def doctor() -> None:
 
     print("library")
     for bot, entry in cast.bots().items():
-        role = paths.library() / "roles" / f"{entry['role']}.md"
-        line(role.exists(), f"{bot}: role {entry['role']}{'' if role.exists() else ' missing'}")
+        role_path = sources.find_role_file(entry["role"])
+        line(bool(role_path), f"{bot}: role {entry['role']}{'' if role_path else ' missing'}")
         for skill in entry.get("skills", ()):
-            line((paths.library() / "skills" / f"{skill}.md").exists(), f"{bot}: skill {skill}")
-    for schema in sorted((paths.library() / "tools").glob("*.json")):
-        if schema.stem == "message":            # the post office runs this one, not a runner
-            continue
-        runner = schema.with_suffix(".py").exists()
-        line(runner, f"tool {schema.stem}: schema{' and runner' if runner else ', no runner'}")
-    for skill in sorted((paths.library() / "skills").rglob("*.md")):
-        name = skill.relative_to(paths.library() / "skills").with_suffix("").as_posix()
-        for tool in library.skill_tools(name):
-            exists = (paths.library() / "tools" / f"{tool}.json").exists()
-            line(exists, f"skill {name} wants tool {tool}{'' if exists else ', which is missing'}")
-
+            if sources.is_remote(skill):
+                line(True, f"{bot}: remote skill {skill}")
+            else:
+                s_path = sources.find_skill_file(skill)
+                line(bool(s_path), f"{bot}: skill {skill}{'' if s_path else ' missing'}")
+        for tool in entry.get("tools", ()):
+            s_path, r_path = sources.find_tool_files(tool)
+            has_runner = bool(r_path) or tool in linker.VIRTUAL_TOOLS
+            line(bool(s_path) and has_runner, f"{bot}: tool {tool}{'' if s_path else ' (no schema)'}{'' if has_runner else ' (no runner)'}")
+    for t_name in sources.available_tools():
+        s_path, r_path = sources.find_tool_files(t_name)
+        if t_name in linker.VIRTUAL_TOOLS:
+            line(True, f"tool {t_name}: virtual (kernel built-in)")
+        else:
+            has_runner = bool(r_path)
+            line(has_runner, f"tool {t_name}: schema{' and runner' if has_runner else ', no runner'}")
     print("commands")
     for name in ("claude", "codex", "agy", "oxlint"):
         found = shutil.which(name)
@@ -357,6 +361,9 @@ def _add_bot(args: list[str]) -> None:
     current[name] = entry
     bots_file.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
 
+    missing_tools = [t for t in tools if not sources.find_tool_files(t)[0]]
+    if missing_tools:
+        print(f"warning: tools missing schemas: {', '.join(missing_tools)}. Run 'arity add tool <name>' to define them.")
     print(f"ok  added @{name} (role: {role}, tools: {tools})")
 
 

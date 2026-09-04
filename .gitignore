@@ -2,3 +2,7 @@ arity/store/
 arity/ledger/
 __pycache__/
 *.pyc
+arity/bots.json
+arity/seats.json
+arity/library/
+arity/locks/
