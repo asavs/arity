@@ -1,0 +1,45 @@
+{
+  "reception": {
+    "role": "generalist"
+  },
+  "engineer": {
+    "role": "typescript-developer",
+    "tools": [
+      "read_file",
+      "bash",
+      "run_oxlint"
+    ]
+  },
+  "dijkstra": {
+    "role": "dijkstra",
+    "tools": [
+      "read_file"
+    ]
+  },
+  "hickey": {
+    "role": "hickey",
+    "tools": [
+      "read_file"
+    ]
+  },
+  "namer": {
+    "role": "namer",
+    "tools": [
+      "read_file"
+    ]
+  },
+  "writer": {
+    "role": "writer",
+    "tools": [
+      "read_file",
+      "bash"
+    ]
+  },
+  "reviewer": {
+    "role": "reviewer",
+    "tools": [
+      "read_file",
+      "bash"
+    ]
+  }
+}
