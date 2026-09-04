@@ -189,6 +189,25 @@ def test_judge_deterministic_filter_and_semantic_choice():
     eff = CallModel(system="", tools=[], messages=[{"role": "user", "content": "hi"}])
     assert parfold.call(eff).text == "answer 1"
 
+def test_cmd_add_bot_and_tool(tmp_path, monkeypatch):
+    import json
+    from arity.main import main
+
+    monkeypatch.setenv("ARITY_HOME", str(tmp_path))
+
+    # 1. Add a bot
+    main(["add", "bot", "tester", "You write tests.", "--tools", "read_file,bash"])
+    bots = json.loads((tmp_path / "bots.json").read_text(encoding="utf-8"))
+    assert "tester" in bots
+    assert bots["tester"]["role"] == "tester"
+    assert bots["tester"]["tools"] == ["read_file", "bash"]
+    assert (tmp_path / "library" / "roles" / "tester.md").read_text(encoding="utf-8").strip() == "You write tests."
+
+    # 2. Add a tool
+    main(["add", "tool", "ping", "Ping test tool"])
+    assert (tmp_path / "library" / "tools" / "ping.json").exists()
+    assert (tmp_path / "library" / "tools" / "ping.py").exists()
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

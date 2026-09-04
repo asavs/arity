@@ -42,11 +42,13 @@ conversation on stdout can be read next to the events and effects behind it.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 from . import cast, library, paths, seats, store, trial
 from .loop import Loop, LOCK_TTL, _alive
 from .seams import ObserverSeam, Quiet, Trace
@@ -149,6 +151,9 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if argv and argv[0] == "doctor":
             doctor()
+            return
+        if argv and argv[0] == "add":
+            cmd_add(argv[1:])
             return
         if argv and argv[0] == "resume":
             # `arity resume [session]`: fold a journal back into a live kernel and keep going.
@@ -289,6 +294,105 @@ def ask_pick(n: int) -> int | None:
     except EOFError:
         return None
     return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
+
+
+def cmd_add(args: list[str]) -> None:
+    """Subcommand: `arity add bot <name> ["description"] ...` or `arity add tool <name> ["description"]`."""
+    if not args:
+        print('usage: arity add bot <name> ["description"] [--role <role>] [--tools t1,t2] [--skills s1,s2]')
+        print('       arity add tool <name> ["description"]')
+        return
+
+    kind = args[0]
+    rest = args[1:]
+    if kind == "bot":
+        _add_bot(rest)
+    elif kind == "tool":
+        _add_tool(rest)
+    else:
+        print(f"unknown kind '{kind}'. Use 'bot' or 'tool'.")
+
+
+def _add_bot(args: list[str]) -> None:
+    if not args:
+        print('usage: arity add bot <name> ["description"] [--role <role>] [--tools t1,t2] [--skills s1,s2]')
+        return
+
+    name = args[0]
+    role = name
+    tools = ["read_file"]
+    skills: list[str] = []
+    desc = ""
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--role" and i + 1 < len(args):
+            role = args[i + 1]
+            i += 2
+        elif args[i] == "--tools" and i + 1 < len(args):
+            tools = [t.strip() for t in args[i + 1].split(",") if t.strip()]
+            i += 2
+        elif args[i] == "--skills" and i + 1 < len(args):
+            skills = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+            i += 2
+        elif not desc:
+            desc = args[i]
+            i += 1
+        else:
+            i += 1
+
+    # 1. Write role file if description given or if file doesn't exist
+    role_file = paths.library() / "roles" / f"{role}.md"
+    role_file.parent.mkdir(parents=True, exist_ok=True)
+    if desc or not role_file.exists():
+        content = desc.strip() or f"You are {name}, a specialist in {role}."
+        role_file.write_text(content + "\n", encoding="utf-8")
+
+    # 2. Update bots.json
+    bots_file = paths.bots()
+    current = json.loads(bots_file.read_text(encoding="utf-8")) if bots_file.exists() else {}
+    entry: dict[str, Any] = {"role": role, "tools": tools}
+    if skills:
+        entry["skills"] = skills
+    current[name] = entry
+    bots_file.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+
+    print(f"ok  added @{name} (role: {role}, tools: {tools})")
+
+
+def _add_tool(args: list[str]) -> None:
+    if not args:
+        print('usage: arity add tool <name> ["description"]')
+        return
+
+    name = args[0]
+    desc = args[1] if len(args) > 1 else f"The {name} tool."
+
+    tools_dir = paths.library() / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+
+    schema_file = tools_dir / f"{name}.json"
+    runner_file = tools_dir / f"{name}.py"
+
+    schema = {
+        "name": name,
+        "description": desc,
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+    schema_file.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+
+    runner_code = (
+        f'"""The runner half of the {name} tool. The loop calls run(**arguments)."""\n\n'
+        f"def run(**arguments: any) -> str:\n"
+        f'    return f"executed {name} with {{arguments}}"\n'
+    )
+    runner_file.write_text(runner_code, encoding="utf-8")
+
+    print(f"ok  scaffolded tool {name}:\n      - library/tools/{name}.json\n      - library/tools/{name}.py")
 
 
 if __name__ == "__main__":
