@@ -1,0 +1,9 @@
+{
+  "name": "search",
+  "description": "Search the codebase or web",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
