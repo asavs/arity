@@ -18,9 +18,10 @@ os.environ["ARITY_HOME"] = tempfile.mkdtemp(prefix="arity-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arity import cast, scorecard, store, trial    # noqa: E402
+from arity.guardian import Guardian                # noqa: E402
 from arity.judge import Judge                      # noqa: E402
 from arity.loop import Loop                        # noqa: E402
-from arity.seams import ParFold                    # noqa: E402
+from arity.seams import LocalTools, ParFold        # noqa: E402
 from arity.types import (                          # noqa: E402
     CallModel, ExecuteTool, Message, ModelCompleted, Send, Spec, Status, ToolCompleted,
 )
@@ -207,6 +208,35 @@ def test_cmd_add_bot_and_tool(tmp_path, monkeypatch):
     main(["add", "tool", "ping", "Ping test tool"])
     assert (tmp_path / "library" / "tools" / "ping.json").exists()
     assert (tmp_path / "library" / "tools" / "ping.py").exists()
+
+def test_guardian_allowlist_heal_and_deny():
+    import json
+    inner_tools = LocalTools(["read_file", "bash"])
+
+    # 1. Allowlist fast-path: skips wire inspection entirely
+    guardian_allow = Guardian(inner=inner_tools, wire=None, allowlist={"read_file"})
+    eff_read = ExecuteTool(call_id="c1", name="read_file", arguments={"path": "pyproject.toml"})
+    res1 = guardian_allow.execute(eff_read)
+    assert "project" in res1.output
+    assert guardian_allow.stats["fast_path"] == 1
+
+    # 2. Deny: inspector catches dangerous command and blocks before execution
+    deny_reply = json.dumps({"decision": "DENY", "reason": "destructive root deletion"})
+    wire_deny = MockWire("guardian", [deny_reply])
+    guardian_deny = Guardian(inner=inner_tools, wire=wire_deny, allowlist=set())
+    eff_danger = ExecuteTool(call_id="c2", name="bash", arguments={"command": "rm -rf /"})
+    res2 = guardian_deny.execute(eff_danger)
+    assert "blocked by guardian: destructive root deletion" in res2.output
+    assert guardian_deny.stats["denied"] == 1
+
+    # 3. Heal: auto-corrects malformed argument and executes
+    heal_reply = json.dumps({"decision": "HEAL", "healed_args": {"path": "pyproject.toml"}})
+    wire_heal = MockWire("guardian", [heal_reply])
+    guardian_heal = Guardian(inner=inner_tools, wire=wire_heal, allowlist=set())
+    eff_malformed = ExecuteTool(call_id="c3", name="read_file", arguments={"file": "pyproject.toml"})
+    res3 = guardian_heal.execute(eff_malformed)
+    assert "project" in res3.output
+    assert guardian_heal.stats["healed"] == 1
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
