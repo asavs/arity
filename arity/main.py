@@ -58,6 +58,19 @@ RECEPTION = "reception"
 USER = "asa"
 
 
+USAGE = (
+    'usage: arity [<count>] "<message>"',
+    "       arity                         read messages from standard input",
+    "       arity resume [session]",
+    "       arity doctor",
+    "       arity add bot|tool ...",
+)
+
+
+def _print_usage() -> None:
+    for line in USAGE:
+        print(line)
+
 def observer() -> ObserverSeam:
     return Trace() if os.environ.get("ARITY_TRACE") else Quiet()
 
@@ -101,8 +114,17 @@ class Warmer(threading.Thread):
                     print("(kept the cache warm)")
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int | None:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in {"--help", "-h", "help"}:
+        _print_usage()
+        return 0
+    if argv and argv[0] == "doctor":
+        doctor()
+        return 0
+    if argv and argv[0] == "add":
+        return cmd_add(argv[1:])
+
     loop = Loop(observer=observer())
     talking_to = RECEPTION
     warmer = Warmer(loop)
@@ -149,12 +171,6 @@ def main(argv: list[str] | None = None) -> None:
         loop.run(loop.wake(talking_to), Message(sender=USER, text=line))
         warmer.talking_to(talking_to)
     try:
-        if argv and argv[0] == "doctor":
-            doctor()
-            return
-        if argv and argv[0] == "add":
-            cmd_add(argv[1:])
-            return
         if argv and argv[0] == "resume":
             # `arity resume [session]`: fold a journal back into a live kernel and keep going.
             unfinished = store.unfinished()
@@ -300,27 +316,38 @@ def ask_pick(n: int) -> int | None:
     return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
 
 
-def cmd_add(args: list[str]) -> None:
+ADD_USAGE = (
+    'usage: arity add bot <name> ["description"] [--role <role>] [--tools t1,t2] [--skills s1,s2]',
+    '       arity add tool <name> ["description"]',
+)
+
+
+def _print_add_usage(*, file: Any = sys.stdout) -> None:
+    for line in ADD_USAGE:
+        print(line, file=file)
+
+
+def cmd_add(args: list[str]) -> int:
     """Subcommand: `arity add bot <name> ["description"] ...` or `arity add tool <name> ["description"]`."""
-    if not args:
-        print('usage: arity add bot <name> ["description"] [--role <role>] [--tools t1,t2] [--skills s1,s2]')
-        print('       arity add tool <name> ["description"]')
-        return
+    if not args or args[0] in {"--help", "-h"}:
+        _print_add_usage()
+        return 0
 
     kind = args[0]
     rest = args[1:]
     if kind == "bot":
-        _add_bot(rest)
-    elif kind == "tool":
-        _add_tool(rest)
-    else:
-        print(f"unknown kind '{kind}'. Use 'bot' or 'tool'.")
+        return _add_bot(rest)
+    if kind == "tool":
+        return _add_tool(rest)
 
+    print(f"unknown kind '{kind}'. Use 'bot' or 'tool'.", file=sys.stderr)
+    _print_add_usage(file=sys.stderr)
+    return 2
 
-def _add_bot(args: list[str]) -> None:
-    if not args:
-        print('usage: arity add bot <name> ["description"] [--role <role>] [--tools t1,t2] [--skills s1,s2]')
-        return
+def _add_bot(args: list[str]) -> int:
+    if not args or args[0] in {"--help", "-h"}:
+        _print_add_usage()
+        return 0
 
     name = args[0]
     role = name
@@ -365,12 +392,13 @@ def _add_bot(args: list[str]) -> None:
     if missing_tools:
         print(f"warning: tools missing schemas: {', '.join(missing_tools)}. Run 'arity add tool <name>' to define them.")
     print(f"ok  added @{name} (role: {role}, tools: {tools})")
+    return 0
 
 
-def _add_tool(args: list[str]) -> None:
-    if not args:
-        print('usage: arity add tool <name> ["description"]')
-        return
+def _add_tool(args: list[str]) -> int:
+    if not args or args[0] in {"--help", "-h"}:
+        _print_add_usage()
+        return 0
 
     name = args[0]
     desc = args[1] if len(args) > 1 else f"The {name} tool."
@@ -400,7 +428,8 @@ def _add_tool(args: list[str]) -> None:
     runner_file.write_text(runner_code, encoding="utf-8")
 
     print(f"ok  scaffolded tool {name}:\n      - library/tools/{name}.json\n      - library/tools/{name}.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
