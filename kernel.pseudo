@@ -1,0 +1,240 @@
+# kernel.pseudo — single-file harness kernel (under 1,000 lines)
+# Goals: #1 superparallel, #2 natural recursion / classifier, #3 open synth,
+# #4 minimal memory / multiplex, #5 persona + memory via grades, #6 pairing,
+# #7 minimal terminal UI.
+
+# ------------------------------------------------------------------
+# 1. DATA MODEL (tiny)
+# ------------------------------------------------------------------
+
+TYPE AgentId         = string
+TYPE ModelProvider   = enum { OPENAI, ANTHROPIC, LOCAL_SMOL, SMOLVM }
+TYPE PersonaGrade    = float [0,1]
+TYPE MemoryBucket    = map[AgentId, list[string]]   # grades over time
+TYPE ButtonResult    = { agent: AgentId; code: string; score: float }
+TYPE ChannelMsg      = { from: AgentId; to: AgentId; payload: string }
+
+STRUCT Agent:
+    id: AgentId
+    provider: ModelProvider
+    persona: string              # e.g. "scorer", "designer", "synth"
+    prompt_template: string      # base prompt injected
+    memory: list[string]         # persistent grades / notes
+    open_channel: bool           # #3: can talk after 1 run
+
+STRUCT Runtime:
+    agents: list[Agent]
+    tasks: list[Task]
+    results: list[ButtonResult]
+    channels: list[ChannelMsg]
+    grades: MemoryBucket         # #5: grades feed persona memory
+    multiplexer: MuxHandle       # #4: multiplex models on 1 stream
+
+STRUCT Task:
+    name: string
+    prompt: string
+    parallelism: int             # #1: how many copies
+    branch_loom: bool            # #2: spawn recursive sub-runtimes
+    synth_mode: enum { PICK, CHAT, MERGE }
+
+# ------------------------------------------------------------------
+# 2. RUNTIME CORE — LOOM-STYLE PARALLEL (#1, #2)
+# ------------------------------------------------------------------
+
+FUNCTION spawn_loom(task: Task, parent: Runtime) -> list[Runtime]:
+    # Essential loop: same code runs as copies, branching loom-style.
+    outputs = []
+    FOR i IN 0 .. (task.parallelism - 1):
+        sub = clone_runtime(parent)           # shallow copy, new AgentIds
+        sub.agents = inject_personas(sub.agents)
+        outputs.append(sub)
+    RETURN outputs
+
+FUNCTION inject_personas(agents: list[Agent]) -> list[Agent]:
+    # #6 automatic pairing: task name -> persona map lookup.
+    FOR a IN agents:
+        a.persona = pair_by_task(a.id, "button_task")
+        a.prompt_template = load_template(a.persona)
+    RETURN agents
+
+FUNCTION run_parallel(task: Task) -> list[ButtonResult]:
+    # Two independent modes: copies (loom) or independent models.
+    loom_runtimes = spawn_loom(task, current_runtime)
+    results_pool = []
+    FOR rt IN loom_runtimes:
+        # Each branch runs independently; no blocking.
+        rt.execute()
+        results_pool.extend(rt.results)
+    RETURN results_pool
+
+# ------------------------------------------------------------------
+# 3. RECURSIVE SCORING — THE CLASSIFIER / SCORER (#2, #5)
+# ------------------------------------------------------------------
+
+FUNCTION score_run(sub: Runtime, task: Task) -> float:
+    # Scorer models run in parallel over outputs; not anxious.
+    scores = []
+    FOR button IN sub.results:
+        scorer_agents = spawn_loom({ name: "scorer", parallelism: 3 })
+        FOR s IN scorer_agents:
+            grade = s.evaluate_button(button, task)
+            scores.append(grade)
+        # Average grades feed memory (#5).
+        button.score = mean(scores)
+        sub.grades[button.agent] = append(sub.grades[button.agent], button.score)
+    sub.results = sort_by_score(sub.results)
+    RETURN mean([b.score FOR b IN sub.results])
+
+FUNCTION evaluate_button(scorer: Runtime, button: ButtonResult, task: Task) -> float:
+    # A classifier model looks at the button; minimal compute.
+    prompt = scorer.agents[0].prompt_template
+    # If the button matches task criteria, high grade; else low.
+    IF contains(button.code, "button") AND contains(button.code, "click"):
+        grade = 0.9 + random_noise(0.05)
+    ELSE:
+        grade = 0.3 + random_noise(0.05)
+    RETURN grade
+
+# ------------------------------------------------------------------
+# 4. OPEN COMMUNICATION & SYNTHESIS (#3)
+# ------------------------------------------------------------------
+
+FUNCTION open_floor(subs: list[Runtime], task: Task) -> string:
+    # After 1 independent run, open channel. Agents talk to each other.
+    final_channel = []
+    FOR sub IN subs:
+        IF NOT sub.agents[0].open_channel:
+            sub.agents[0].open_channel = True
+        msg = build_message(sub.results[0], sub.agents[0].persona)
+        final_channel.append({ from: sub.agents[0].id; payload: msg })
+
+    # Bounce ideas: loop until compromise or max turns.
+    FOR turn IN 1 .. 3:
+        FOR agent_in_sub IN subs:
+            agent_in_sub.agents[0].memory.extend(final_channel)
+        # Compromise synthesis by cherry-picking best parts or human override.
+        synthesized = synthesize_by_cherry_pick(final_channel)
+    RETURN synthesized
+
+FUNCTION synthesize_by_cherry_pick(messages: list[ChannelMsg]) -> string:
+    # Human or scorer picks best parts.
+    best_parts = []
+    FOR m IN messages:
+        IF score_text(m.payload) > 0.8:
+            best_parts.append(m.payload)
+    IF best_parts IS EMPTY:
+        RETURN messages[0].payload   # fallback
+    RETURN merge_strings(best_parts)
+
+FUNCTION build_message(result: ButtonResult, persona: string) -> string:
+    # Agent communicates its output openly.
+    RETURN f"Agent {persona} produced: {result.code[:200]} (score {result.score:.2f})"
+
+# ------------------------------------------------------------------
+# 5. MEMORY & PERSONA EVOLUTION (#5)
+# ------------------------------------------------------------------
+
+FUNCTION evolve_persona(agent: Agent, grades: MemoryBucket, cycles: int) -> Agent:
+    # Grades over time build persona; persona changes slowly.
+    history = grades.get(agent.id, [])
+    IF len(history) > 0:
+        avg = mean(history[-cycles:])
+        IF avg < 0.4:
+            agent.persona = "cautious_debugger"
+        ELIF avg > 0.85:
+            agent.persona = "confident_scorer"
+        ELSE:
+            agent.persona = "balanced_designer"
+    agent.memory.extend([f"grade_cycle_{cycles}: {avg}"])
+    RETURN agent
+
+# ------------------------------------------------------------------
+# 6. MULTIPLEXING & MINIMAL MEMORY (#4)
+# ------------------------------------------------------------------
+
+TYPE MuxHandle:
+    streams: map[AgentId, byte_stream]
+    buffer_pool: list[byte_array]       # reused buffers
+
+FUNCTION init_mux() -> MuxHandle:
+    # Multiplex model streams; reuse memory pools.
+    mux = MuxHandle()
+    mux.streams = {}
+    mux.buffer_pool = [allocate_buffer(1024) FOR _ IN 0..10]
+    RETURN mux
+
+FUNCTION send_via_mux(mux: MuxHandle, agent_id: AgentId, payload: string):
+    stream = mux.streams.get(agent_id, create_stream())
+    # Write to multiplexed channel; minimal copy.
+    stream.write(compress(payload))
+
+# ------------------------------------------------------------------
+# 7. TERMINAL UI — EXTREMELY MINIMAL (#7)
+# ------------------------------------------------------------------
+
+FUNCTION draw_terminal(runtime: Runtime):
+    # Minimal terminal visualization of parallel work.
+    PRINT "=== KERNEL STATE ==="
+    PRINT f"Agents: {len(runtime.agents)} | Tasks: {len(runtime.tasks)}"
+    PRINT f"Results: {len(runtime.results)} | Grades: {len(runtime.grades)}"
+    PRINT "--- Active Channels ---"
+    FOR ch IN runtime.channels:
+        PRINT f"  {ch.from} -> {ch.to}: {ch.payload[:60]}"
+    PRINT "--- Scoreboard ---"
+    FOR r IN runtime.results:
+        PRINT f"  {r.agent}: score {r.score:.2f} | {r.code[:40]}"
+
+FUNCTION draw_loom_tree(subs: list[Runtime], depth: int):
+    # Visualize loom branching.
+    prefix = "  " * depth + "+--"
+    FOR s IN subs:
+        PRINT f"{prefix} branch {s.agents[0].id} (provider {s.agents[0].provider})"
+        IF depth < 4:
+            draw_loom_tree(s.sub_runtimes, depth + 1)
+
+# ------------------------------------------------------------------
+# 8. MAIN ENTRY POINT
+# ------------------------------------------------------------------
+
+FUNCTION main():
+    # Initialize minimal runtime with multiplex.
+    mux = init_mux()
+    base_agents = [
+        Agent(id="a1", provider=LOCAL_SMOL, persona="scorer", open_channel=False),
+        Agent(id="a2", provider=OPENAI, persona="designer", open_channel=False),
+        Agent(id="a3", provider=ANTHROPIC, persona="synth", open_channel=False)
+    ]
+    runtime = Runtime(agents=base_agents, tasks=[], results=[], grades={}, multiplexer=mux)
+
+    # Example task: make a button.
+    task = Task(name="button_task", prompt="make a button", parallelism=3, branch_loom=True, synth_mode=CHAT)
+    runtime.tasks.append(task)
+
+    # #1 Parallel / superparallel execution.
+    results = run_parallel(task)
+    runtime.results = results
+
+    # #2 Recursive scoring (scorer / classifier) runs in parallel.
+    score_run(runtime, task)
+
+    # #3 Open floor after 1 independent run; synthesize.
+    synthesized_button = open_floor([runtime], task)
+    PRINT f"SYNTHESIZED OUTPUT: {synthesized_button[:200]}"
+
+    # #5 Memory update.
+    FOR a IN runtime.agents:
+        evolve_persona(a, runtime.grades, cycles=1)
+
+    # #6 Pairing already injected at spawn.
+    # #4 Mux reused; pool cleared.
+    mux.buffer_pool = [allocate_buffer(1024) FOR _ IN 0..5]  # trim
+
+    # #7 UI.
+    draw_terminal(runtime)
+    draw_loom_tree([runtime], depth=0)
+
+    RETURN runtime
+
+IF __name__ == "kernel":
+    final = main()
+    PRINT "Kernel complete. Lines < 1000. Memory minimal. Loom branched."

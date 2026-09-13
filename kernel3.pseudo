@@ -1,0 +1,51 @@
+# kernel3.pseudo — scaffold from kernel2, grafted with sysprompt, history, minimal tools
+# Lessons from subagent dogfood: concrete contracts, file handoffs, no hidden branches.
+
+# Tools (minimal contract): open bash + 1 message teammates tool
+TYPE BashCall = { cmd: string; result: string; exit_code: int }
+TYPE TeammateMsg = { to: AgentId; payload: string; response_file: string }
+
+# Sysprompt embedded in Runtime (not separate framework)
+STRUCT Runtime:
+    agents: list[Agent]
+    grades: MemoryBucket
+    sysprompt: string              # #sys: rules, non-goals, persona constraints
+    chat_history: list[string]     # latest N only (minimal memory)
+    multiplexer: MuxHandle
+    # Tools registry: each agent has a handle; same loop applies.
+    bash_handle: BashCall | null
+    teammate_channel: TeammateMsg | null
+
+FUNCTION loop(input: Runtime | list[Runtime] | ChannelMsg) -> ButtonResult:
+    IF isinstance(input, list):
+        # Loom: identical objects run in parallel; file-based handoff.
+        outputs = []
+        FOR sub IN input:
+            outputs.append(loop(sub))
+        RETURN merge(outputs)
+    IF isinstance(input, ChannelMsg):
+        # Open floor synthesis; same loop, same non-anxious classifier.
+        RETURN synthesize_by_cherry_pick([input])
+    # Base: single Runtime executes with sysprompt + chat + minimal tools.
+    # Tools are NOT special branches — they are data fields on Runtime.
+    IF input.bash_handle IS NOT null:
+        input.bash_handle.result = execute_bash(input.bash_handle.cmd)
+    IF input.teammate_channel IS NOT NULL:
+        # File-based handoff: write response to file (like subsub_commit.md).
+        write_file(input.teammate_channel.response_file, input.teammate_channel.payload)
+    # Main agent execution, informed by sysprompt and latest chat.
+    prompt = input.sysprompt + "\nHistory (last 3):\n" + join(input.chat_history[-3:], "\n")
+    results = [execute_agent(a, prompt) FOR a IN input.agents]
+    input.results = results
+    FOR r IN results:
+        input.grades[r.agent] = append(input.grades.get(r.agent, []), r.score)
+        input.chat_history.append(f"{r.agent}: score {r.score:.2f}")
+        # Trim history to minimal memory footprint (#4).
+        IF len(input.chat_history) > 10:
+            input.chat_history = input.chat_history[-10:]
+    RETURN results[0]
+
+# Non-goals (explicit boundary, from review lesson):
+# - No full chat framework; only teammate message file.
+# - No complex tool registry; bash handle is optional.
+# - Recursion remains implicit (nested Runtime input), not explicit call.

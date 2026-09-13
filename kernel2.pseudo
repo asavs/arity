@@ -1,0 +1,39 @@
+# kernel2.pseudo — single recursive loop, no awareness of recursion
+# The loop receives an object identical to itself; recursion is in the data.
+
+STRUCT Runtime:
+    agents: list[Agent]
+    grades: MemoryBucket
+    multiplexer: MuxHandle
+
+FUNCTION loop(input: Runtime | list[Runtime] | ChannelMsg) -> ButtonResult:
+    # One function. Same shape. No separate scoring/chat branches.
+    IF isinstance(input, list):
+        # Parallel: list of identical Runtimes (loom branch).
+        outputs = [loop(sub) FOR sub IN input]
+        RETURN merge(outputs)
+    IF isinstance(input, ChannelMsg):
+        # Communication / synthesis branch: same loop, different input type.
+        RETURN synthesize_by_cherry_pick([input])
+    # Base Runtime: executes agents. Nested Runtime inside agents?
+    # If an agent's input contains a Runtime, that's the classifier.
+    results = [execute_agent(a) FOR a IN input.agents]
+    input.results = results
+    # Memory / grades updated by same loop.
+    FOR r IN results:
+        input.grades[r.agent] = append(input.grades.get(r.agent, []), r.score)
+    # If nested Runtime exists inside input (e.g. agent.memory holds sub-runtime),
+    # loop runs again implicitly when that sub-object is passed.
+    RETURN results[0]
+
+# The classifier/scorer is just loop() receiving a nested Runtime object.
+# The open floor is just loop() receiving a ChannelMsg.
+# The designer is just loop() receiving a flat Runtime.
+
+FUNCTION main():
+    base = Runtime(agents=[Agent(id="a1", provider=LOCAL_SMOL), ...], grades={}, multiplexer=init_mux())
+    result = loop(base)              # flat
+    nested_scorer = Runtime(agents=[Agent(id="s1", persona="scorer")], ...)  # nested identical shape
+    score = loop(nested_scorer)      # recursion: same loop, nested object
+    chat = loop(build_message(...))  # same loop, message input
+    RETURN result

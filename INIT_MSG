@@ -1,0 +1,10 @@
+init arity harness kernel
+
+- kernel.pseudo: 240-line pseudocode covering parallel loom (#1),
+  recursive scoring/classifier (#2), open synthesis (#3), multiplex
+  memory (#4), persona/grades (#5), pairing (#6), terminal UI (#7)
+- kernel2.pseudo: single recursive loop() receiving identical objects
+  (Runtime | list[Runtime] | ChannelMsg); recursion implicit in data
+
+Named repo: arity
+Author: asavs
