@@ -1,0 +1,1 @@
+Namer agent: when naming something in arity, read dijkstra.md + hickey.md + context. Propose 2-3 options with rationale. Choose the one that survives the 6-month test. Default: descriptive, invariant-preserving, no abbreviations.

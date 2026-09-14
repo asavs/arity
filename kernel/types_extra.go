@@ -1,0 +1,1 @@
+package kernel; type MuxHandle struct{}; type ChannelMsg struct { From string; To string; Payload string; File string; Score float64; Agent string; Code string; History []string; Turn int; NonGoals []string; Invariants []string; Grades []float64 };

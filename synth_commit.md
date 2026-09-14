@@ -1,4 +1,6 @@
-# Synthesized Commit — Multi-Model Collaboration (B1 + B2 + B3)
+# JUDGE VERDICT — Settled by classifier/scorer (loop + grades + open floor synthesis)
+# Method: cherry-pick best parts from B1 (thesis/gates), B2 (empirical/memory), B3 (zero-case/minimal boundary)
+# No anxiety: pure selection function, no emotional feedback loop.
 # Method: cherry-pick best parts (B1 thesis + B2 empirical + B3 zero-case)
 # Confirmed to user (A): harness/synth_commit.md
 
