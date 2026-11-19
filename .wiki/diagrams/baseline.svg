@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 496" width="680" role="img"><title>Baseline: agents, messages, reports</title><style>text{font-family:system-ui,-apple-system,sans-serif;dominant-baseline:central}.bg{fill:#FFFFFF}.th{font-size:14px;font-weight:500;fill:#2C2C2A}.ts{font-size:12px;fill:#5F5E5A}.box,.store{fill:#F1EFE8;stroke:#888780;stroke-width:.5}.frame{fill:none;stroke:#B4B2A9;stroke-width:.5}.arr{fill:none;stroke:#5F5E5A;stroke-width:1.5}.rep{fill:none;stroke:#BA7517;stroke-width:1.5}.mk{fill:none;stroke:#5F5E5A;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.mkr{fill:none;stroke:#BA7517;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.c-purple rect{fill:#EEEDFE;stroke:#534AB7;stroke-width:.5}.c-purple .th{fill:#3C3489}.c-purple .ts{fill:#534AB7}.c-teal rect{fill:#E1F5EE;stroke:#0F6E56;stroke-width:.5}.c-teal .th{fill:#085041}.c-teal .ts{fill:#0F6E56}.c-coral rect{fill:#FAECE7;stroke:#993C1D;stroke-width:.5}.c-coral .th{fill:#712B13}.c-coral .ts{fill:#993C1D}.c-amber rect{fill:#FAEEDA;stroke:#854F0B;stroke-width:.5}.c-amber .th{fill:#633806}.c-amber .ts{fill:#854F0B}@media (prefers-color-scheme:dark){.bg{fill:#1F1E1D}.th{fill:#F1EFE8}.ts{fill:#B4B2A9}.box,.store{fill:#2C2C2A;stroke:#888780}.frame{stroke:#5F5E5A}.arr,.mk{stroke:#B4B2A9}.c-purple rect{fill:#3C3489;stroke:#AFA9EC}.c-purple .th{fill:#CECBF6}.c-purple .ts{fill:#AFA9EC}.c-teal rect{fill:#085041;stroke:#5DCAA5}.c-teal .th{fill:#9FE1CB}.c-teal .ts{fill:#5DCAA5}.c-coral rect{fill:#712B13;stroke:#F0997B}.c-coral .th{fill:#F5C4B3}.c-coral .ts{fill:#F0997B}.c-amber rect{fill:#633806;stroke:#EF9F27}.c-amber .th{fill:#FAC775}.c-amber .ts{fill:#EF9F27}}</style><defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="mk" d="M2 1L8 5L2 9"/></marker><marker id="r" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="mkr" d="M2 1L8 5L2 9"/></marker></defs><rect class="bg" width="680" height="496" rx="12"/>
+<g><rect class="box" x="290" y="40" width="130" height="50" rx="8"/><text class="th" x="355.0" y="65.0" text-anchor="middle">User</text></g>
+<g class="c-purple"><rect x="290" y="150" width="130" height="50" rx="8"/><text class="th" x="355.0" y="175.0" text-anchor="middle">Secretary</text></g>
+<g class="c-purple"><rect x="290" y="260" width="130" height="50" rx="8"/><text class="th" x="355.0" y="285.0" text-anchor="middle">Project agent</text></g>
+<g class="c-purple"><rect x="290" y="370" width="130" height="50" rx="8"/><text class="th" x="355.0" y="395.0" text-anchor="middle">Subagent</text></g>
+<text class="ts" x="329" y="120" text-anchor="end">message</text>
+<text class="ts" x="381" y="120" text-anchor="start">report</text>
+<path class="arr" d="M337 94 L337 146" marker-end="url(#a)" marker-start="url(#a)"/>
+<path class="rep" d="M373 148 L373 94" marker-end="url(#r)"/>
+<path class="arr" d="M337 204 L337 256" marker-end="url(#a)" marker-start="url(#a)"/>
+<path class="rep" d="M373 258 L373 204" marker-end="url(#r)"/>
+<path class="arr" d="M337 314 L337 366" marker-end="url(#a)" marker-start="url(#a)"/>
+<path class="rep" d="M373 368 L373 314" marker-end="url(#r)"/>
+<text class="ts" x="250" y="50" text-anchor="end">to any agent</text>
+<path class="arr" d="M290 65 L256 65 L256 395 L286 395" marker-end="url(#a)"/>
+<path class="arr" d="M256 285 L286 285" marker-end="url(#a)"/>
+<text class="ts" x="452" y="50" text-anchor="start">back to user</text>
+<path class="rep" d="M420 395 L446 395 L446 65 L424 65" marker-end="url(#r)"/>
+<path class="rep" d="M420 285 L446 285"/>
+<rect class="frame" x="40" y="130" width="190" height="252" rx="12" stroke-dasharray="4 4"/>
+<text class="ts" x="52" y="148" text-anchor="start">Every message</text>
+<g><path class="box" d="M75 200 L135 172 L195 200 L135 228 Z"/><text class="th" x="135" y="200" text-anchor="middle">Live?</text></g>
+<text class="ts" x="143" y="239" text-anchor="start">yes</text>
+<path class="arr" d="M135 228 L135 248" marker-end="url(#a)"/>
+<text class="ts" x="203" y="188" text-anchor="start">no</text>
+<path class="arr" d="M195 200 L212 200 L212 343 L186 343" marker-end="url(#a)"/>
+<g class="c-coral"><rect x="52" y="252" width="130" height="50" rx="8"/><text class="th" x="117.0" y="268.0" text-anchor="middle">Steer or inbox</text><text class="ts" x="117.0" y="287.0" text-anchor="middle">No router</text></g>
+<g class="c-teal"><rect x="52" y="318" width="130" height="50" rx="8"/><text class="th" x="117.0" y="334.0" text-anchor="middle">Instantiate</text><text class="ts" x="117.0" y="353.0" text-anchor="middle">Spawn or wake</text></g>
+<rect class="frame" x="480" y="130" width="160" height="252" rx="12" stroke-dasharray="4 4"/>
+<text class="ts" x="492" y="148" text-anchor="start">Every report</text>
+<g class="c-amber"><rect x="500" y="172" width="120" height="56" rx="8"/><text class="th" x="560.0" y="191.0" text-anchor="middle">Graded</text><text class="ts" x="560.0" y="210.0" text-anchor="middle">By its recipient</text></g>
+<path class="arr" d="M560 228 L560 272" marker-end="url(#a)"/>
+<g><path class="store" d="M500 287 A60.0 10 0 0 1 620 287 L620 341 A60.0 10 0 0 1 500 341 Z"/><path class="store" style="fill:none" d="M500 287 A60.0 10 0 0 0 620 287"/><text class="th" x="560.0" y="311.0" text-anchor="middle">Leaderboard</text><text class="ts" x="560.0" y="330.0" text-anchor="middle">Blind scores</text></g>
+<path class="arr" d="M560 353 L560 452 L117 452 L117 372" marker-end="url(#a)"/>
+<text class="ts" x="338" y="470" text-anchor="middle">Feeds the next pick</text>
+</svg>
