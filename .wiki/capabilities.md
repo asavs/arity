@@ -40,3 +40,21 @@ See [Instantiate](instantiate.md): the request names a role, the registry resolv
 - **Smaller loadouts are cheaper.** Every MCP server's tool descriptions take room in the model's context.
 - **Smaller loadouts are safer.** This matters once passwords and computer use arrive (roadmap items 8 and 9).
 - **Grades attach to the model and the role together.** This is the groundwork for blind testing of skills, MCPs and personas (roadmap item 5).
+
+## Where a loadout comes from
+
+Two sources, combined at [instantiation](instantiate.md).
+
+| Source | Supplies | Example |
+|---|---|---|
+| The role | The standing kit: how this kind of agent works | An iOS developer's prompt, its usual skills |
+| The task entry | What this particular piece of work needs | Its requirements field: Xcode, computer use |
+
+The task entry is what picks the role. The router reads the entry and returns the model.
+
+**Proposal, for feedback.** Treat the role as the default kit and the task's requirements as additions and choices on top of it. The role answers "what does an iOS developer always have"; the requirements answer "what does this task need that not every iOS task does". Building the whole loadout from requirements alone would mean every task entry has to restate the basics. Whether the router returns the assembled loadout or only the model is still open.
+
+## Decided
+
+- **A child's loadout does not have to be a subset of its parent's.** A subagent can be given tools its parent lacks.
+- **The user or the secretary adds to the registry.** The expected flow: the user finds something (a post, a repository) and hands it to the secretary. If it does the same job as existing tools, it goes in beside them as another option for that slot. If it is a new kind of thing, it goes to a suitable agent for a closer look, or is discussed first.

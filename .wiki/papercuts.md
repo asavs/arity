@@ -37,7 +37,7 @@ See [Blind testing](blind-testing.md#grading) for ratings.
 ## The improvement loop
 
 1. **File.** A papercut goes into the papercut log, which is part of the [database](database.md): each papercut is attached to its agent run and task.
-2. **Triage.** Papercuts are grouped, so that forty agents hitting the same confusing error become one problem with a count, and ranked.
+2. **Triage.** A papercut becomes an entry on the [task board](work.md), attached to whatever it is about. Whoever looks after that thing picks it up, the way any task is picked up.
 3. **Propose a fix.** A change to a skill, a tool, an MCP server's configuration, or a role's system prompt.
 4. **Enter the registry as a new variant.** The fix does not replace the current version. It sits beside it.
 5. **Blind test.** The router trials the new variant against the old one, as described in [Blind testing](blind-testing.md).
@@ -48,9 +48,13 @@ The important property is step 4: a fix is never simply applied. It has to win a
 ## Design notes
 
 - **Filing must be nearly free.** If it costs an agent much time or context, agents will stop filing.
-- **Counts matter more than any one papercut.** A single complaint is an anecdote; the same complaint from many runs is a finding.
+- **Duplicates are left in.** There is no limit on filing. Many papercuts about the same thing means something upstream is not getting fixed, which is worth knowing.
+- **Papercuts about outside projects** become issues on that project's repository, held behind a "user's eyes" gate before anything is posted.
+- **Who can see a papercut** is decided by the clearance field, like any other task.
+- **A papercut does not interrupt anyone.** What may happen naturally: one agent files it, another fixes it, and the fixer tells the filer.
+- **Which fixes need a person's approval** will start as a rough rule set and be tuned.
 - **Papercuts are also a score.** How many papercuts a variant draws is a signal for the [leaderboard](model-router.md#leaderboard).
 
 ## Not settled
 
-See [Open questions](open-questions.md#papercuts).
+See [Open questions](open-questions.md).

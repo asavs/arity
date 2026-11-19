@@ -4,7 +4,9 @@
 
 Instantiation is what happens when a message arrives for an agent that is cold or not yet created. The message names a role and a task. It is the "no" branch of the "Live?" decision in the [baseline](README.md). A live agent never goes through it.
 
-Spawn (a new agent) and wake (a cold agent) are the same step.
+Spawn (a new agent) and wake (a cold agent) are the same step. A new agent can start fresh or as a fork of its parent; see [How work starts](work.md#fresh-or-fork).
+
+What triggers it is usually a task entry on the board, which says what kind of agent is wanted, what it requires and its clearance.
 
 ![The instantiate step](diagrams/instantiate.svg)
 
@@ -31,4 +33,4 @@ Every roadmap item that was expected to land here now has. The steps are stacked
 
 ## Not settled
 
-How system prompts, skills, tools and MCP servers differ between the secretary, project agents and subagents is unresolved. It is deliberately left for a second pass after more of the roadmap is designed. See [Open questions](open-questions.md#capabilities-and-roles).
+How system prompts, skills, tools and MCP servers differ between the secretary, project agents and subagents is unresolved. It is deliberately left for a second pass after more of the roadmap is designed. See [Open questions](open-questions.md).

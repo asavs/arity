@@ -19,6 +19,7 @@ Arity is a multi-agent system. A user works with a small hierarchy of agents; a 
 | Page | Covers |
 |---|---|
 | [Agents](agent-tiers.md) | The three tiers, messages, reports, delivery, agent states |
+| [How work starts](work.md) | The task board, patch-ins, and fresh agents versus forks |
 | [Instantiate](instantiate.md) | The spawn or wake step: resolve role, pick variant, load context, get computer, grant access, assemble |
 | [Database](database.md) | The graph of people, projects, tasks, agent runs and models |
 | [Computers](computers.md) | The computer pool and agent workspaces |
@@ -27,12 +28,12 @@ Arity is a multi-agent system. A user works with a small hierarchy of agents; a 
 | [Papercuts](papercuts.md) | Quick complaints and help requests, and how they become tested fixes |
 | [Model router](model-router.md) | Blind model selection, leaderboard, endpoint pool |
 | [Capabilities](capabilities.md) | Skills, MCP servers, tools, roles |
-| [Open questions](open-questions.md) | Decisions not yet made |
+| [Open questions](open-questions.md) | What is still undecided, drafted or shelved |
 | [Roadmap](roadmap.md) | Features in the order they are being designed |
 
 ## Status
 
-Roadmap items 1 to 9 are designed, items 8 and 9 only as proposals. The baseline covers who talks to whom; [Instantiate](instantiate.md) covers how an agent is built. Item 10 (slot-in third-party pieces) is next.
+Roadmap items 1 to 9 are designed. A first round of answers to the open questions has been written into the pages. The baseline covers who talks to whom; [Instantiate](instantiate.md) covers how an agent is built. Item 10 (slot-in third-party pieces) is next.
 
 A second pass is planned once more of the roadmap is designed, mainly to settle how prompts, skills, tools and MCP servers differ between the three tiers.
 

@@ -13,9 +13,13 @@ Features in the order they are being designed. The baseline diagram shows who ta
 | 5 | Blind A/B testing of models, harnesses, skills, MCPs and personas. A model that creates a subagent may be hooked to grade its results | Designed | [Blind testing](blind-testing.md) |
 | 6 | Papercuts: models and users can quickly complain or ask for help, feeding self-improvement | Designed | [Papercuts](papercuts.md) |
 | 7 | Database: todos, plus profiles for people and models, as a graph-structured wiki | Designed | [Database](database.md) |
-| 8 | Cloud computers | Proposed, needs your input | [Computers](computers.md) |
-| 9 | Passwords and auth for models doing computer use | Proposed, needs your input | [Access](access.md) |
+| 8 | Cloud computers | Designed | [Computers](computers.md) |
+| 9 | Passwords and auth for models doing computer use | Designed | [Access](access.md) |
 | 10 | Slot-in third-party pieces: cua driver, anima, optmem, pi-durable, computer-use | Next | |
+
+## Added after the first pass
+
+**How work starts.** The secretary can write tasks to the board for agents to pick up, or patch the user in to an agent with a brief already filled in. Also the choice between a fresh agent and a fork. See [How work starts](work.md).
 
 ## Order
 

@@ -152,6 +152,39 @@ def baseline():
     svg("baseline", 496, "Baseline: agents, messages, reports", p)
 
 
+def work():
+    p = [
+        box("box", 40, 110, 150, 56, "User"),
+        line([(194, 138), (261, 138)], start=True),
+        box("purple", 265, 110, 150, 56, "Secretary", "Chooses a route"),
+        txt(413, 54, "writes a task", anchor="middle"),
+        line([(340, 110), (340, 68), (486, 68)]),
+        cyl(490, 50, 150, 42, "Task board", "In the database"),
+        line([(565, 104), (565, 186)]),
+        txt(555, 146, "wakes a good fit", anchor="end"),
+        box("purple", 490, 190, 150, 56, "Agent", "Does the work"),
+        line([(340, 166), (340, 218), (486, 218)]),
+        txt(350, 234, "patches you in"),
+        txt(350, 250, "with a brief"),
+        line([(115, 166), (115, 284), (565, 284), (565, 250)], start=True),
+        txt(340, 300, "then you talk directly", anchor="middle"),
+    ]
+    svg("work", 320, "How work starts: the board or a patch-in", p)
+
+
+def fork():
+    p = [
+        box("purple", 40, 90, 170, 56, "Parent", "Has the full context"),
+        txt(378, 54, "a child", anchor="middle"),
+        line([(214, 108), (320, 108), (320, 68), (436, 68)]),
+        txt(378, 154, "a sibling", anchor="middle"),
+        line([(214, 128), (320, 128), (320, 168), (436, 168)]),
+        box("purple", 440, 40, 200, 56, "Fresh agent", "Knows only the brief"),
+        box("purple", 440, 140, 200, 56, "Fork", "Knows what the parent knows"),
+    ]
+    svg("fork", 230, "Fresh agent or fork", p)
+
+
 def instantiate():
     # (title, subtitle, store read by this step or None)
     steps = [
@@ -303,7 +336,7 @@ def papercuts():
         line([(204, 68), (256, 68)]),
         cyl(260, 50, 140, 40, "Papercut log"),
         line([(404, 68), (456, 68)]),
-        box("amber", 460, 40, 180, 56, "Triage", "Group and rank"),
+        box("amber", 460, 40, 180, 56, "Triage", "Onto the task board"),
         line([(550, 96), (550, 186)]),
         box("amber", 460, 190, 180, 56, "Propose a fix", "Skill, tool or prompt"),
         line([(456, 218), (404, 218)]),
@@ -385,6 +418,8 @@ def roles():
 
 if __name__ == "__main__":
     baseline()
+    work()
+    fork()
     instantiate()
     database()
     computers()

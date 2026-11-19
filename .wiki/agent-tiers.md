@@ -6,16 +6,24 @@
 
 | Tier | Lifetime | Job |
 |---|---|---|
-| Secretary | Persistent | The user's main point of contact. Hands work to project agents. |
-| Project agent (name pending, possibly "project manager") | Long-lived, per project | Oversees one project over a long time. Spawns subagents for tasks. |
-| Subagent | Short-lived, per task | Does one task and reports back. |
+| Secretary | Persistent | The user's main point of contact. Writes tasks to the board, or patches the user in to an agent |
+| Project agent (name pending) | Long-lived, per project | Oversees one project over a long time. Creates subagents for tasks |
+| Subagent | Short-lived, per task | Does one task and reports back |
 
 The tier says where an agent sits and how long it lives. What it is good at is its [role](capabilities.md#roles), which is separate.
+
+## One mechanism for everyone
+
+The user is treated as one more participant, not a special case. The same messages, the same delivery rules and the same pages in the database apply to people and to models. The aim is one small recursive mechanism, not a separate path for each kind of participant.
+
+This is expected to be built on a single durable harness (pi-durable).
 
 ## Who can talk to whom
 
 - The user can talk to the secretary, any project agent, or any subagent directly.
 - Any agent can message any other agent. The baseline diagram draws only neighbours and the user's direct line; other pairs work the same way.
+
+How work first reaches an agent is covered in [How work starts](work.md).
 
 ## Two calls
 
@@ -23,15 +31,17 @@ Everything between the user and agents, and between agents, is one of two calls.
 
 ### Message
 
-A message can go in either direction. How it is delivered depends on the recipient's state:
+A message can go in either direction, including from a child to its parent. How it is delivered depends on the recipient's state:
 
 | Recipient state | Delivery | Instantiated first |
 |---|---|---|
-| Live (running now) | **Steer**: interrupts immediately. **Inbox**: read at the end of the current turn. The sender chooses. | No. A live agent keeps its model. |
-| Cold (cache expired) | The agent is woken, then receives the message. | Yes, see [Instantiate](instantiate.md) |
-| Not created | The agent is spawned, then receives the message. | Yes |
+| Live (running now) | **Steer**: interrupts immediately. **Inbox**: read at the end of the current turn. The sender chooses | No. A live agent keeps its model |
+| Cold (cache expired) | The agent is woken, then receives the message | Yes, see [Instantiate](instantiate.md) |
+| Not created | The agent is created, then receives the message | Yes |
 
 So spawn, wake, steer and inbox are not four separate features. They are the four outcomes of delivering a message.
+
+**The user's messages follow the same rule.** The user also chooses steer or inbox.
 
 Rough guidance for the sender: steer when the recipient is about to waste work; inbox for everything else.
 
@@ -39,14 +49,14 @@ Rough guidance for the sender: steer when the recipient is about to waste work; 
 
 A report goes one way: up, to whoever asked for the work. That is the parent agent, or the user when the user messaged the agent directly.
 
-Every report is graded by its recipient, and the grade goes to the [leaderboard](model-router.md#leaderboard).
+Reports are graded. See [Blind testing](blind-testing.md#grading).
 
 ## Agent lifecycle
 
-1. **Not created** to **Live**: [instantiated](instantiate.md) (spawn).
+1. **Not created** to **Live**: [instantiated](instantiate.md), as a fresh agent or a fork.
 2. **Live** to **Live**: receives steer or inbox messages. No instantiation, so no model router.
 3. **Live** to **Cold**: its cache expires.
-4. **Cold** to **Live**: [instantiated](instantiate.md) again (wake).
+4. **Cold** to **Live**: [instantiated](instantiate.md) again (wake). Any tier can be woken, including subagents.
 5. **Live** to **Finished**: the task is done; it writes its report.
 
 ## What an agent is made of

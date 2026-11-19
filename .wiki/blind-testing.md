@@ -13,7 +13,7 @@ A **variant** is one choice for each of five things:
 | Dimension | What it is |
 |---|---|
 | Model | Which model runs the agent |
-| Harness | The program wrapped around the model: its loop, context handling and tool calling |
+| Harness | The program wrapped around the model: its loop, context handling and tool calling. Swappable per agent. Starting set: Claude Code, Codex and agy for their own models, plus pi |
 | Skills | Which version of a skill, or which set of skills |
 | MCP servers | Which servers, or which version of one |
 | Persona | Which version of the role's system prompt |
@@ -37,11 +37,15 @@ Grading is a rating, and it can happen on any turn, not only when an agent finis
 
 ![Ratings in both directions](diagrams/ratings.svg)
 
-**The basic rating is a number from 1 to 5.** Whoever asked rates whoever answered. It can be as simple as "rate the agent on a scale of 1 to 5". A short reason is optional.
+**The basic rating is one question:** "How did this ___ do?", answered with a number from 1 to 5 and a paragraph. Whoever asked rates whoever answered. This is the starting form. It can change over time and differ by task.
 
-**When it happens.** On any exchange: a single reply, or a final report. A long-running agent collects many ratings over its life; a short subagent may collect one.
+**When it happens.** On any exchange: a single reply, or a final report. A long-running agent collects many ratings over its life; a short subagent may collect one. It does not have to be every turn, and how often is not fixed.
 
-**Ratings go both ways.** The doer also rates the asker. A subagent rates the parent that briefed it, and an agent rates the user it worked for, and can write a short report about them. These go to the person and model pages in the [database](database.md), not to the variant leaderboard, though a child's rating of its parent is also evidence about the parent's variant.
+**Ratings go both ways, later.** Not in the first version. The doer also rates the asker. A subagent rates the parent that briefed it, and an agent rates the user it worked for, and can write a short report about them. These go to the person and model pages in the [database](database.md), not to the variant leaderboard, though a child's rating of its parent is also evidence about the parent's variant.
+
+**Exit reports.** An idea for later: when an agent's cache is about to go cold, it writes a short report on how the work went. That would cover its view of the user, and would also catch papercuts it never logged.
+
+**Who grades the secretary and project agents.** The user, and possibly the secretary for project agents.
 
 **The grading hook.** When an agent creates a subagent, it is hooked to rate what comes back. Whether that rating must happen before the parent carries on is not decided; see the trade-off below.
 
@@ -60,7 +64,7 @@ See [Model router](model-router.md#leaderboard) for the full list of signals.
 | Cost | A little time and tokens on every exchange | Nothing unless a rating is given |
 | Risk | Graders learn to answer by rote | The grader may be cold or finished by the time the outcome is known |
 
-A possible middle: a required quick 1 to 5 at the moment of receipt, which is cheap, plus the option to revise it later when the outcome is known. Not decided.
+Current lean: block, but only for a one-sentence review and a 1 to 5. Still to be discussed. There are also many deterministic ways to grade, such as gates, so less depends on this than it first appears.
 
 ## What varies in a trial
 
@@ -68,14 +72,14 @@ A role can name a **slot**: something the agent needs that several interchangeab
 
 ![Slots with interchangeable options](diagrams/slots.svg)
 
-The router picks one option per slot. With many slots there is a lot to trial, so a run may differ from the defaults in more than one place. Whether to limit that is not decided:
+The router picks one option per slot. With many slots there is a lot to trial, so a run may differ from the defaults in more than one place. That is accepted. Because many things are always being trialled, the data ends up spread across combinations anyway. The trade-off, for reference:
 
 - **One change per run** makes it obvious what caused a score, but learns slowly when there are many slots.
 - **Several changes per run** learns faster. Each option's score is then its average across all the runs it appeared in, which works when there are enough runs and misleads when there are few.
 
 ## Keeping it honest
 
-- **The grader never sees the variant.** That is the point of blind.
+- **The grader does not see the variant while grading.** Afterwards it is revealed, and there is a reveal option at any time for the curious.
 - **Record who graded.** The grading agent is itself a hidden variant. Models tend to favour output from their own family, so the grader's variant is stored with the grade.
 - **Know what changed.** The trial record lists every way the run differed from the role's defaults, so a good model paired with a bad tool is not blamed for the tool.
 - **Score per role, tier and task type.** No single global ranking.
@@ -83,10 +87,11 @@ The router picks one option per slot. With many slots there is a lot to trial, s
 
 ## Limits on experimenting
 
-- **An exploration budget.** Only a set share of runs try an unproven variant.
+- **An exploration budget that follows supply.** More exploring when tokens are plentiful or a quota is about to reset, less when they are scarce. Local models count only while GPUs on the user's network of computers are free.
+- **Every option gets a turn.** A simple guard against cheap options crowding out the rest: rotate through options round-robin, so none is starved of runs.
 - **Not on everything.** High-priority or high-clearance tasks should use the best known variant. The task's priority and clearance fields in the [database](database.md) decide this.
 - **A minimum sample** before a variant's score affects picks.
 
 ## Not settled
 
-See [Open questions](open-questions.md#blind-testing).
+See [Open questions](open-questions.md).

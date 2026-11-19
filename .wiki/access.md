@@ -4,7 +4,7 @@
 
 Agents that operate computers need to sign in to things. This page covers how they get passwords and other credentials without those secrets ever passing through a model.
 
-Like [Computers](computers.md), this is a proposal built from a one-line roadmap entry.
+Parts of this page began as a proposal. The points under "Decided" below have since been confirmed.
 
 ![Using a credential without seeing it](diagrams/access.svg)
 
@@ -56,4 +56,19 @@ An agent that finds it lacks access files a [papercut](papercuts.md) as a reques
 
 ## Not settled
 
-See [Open questions](open-questions.md#access).
+See [Open questions](open-questions.md).
+
+## Decided
+
+- **Clearance has two levels for now: local models only, or cloud models allowed.**
+- **Clearance covers people as well as models.** That is what will allow sharing with friends or coworkers later.
+- **Models' own reluctance counts.** Some models are uncomfortable with some tasks. Routing should be considerate of that and send the task elsewhere.
+- **Agents can use sessions you are already signed in to.** The secretary adding to your calendar is the plain example.
+- **One-time codes, passkeys and anything needing your device** block the task on you, as a "user's eyes" gate.
+- **The approval list starts intuitive** and is adjusted if it proves too loose or too tight.
+- **A grant is kept for a short while after an agent goes cold,** where that is safe, so waking is quick.
+- **Protection for what is on screen** will be built.
+
+## The vault: build or wrap
+
+Building a password manager from scratch is on the table. A recommendation against doing all of it: the part that stores and encrypts secrets is where a small mistake is most costly and least visible, and well-tested tools already exist for it (the operating system's keychain, an existing password manager with a command line, or an encrypted file store). The part worth building is the access broker: the grants, the scoping, the logging and the filling-in. That is the part specific to Arity, and it never has to handle a secret for longer than the moment of use.

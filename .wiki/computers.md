@@ -4,7 +4,7 @@
 
 Some tasks need a machine to work on: one with Xcode, one with a GPU, or one with a screen an agent can operate. The computer pool is where those machines come from.
 
-This page is thinner than the others. The roadmap entry for it was two words, so most of what follows is a proposal to react to, not a record of decisions.
+Parts of this page began as a proposal. The points under "Decided" below have since been confirmed.
 
 ![Matching a task to a computer](diagrams/computers.svg)
 
@@ -46,4 +46,13 @@ This mirrors the [agent lifecycle](agent-tiers.md#agent-lifecycle). It matters m
 
 ## Not settled
 
-See [Open questions](open-questions.md#computers).
+See [Open questions](open-questions.md).
+
+## Decided
+
+- **Your own machines are in the pool.**
+- **A subagent generally works on its project's computer.** It can differ by task, but sharing is the default.
+- **The ideal split is two machines:** the agent runs on one cloud computer and carries out its commands on another, so that a mistake or a bad instruction cannot reach the machine the agent itself lives on.
+- **If nothing in the pool matches, a cloud machine is obtained.** The vault holds a key for procuring machines and GPUs, so in practice a match can always be made.
+- **The user sets the spending limit.**
+- **Workspaces and worktrees are cleaned up** when no longer needed, not kept forever.

@@ -65,3 +65,10 @@ One shared pool of every way to reach a model, used by all agents.
 ## Choosing
 
 Picking a model is a multi-armed bandit problem: mostly use the best-known option, and spend some traffic on uncertain ones to keep learning. Thompson sampling with cost as a constraint fits this design.
+
+## Decided
+
+- **Subscriptions are shared by one person** across their own computers, for now.
+- **Local models are available only when GPUs are free** on the user's network of computers. The endpoint pool has to know that state.
+- **A simple guard keeps cheap options from taking all the traffic:** rotate through options round-robin so each gets runs.
+- **How much to explore follows supply:** more when tokens are plentiful or a quota is about to reset.
