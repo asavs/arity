@@ -7,16 +7,14 @@
 | Tier | Lifetime | Job |
 |---|---|---|
 | Secretary | Persistent | The user's main point of contact. Writes tasks to the board, or patches the user in to an agent |
-| Project agent (name pending) | Long-lived, per project | Oversees one project over a long time. Creates subagents for tasks |
+| Project agent | Long-lived, per project | Oversees one project over a long time and creates subagents for its tasks. Each is named after its project |
 | Subagent | Short-lived, per task | Does one task and reports back |
 
 The tier says where an agent sits and how long it lives. What it is good at is its [role](capabilities.md#roles), which is separate.
 
 ## One mechanism for everyone
 
-The user is treated as one more participant, not a special case. The same messages, the same delivery rules and the same pages in the database apply to people and to models. The aim is one small recursive mechanism, not a separate path for each kind of participant.
-
-This is expected to be built on a single durable harness (pi-durable).
+The user is one more participant, not a special case. The same messages, the same delivery rules and the same pages in the database apply to people and to models. The aim is one small recursive mechanism, built on a single durable harness (pi-durable).
 
 ## Who can talk to whom
 
@@ -39,11 +37,11 @@ A message can go in either direction, including from a child to its parent. How 
 | Cold (cache expired) | The agent is woken, then receives the message | Yes, see [Instantiate](instantiate.md) |
 | Not created | The agent is created, then receives the message | Yes |
 
-So spawn, wake, steer and inbox are not four separate features. They are the four outcomes of delivering a message.
+Spawn, wake, steer and inbox are the four outcomes of delivering a message, not four separate features.
 
-**The user's messages follow the same rule.** The user also chooses steer or inbox.
+The user's messages follow the same rule: the user also chooses steer or inbox.
 
-Rough guidance for the sender: steer when the recipient is about to waste work; inbox for everything else.
+Steer when the recipient is about to waste work. Use the inbox for everything else.
 
 ### Report
 
@@ -51,16 +49,18 @@ A report goes one way: up, to whoever asked for the work. That is the parent age
 
 Reports are graded. See [Blind testing](blind-testing.md#grading).
 
+A report that arrives for a parent that has gone cold [gets no special handling](open-questions.md#reports-to-a-cold-parent).
+
 ## Agent lifecycle
 
 1. **Not created** to **Live**: [instantiated](instantiate.md), as a fresh agent or a fork.
 2. **Live** to **Live**: receives steer or inbox messages. No instantiation, so no model router.
 3. **Live** to **Cold**: its cache expires.
-4. **Cold** to **Live**: [instantiated](instantiate.md) again (wake). Any tier can be woken, including subagents.
-5. **Live** to **Finished**: the task is done; it writes its report.
+4. **Cold** to **Live**: [instantiated](instantiate.md) again. Any tier can be woken, including subagents. Whether it keeps its previous model is [undecided](open-questions.md#model-on-wake).
+5. **Live** to **Finished**: the task is done and it writes its report.
 
 ## What an agent is made of
 
 A hidden model wrapped with a role's system prompt and a loadout of skills, MCP servers and tools. See [Instantiate](instantiate.md) for how it is built and [Capabilities](capabilities.md) for what the parts are.
 
-How the prompt and loadout differ between the three tiers is not settled yet.
+How the prompt and loadout differ between the three tiers is [undecided](open-questions.md#tier-differences).

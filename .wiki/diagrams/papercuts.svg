@@ -3,7 +3,7 @@
 <path class="arr" d="M204 68 L256 68" marker-end="url(#a)"/>
 <g><path class="store" d="M260 50 A70.0 10 0 0 1 400 50 L400 90 A70.0 10 0 0 1 260 90 Z"/><path class="store" style="fill:none" d="M260 50 A70.0 10 0 0 0 400 50"/><text class="th" x="330.0" y="76.0" text-anchor="middle">Papercut log</text></g>
 <path class="arr" d="M404 68 L456 68" marker-end="url(#a)"/>
-<g class="c-amber"><rect x="460" y="40" width="180" height="56" rx="8"/><text class="th" x="550.0" y="59.0" text-anchor="middle">Triage</text><text class="ts" x="550.0" y="78.0" text-anchor="middle">Onto the task board</text></g>
+<g class="c-amber"><rect x="460" y="40" width="180" height="56" rx="8"/><text class="th" x="550.0" y="59.0" text-anchor="middle">Pick up</text><text class="ts" x="550.0" y="78.0" text-anchor="middle">From the task board</text></g>
 <path class="arr" d="M550 96 L550 186" marker-end="url(#a)"/>
 <g class="c-amber"><rect x="460" y="190" width="180" height="56" rx="8"/><text class="th" x="550.0" y="209.0" text-anchor="middle">Propose a fix</text><text class="ts" x="550.0" y="228.0" text-anchor="middle">Skill, tool or prompt</text></g>
 <path class="arr" d="M456 218 L404 218" marker-end="url(#a)"/>

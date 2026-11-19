@@ -10,51 +10,39 @@ A papercut is a quick note that something got in the way. Any agent or the user 
 
 | Kind | Example | What happens |
 |---|---|---|
-| Complaint | "This tool's error message didn't say what went wrong." "The skill told me to use a command that doesn't exist." "The brief didn't say which repo." | Logged. Nobody has to respond. |
-| Request for help | "I don't have access to the staging server." "I'm stuck and don't know who to ask." | Logged, and also sent as a [message](agent-tiers.md#message) to the parent or the user, delivered by steer or inbox like any other. |
+| Complaint | "This tool's error message didn't say what went wrong." "The skill told me to use a command that doesn't exist." "The brief didn't say which repo." | Logged. Nobody has to respond |
+| Request for help | "I don't have access to the staging server." "I'm stuck and don't know who to ask." | Logged, and also sent as a [message](agent-tiers.md#message) to the parent or the user, delivered by steer or inbox like any other |
 
-So asking for help is not a new mechanism. It is a message that also leaves a record.
+Asking for help is a message that also leaves a record.
 
 ## What a papercut records
 
-The filer writes one line. Everything else is attached automatically:
+The filer writes one line. Everything else is attached automatically: who filed it and their tier and role, the task they were on, the skill, tool or MCP server involved, and the trial record for the run, which ties the papercut to a variant without the filer knowing which.
 
-- Who filed it, and their tier and role.
-- The task they were on.
-- The skill, tool or MCP server involved, if any.
-- The trial record for the run, so the papercut is tied to a variant without the filer knowing which.
-
-## How a papercut differs from a rating
+## Papercuts and ratings
 
 | | Rating | Papercut |
 |---|---|---|
 | About | The other party in an exchange | The system: tools, skills, prompts, access, the environment |
-| Form | A number from 1 to 5 | A line of text |
+| Form | A number from 1 to 5 and a paragraph | A line of text |
 | When | When asked, after an exchange | Whenever something goes wrong |
-
-See [Blind testing](blind-testing.md#grading) for ratings.
 
 ## The improvement loop
 
-1. **File.** A papercut goes into the papercut log, which is part of the [database](database.md): each papercut is attached to its agent run and task.
-2. **Triage.** A papercut becomes an entry on the [task board](work.md), attached to whatever it is about. Whoever looks after that thing picks it up, the way any task is picked up.
+1. **File.** The papercut becomes an entry on the [task board](work.md), attached to whatever it is about.
+2. **Pick up.** Whoever looks after that thing picks it up, the way any task is picked up.
 3. **Propose a fix.** A change to a skill, a tool, an MCP server's configuration, or a role's system prompt.
-4. **Enter the registry as a new variant.** The fix does not replace the current version. It sits beside it.
-5. **Blind test.** The router trials the new variant against the old one, as described in [Blind testing](blind-testing.md).
+4. **Enter the registry as a new variant.** The fix sits beside the current version; it does not replace it.
+5. **Blind test.** The router trials the new variant against the old one, as in [Blind testing](blind-testing.md).
 6. **Keep the winner.** If the new variant scores better and draws fewer papercuts, it becomes the role's default. If not, it is dropped.
 
-The important property is step 4: a fix is never simply applied. It has to win a blind test, the same as any other variant. That keeps a confident but wrong fix from making things worse.
+A fix is never simply applied. It has to win a blind test like any other variant, which keeps a confident but wrong fix from making things worse.
 
-## Design notes
+## Rules
 
-- **Filing must be nearly free.** If it costs an agent much time or context, agents will stop filing.
-- **Duplicates are left in.** There is no limit on filing. Many papercuts about the same thing means something upstream is not getting fixed, which is worth knowing.
+- **Filing is nearly free and unlimited.** Duplicates are left in. Many papercuts about the same thing means something upstream is not getting fixed.
+- **A papercut interrupts nobody.** A request for help does, because it is also a message. Otherwise the natural course is that one agent files it, another fixes it, and the fixer tells the filer.
+- **Who can see a papercut** is set by the clearance field, as for any task.
 - **Papercuts about outside projects** become issues on that project's repository, held behind a "user's eyes" gate before anything is posted.
-- **Who can see a papercut** is decided by the clearance field, like any other task.
-- **A papercut does not interrupt anyone.** What may happen naturally: one agent files it, another fixes it, and the fixer tells the filer.
-- **Which fixes need a person's approval** will start as a rough rule set and be tuned.
-- **Papercuts are also a score.** How many papercuts a variant draws is a signal for the [leaderboard](model-router.md#leaderboard).
-
-## Not settled
-
-See [Open questions](open-questions.md).
+- **Some fixes need a person's approval** before they enter the registry. A reworded skill is low risk; a new tool or wider access is not. The rules are [still to be written](open-questions.md#approval-for-fixes).
+- **Papercuts count against a variant** in its [score](model-router.md#scores).

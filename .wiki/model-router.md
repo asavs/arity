@@ -6,69 +6,58 @@
 
 ## What it does
 
-The model router is the one place that decides which model runs an agent. It is the "Pick variant" step of [Instantiate](instantiate.md), so it runs whenever an agent is spawned or a cold agent is woken. A live agent never goes through it.
+The model router decides which model runs an agent. It is the "Pick variant" step of [Instantiate](instantiate.md), so it runs when an agent is created or a cold agent is woken. A live agent never goes through it.
 
-Beyond the model, the router can also trial a different harness, skill, MCP server or persona. See [Blind testing](blind-testing.md).
+The choice is **blind**: neither the user nor the parent agent is told which model they are working with. That keeps grades honest, because a grader cannot favour a model by name.
 
-The choice is **blind**: neither the user nor the parent agent is told which model they are talking to. This keeps grades honest, because the grader cannot favour a model by name.
+## How it chooses
 
-Before weighing anything, the router rules out models the task's clearance does not allow. See [Access](access.md#clearance-limits-the-variant).
+1. **Rule out what is not allowed.** A task's clearance can restrict it to local models. See [Access](access.md#clearance).
+2. **Balance two things for what remains:**
+   - **The right intelligence for the task**, from scores.
+   - **Spending tokens wisely**, from the endpoint pool.
 
-The router then weighs two inputs:
+The weight between the two moves with supply. When a subscription's quota is about to reset, its remaining tokens are nearly free, so cost counts for more in that moment. That shifts which model is picked. It does not change any score.
 
-- **Quality**, from the leaderboard.
-- **Cost and headroom**, from the endpoint pool.
+The router also spends some picks on options it is unsure about, to keep learning. See [Blind testing](blind-testing.md).
 
-## Leaderboard
+## Scores
 
-Filled by graded reports. It is part of the [database](database.md): scores on model pages, added up from ratings on agent runs. Each grade can combine several signals.
+A score is an average over a variant's trials, or a better statistical estimate of the same thing. Getting more runs does not raise a score; it only makes the estimate more certain.
 
-**Outcome (the main signal)**
+Scores are kept in the [database](database.md), on model pages. The baseline diagram calls this part the leaderboard.
 
-- Parent grade: a rubric score or, better, a comparison against past reports on similar tasks.
-- Acceptance: did the parent use the result, or re-spawn the same task?
-- Verifiable checks: tests pass, build is green, output matches its schema.
-- User signals: the user edits, overrides or rates a result.
-- Rework found later: a project agent discovers days afterwards that a subagent's work broke something. The leaderboard must accept late scores for this.
+What goes into a score:
+
+**Outcome**
+
+- The rating from whoever received the work.
+- Gates: tests pass, CI is green, a QA bot or the user approved. These are verifiable and count for more than a rating.
+- Whether the result was used, or the task had to be redone.
+- Rework found later, such as a project agent discovering that earlier work broke something.
 
 **Process**
 
-- Steers needed: how often the agent had to be interrupted and redirected.
-- Failed tool calls, counted separately from malformed calls.
-- Questions or escalations to the parent.
-- Report calibration: did "done" actually mean done?
+- How often the agent had to be steered.
+- Failed tool calls.
+- Papercuts filed during the run.
 
 **Efficiency**
 
-- End-to-end time, tokens or cost, number of turns.
-- Cache reuse on wake.
+- End-to-end time, tokens and cost, number of turns.
 
-**Design rules**
-
-- Keep separate scores per tier, role and task type. One global ranking will mislead.
-- Record which model did the grading. Models tend to prefer output from their own family.
-- Record why each pick was made: quality, cost or exploration. Otherwise cheap traffic looks like a preference.
-- Record the loadout alongside the model, so a good model with a bad loadout is not blamed.
+Scores are kept separately per tier, role and kind of task, since a model that is good at quick edits may be poor at running a project. Each score records which model did the grading, because models tend to favour output from their own family, and which loadout the agent had, so a good model is not blamed for a bad tool.
 
 ## Endpoint pool
 
-One shared pool of every way to reach a model, used by all agents.
+One shared pool of every way to reach a model, used by all agents. It belongs to one person and spans their computers; [sharing it](open-questions.md#sharing-with-other-people) is set aside.
 
 | Kind | Cost | Limit |
 |---|---|---|
 | API keys | Pay per token | Budget |
 | Subscriptions | Flat fee, quota that renews | Quota per period |
-| Local endpoints | Free | Hardware capacity |
+| Local endpoints | Free | Available only while a GPU on the user's network of computers is free |
 
-**Rule: spend quota that is about to renew first.** Subscription quota that resets soon is effectively free, because unused quota is lost. The router treats its cost as falling toward zero as the reset approaches. Local endpoints are free but capacity-limited. API keys are the overflow.
+**Spend quota that is about to renew first.** Unused subscription quota is lost at the reset. Local endpoints are free but limited. API keys are the overflow.
 
-## Choosing
-
-Picking a model is a multi-armed bandit problem: mostly use the best-known option, and spend some traffic on uncertain ones to keep learning. Thompson sampling with cost as a constraint fits this design.
-
-## Decided
-
-- **Subscriptions are shared by one person** across their own computers, for now.
-- **Local models are available only when GPUs are free** on the user's network of computers. The endpoint pool has to know that state.
-- **A simple guard keeps cheap options from taking all the traffic:** rotate through options round-robin so each gets runs.
-- **How much to explore follows supply:** more when tokens are plentiful or a quota is about to reset.
+Agents never see the pool's keys. The router uses them.

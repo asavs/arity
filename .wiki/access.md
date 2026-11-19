@@ -2,9 +2,7 @@
 
 [Back to index](README.md)
 
-Agents that operate computers need to sign in to things. This page covers how they get passwords and other credentials without those secrets ever passing through a model.
-
-Parts of this page began as a proposal. The points under "Decided" below have since been confirmed.
+Agents that operate computers need to sign in to things. This page covers how they use passwords and other credentials without those secrets ever passing through a model.
 
 ![Using a credential without seeing it](diagrams/access.svg)
 
@@ -19,56 +17,47 @@ Two reasons this matters more here than in most systems:
 
 ## Grants
 
-A grant is permission to use one credential. It is what the "Grant access" step of [Instantiate](instantiate.md) hands out.
+A grant is permission to use one credential. The "Grant access" step of [Instantiate](instantiate.md) hands them out.
 
 | Property | Meaning |
 |---|---|
 | Scoped | Only the credentials this task needs, decided by the role and the task's clearance |
-| Temporary | Valid while the agent is live. Withdrawn when it goes cold or finishes; reissued on wake |
-| Not transferable | A subagent cannot be given more than its parent holds |
+| Temporary | Valid while the agent is live, and kept for a short while after it goes cold so that waking is quick |
 | Logged | Every use is recorded against the agent run in the [database](database.md). The secret itself is never recorded |
 
 ## What the vault holds
 
 - Passwords for sites and apps.
-- API tokens and keys for services.
-- Signed-in sessions.
+- API tokens and keys for services, including a key for procuring cloud machines and GPUs.
+- Signed-in sessions. Agents can use sessions the user is already signed in to; the secretary adding to the user's calendar is the plain example.
 - SSH keys.
-- One-time codes, where the broker can produce them.
 
-The endpoint pool's API keys (the ones for reaching models) follow the same rule: the router uses them and agents never see them.
+Anything that needs the user's own device, such as a one-time code or a passkey, blocks the task on the user as a "user's eyes" gate.
 
-## Clearance limits the variant
+## Clearance
 
-A task's clearance does not only limit which credentials are granted. It can also limit which models may be picked. A task that touches banking might be restricted to a local model, so that nothing on screen leaves your machines. "Pick variant" therefore has to respect clearance before it optimises for anything else.
+Clearance is a field on every [task](database.md#tasks). It limits three things: which credentials are granted, which machines the task can run on, and which models can be picked.
+
+- **Two levels for models:** local models only, or cloud models allowed. A task that touches banking can be kept on local models so that nothing leaves the user's machines.
+- **It covers people as well as models,** which is what allows sharing Arity with others. Sharing itself is [set aside for now](open-questions.md#sharing-with-other-people).
+- **The router applies it first,** before weighing quality or cost.
+
+A model's own reluctance also counts. Some models are uncomfortable with some tasks, and routing sends those tasks elsewhere. How that is recorded is [still to be worked out](open-questions.md#model-reluctance).
 
 ## What the screen shows
 
-Keeping the password out of the model's context is not enough for computer use. Once signed in, the screen itself can show private information, and an agent operating a computer sees the screen. Clearance is the control for that: it decides which models are allowed to look.
+Keeping the password out of the model's context is not enough for computer use. Once signed in, the screen can show private information, and an agent operating a computer sees the screen. Clearance decides which models may look, and further protection for what is on screen is [still to be designed](open-questions.md#screen-protection).
 
 ## Approval
 
-Some actions should wait for a person even when the agent holds a grant: paying, sending, deleting, changing account settings. This is the "user's eyes" gate from the [task fields](database.md#tasks), applied to a single action instead of a whole task.
+Some actions wait for a person even when the agent holds a grant: paying, sending, deleting, changing account settings. This is the "user's eyes" gate applied to a single action. The list starts from what is intuitive and is adjusted if it proves too loose or too tight. It is [still to be written](open-questions.md#approval-for-actions).
 
 ## Asking for more
 
-An agent that finds it lacks access files a [papercut](papercuts.md) as a request for help. That reaches the parent or the user as a normal message, and either can widen the grant.
+An agent that lacks access files a [papercut](papercuts.md) as a request for help. That reaches the parent or the user as a normal message, and either can widen the grant.
 
-## Not settled
+## What to build
 
-See [Open questions](open-questions.md).
+The access broker is specific to Arity and is built: the grants, the scoping, the logging and the filling-in. It never holds a secret for longer than the moment of use.
 
-## Decided
-
-- **Clearance has two levels for now: local models only, or cloud models allowed.**
-- **Clearance covers people as well as models.** That is what will allow sharing with friends or coworkers later.
-- **Models' own reluctance counts.** Some models are uncomfortable with some tasks. Routing should be considerate of that and send the task elsewhere.
-- **Agents can use sessions you are already signed in to.** The secretary adding to your calendar is the plain example.
-- **One-time codes, passkeys and anything needing your device** block the task on you, as a "user's eyes" gate.
-- **The approval list starts intuitive** and is adjusted if it proves too loose or too tight.
-- **A grant is kept for a short while after an agent goes cold,** where that is safe, so waking is quick.
-- **Protection for what is on screen** will be built.
-
-## The vault: build or wrap
-
-Building a password manager from scratch is on the table. A recommendation against doing all of it: the part that stores and encrypts secrets is where a small mistake is most costly and least visible, and well-tested tools already exist for it (the operating system's keychain, an existing password manager with a command line, or an encrypted file store). The part worth building is the access broker: the grants, the scoping, the logging and the filling-in. That is the part specific to Arity, and it never has to handle a secret for longer than the moment of use.
+Whether the vault itself is built or is an existing tool is [undecided](open-questions.md#vault).

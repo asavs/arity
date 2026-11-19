@@ -1,0 +1,7 @@
+node_modules/
+spike/*/data/
+spike/*/logs/
+spike/*/upstream/
+spike/*/host/
+*.sqlite
+*.sqlite-*

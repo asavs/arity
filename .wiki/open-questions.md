@@ -2,38 +2,89 @@
 
 [Back to index](README.md)
 
-What is still undecided after the first pass and the first round of answers. Settled questions have moved into their pages.
+What is undecided. Each question links back to the section that raises it.
 
 ## To decide
 
-1. **Is the grading hook blocking?** Current lean: yes, but only for a one-sentence review and a 1 to 5. To be discussed. Deterministic gates reduce how much depends on it. See [Blind testing](blind-testing.md#blocking-or-not-the-trade-off).
-2. **Does a rewoken agent keep its previous model?** Keeping it helps consistency and cache reuse; picking again helps cost and exploration.
-3. **What does the router hand back: only the model, or the loadout too?** The task entry says what is wanted and the router interprets it. A proposal is in [Capabilities](capabilities.md#where-a-loadout-comes-from).
-4. **Does the registry move into the database?** Leaning yes, beside people, models and tasks.
-5. **What stores the database?** Options and a starting point are in [Database](database.md#what-stores-it).
-6. **What is the vault?** Building one is on the table. A recommendation is in [Access](access.md#the-vault-build-or-wrap).
-7. **How is "a good fit" judged** when a task could wake more than one agent?
-8. **What is the project tier called?** The answer given to this was "Arity", which may have been naming the app. To confirm.
+### Blocking ratings
 
-## To draft, then tune
+Must a parent rate a subagent's work before carrying on? Leaning yes, with only a one-sentence review and a 1 to 5 required. Raised in [Blind testing](blind-testing.md#grading).
 
-These have a direction and need a first version written down.
+| | Must rate before continuing | Can rate later, or not at all |
+|---|---|---|
+| Coverage | Every exchange gets a rating | Gaps, and biased ones: strong opinions get recorded, average ones do not |
+| Quality | A first impression, before the result has been used | Informed by whether the result worked |
+| Cost | A little time and tokens on every exchange | Nothing unless a rating is given |
+| Risk | Raters learn to answer by rote | The rater may be cold or finished by the time the outcome is known |
 
-9. **Which fixes need a person's approval before entering the registry.** A rough rule set, tuned over time.
-10. **Which actions always need a person's approval.** Start with an intuitive list; adjust if it is too loose or too tight.
-11. **Protection for what is on screen** during sensitive computer use.
-12. **How a model's own reluctance about a task is recorded and respected.** Some models are uncomfortable with some tasks, and routing should take that into account.
-13. **The fixed lists** for requirements and gates.
+### Model on wake
 
-## Shelved
+Does a woken agent keep its previous model? Keeping it helps consistency and cache reuse; picking again helps cost and exploration. Raised in [Agents](agent-tiers.md#agent-lifecycle).
 
-Set aside on purpose, to avoid overbuilding.
+### What the router returns
 
-14. **A report arriving for a cold parent.** Expected to be rare: a subagent that outlives its parent's cache is probably doing long-horizon work, not iterating. One idea kept for later: when a task's gates are all deterministic, such as tests passing, skip the model's grade so the parent need not be woken only to give one.
-15. **Agents rating users.** Not in the first version. Later it may come from mining transcripts, or from exit reports. See [Blind testing](blind-testing.md#grading).
-16. **How often a rating is asked for.** Not every turn. Not fixed yet.
-17. **Sharing Arity with other people.** For now it is one person across their own computers. Friends and coworkers may come later, which needs clearance to cover people, and a check on which providers' terms allow it.
+Does the router hand back only the model, or the assembled loadout too? Raised in [Capabilities](capabilities.md#where-a-loadout-comes-from).
 
-## Second pass
+### Registry in the database
 
-18. **How system prompts, skills, tools and MCP servers differ between the secretary, project agents and subagents.** Deliberately deferred until more of the roadmap was designed.
+Does the registry become part of the database? Leaning yes, beside people, models and tasks. Raised in [Database](database.md#what-it-holds) and [Capabilities](capabilities.md#the-three-kinds-of-capability).
+
+### Database storage
+
+What holds the database's two tables? The options are compared in [Database](database.md#storage).
+
+### Vault
+
+Is the vault built, or an existing tool? The storing and encrypting of secrets is where a small mistake is most costly and hardest to notice, and tested tools exist for it: the operating system's keychain, a password manager with a command line, an encrypted file store. That argues for wrapping one and building only the broker. Raised in [Access](access.md#what-to-build).
+
+### Judging a good fit
+
+How is "a good fit" judged when a task could wake more than one agent? Raised in [How work starts](work.md#the-board).
+
+### Tier differences
+
+How do system prompts, skills, tools and MCP servers differ between the secretary, project agents and subagents? Raised in [Agents](agent-tiers.md#what-an-agent-is-made-of).
+
+## To draft
+
+Direction is agreed; a first version needs writing.
+
+### Approval for fixes
+
+Which fixes need a person's approval before entering the registry. Raised in [Papercuts](papercuts.md#rules).
+
+### Approval for actions
+
+Which actions always need a person's approval. Raised in [Access](access.md#approval).
+
+### Screen protection
+
+Protection for what is on screen during sensitive computer use. Raised in [Access](access.md#what-the-screen-shows).
+
+### Model reluctance
+
+How a model's reluctance about a task is recorded and respected. Raised in [Access](access.md#clearance).
+
+### Requirement and gate lists
+
+The fixed lists that requirements and gates are chosen from. Raised in [Database](database.md#tasks).
+
+## Set aside
+
+Left out on purpose to avoid overbuilding.
+
+### Reports to a cold parent
+
+Expected to be rare. If it matters, one option is to skip the model's rating when a task's gates are all deterministic, so the parent is not woken only to give one. Raised in [Agents](agent-tiers.md#report).
+
+### Agents rating users
+
+Later, possibly through exit reports or by mining transcripts. Raised in [Blind testing](blind-testing.md#grading).
+
+### Rating frequency
+
+How often a rating is asked for. Raised in [Blind testing](blind-testing.md#grading).
+
+### Sharing with other people
+
+Arity is one person across their own computers. Sharing needs clearance for people and a check on which providers' terms allow it. Raised in [Access](access.md#clearance) and [Model router](model-router.md#endpoint-pool).

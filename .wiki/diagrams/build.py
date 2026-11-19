@@ -336,7 +336,7 @@ def papercuts():
         line([(204, 68), (256, 68)]),
         cyl(260, 50, 140, 40, "Papercut log"),
         line([(404, 68), (456, 68)]),
-        box("amber", 460, 40, 180, 56, "Triage", "Onto the task board"),
+        box("amber", 460, 40, 180, 56, "Pick up", "From the task board"),
         line([(550, 96), (550, 186)]),
         box("amber", 460, 190, 180, 56, "Propose a fix", "Skill, tool or prompt"),
         line([(456, 218), (404, 218)]),

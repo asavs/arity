@@ -2,7 +2,7 @@
 
 [Back to index](README.md)
 
-An agent is a hidden model wrapped with a system prompt and a loadout. The model is chosen by the model router; the prompt and loadout are attached afterwards, in the "Assemble agent" step of [Instantiate](instantiate.md).
+An agent is a hidden model wrapped with a system prompt and a loadout. The model is chosen by the model router; the prompt and loadout are attached in the last step of [Instantiate](instantiate.md).
 
 ![What an agent is assembled from](diagrams/loadout.svg)
 
@@ -14,47 +14,40 @@ An agent is a hidden model wrapped with a system prompt and a loadout. The model
 | MCP servers | A connection to an outside system, bringing its own set of tools | Calendar, code host, browser |
 | Skills | Packaged instructions for a kind of task, loaded only when relevant | "How to review a pull request" |
 
-All three live in one shared **capability registry**, the same way every model comes from one endpoint pool. In the [instantiate diagram](instantiate.md) it is the "Registry" cylinder under "Resolve role".
+All three are listed in the **registry**. Whether the registry becomes part of the database is [undecided](open-questions.md#registry-in-the-database).
 
 ## Roles
 
-A role is a named bundle from the registry. A parent asks for a role by name instead of listing capabilities.
+A role is a named bundle in the registry.
 
 ![Roles: catalogue and contents](diagrams/roles.svg)
 
-A role contains:
-
-- **System prompt**: who the agent is and how it should work.
-- **Skills**, **MCP servers** and **tools**: its loadout.
+A role contains a **system prompt**, which says who the agent is and how it should work, and a standing kit of **skills**, **MCP servers** and **tools**.
 
 Roles can specialise. "Python developer" and "iOS developer" inherit everything from "software engineer" and add their own parts. Other starting roles: writer, namer, designer.
 
-Role and tier are independent. Tier (secretary, project agent, subagent) is where an agent sits and how long it lives. Role is what it is good at. A subagent can be an iOS developer; so can a project agent.
-
-## How a request uses them
-
-See [Instantiate](instantiate.md): the request names a role, the registry resolves it, the model router picks a model, and the prompt and loadout are attached to that model.
-
-## Design notes
-
-- **Smaller loadouts are cheaper.** Every MCP server's tool descriptions take room in the model's context.
-- **Smaller loadouts are safer.** This matters once passwords and computer use arrive (roadmap items 8 and 9).
-- **Grades attach to the model and the role together.** This is the groundwork for blind testing of skills, MCPs and personas (roadmap item 5).
+Role and tier are independent. Tier (secretary, project agent, subagent) is where an agent sits and how long it lives. Role is what it is good at. A subagent can be an iOS developer, and so can a project agent.
 
 ## Where a loadout comes from
 
-Two sources, combined at [instantiation](instantiate.md).
+Two sources, combined at instantiation.
 
 | Source | Supplies | Example |
 |---|---|---|
-| The role | The standing kit: how this kind of agent works | An iOS developer's prompt, its usual skills |
-| The task entry | What this particular piece of work needs | Its requirements field: Xcode, computer use |
+| The role | The standing kit: what this kind of agent always has | An iOS developer's prompt and usual skills |
+| The task entry | What this piece of work needs on top | Its requirements field: Xcode, computer use |
 
-The task entry is what picks the role. The router reads the entry and returns the model.
+The task entry names the role. The role supplies the basics so that task entries do not have to restate them, and the task's requirements add to and choose within that kit. Whether the router returns the assembled loadout or only the model is [undecided](open-questions.md#what-the-router-returns).
 
-**Proposal, for feedback.** Treat the role as the default kit and the task's requirements as additions and choices on top of it. The role answers "what does an iOS developer always have"; the requirements answer "what does this task need that not every iOS task does". Building the whole loadout from requirements alone would mean every task entry has to restate the basics. Whether the router returns the assembled loadout or only the model is still open.
+A requirement can often be met by several interchangeable options. Which one an agent gets is chosen blind; see [slots](blind-testing.md#slots).
 
-## Decided
+A child's loadout does not have to be a subset of its parent's. A subagent can be given tools its parent lacks.
 
-- **A child's loadout does not have to be a subset of its parent's.** A subagent can be given tools its parent lacks.
-- **The user or the secretary adds to the registry.** The expected flow: the user finds something (a post, a repository) and hands it to the secretary. If it does the same job as existing tools, it goes in beside them as another option for that slot. If it is a new kind of thing, it goes to a suitable agent for a closer look, or is discussed first.
+## Adding to the registry
+
+The user or the secretary adds things. The usual path: the user comes across something, such as a post or a repository, and hands it to the secretary.
+
+- If it does the same job as tools already listed, it goes in beside them as another option for that slot.
+- If it is a new kind of thing, the secretary passes it to a suitable agent for a closer look, or raises it with the user.
+
+Smaller loadouts are cheaper, because every MCP server's tool descriptions take room in the model's context, and safer.
