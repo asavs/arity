@@ -65,6 +65,7 @@ struct SettingsSheet: View {
             .padding(12)
         }
         .frame(width: 540, height: 620)
+        .onAppear { store.checkKeys() }
         .sheet(item: $store.addingProvider) { AddProviderSheet(preset: $0) }
     }
 }
@@ -113,28 +114,44 @@ private struct ProviderRow: View {
         "opencode-go": URL(string: "https://opencode.ai/go")!,
     ]
 
-    private var usable: Bool { !provider.needsKey || provider.hasKey }
+    private var check: KeyCheck? { store.keyChecks[provider.name] }
+    private var rejected: Bool { if case .rejected = check { return true }; return false }
+
+    private var dot: Color {
+        if !provider.needsKey { return .green }
+        guard provider.hasKey else { return .secondary.opacity(0.4) }
+        switch check {
+        case .works: return .green
+        case .rejected: return .red
+        case .unreachable: return .orange
+        case .noKey, nil: return .secondary.opacity(0.4)
+        }
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle().fill(usable ? Color.green : Color.secondary.opacity(0.4)).frame(width: 8, height: 8)
+            Circle().fill(dot).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(Self.titles[provider.name] ?? provider.name)
-                    if provider.needsKey && !provider.hasKey, let link = Self.keyPages[provider.name] {
+                    if provider.needsKey && (!provider.hasKey || rejected), let link = Self.keyPages[provider.name] {
                         Link("Get a key", destination: link).font(.caption)
                     }
                 }
-                Text(provider.url).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if case .rejected(let reason) = check {
+                    Text(reason).font(.caption).foregroundStyle(.red).lineLimit(2)
+                } else {
+                    Text(provider.url).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer()
             if !provider.needsKey {
                 Text("No key needed").font(.callout).foregroundStyle(.secondary)
-            } else if provider.hasKey {
-                Text("Key saved").font(.callout).foregroundStyle(.secondary)
+            } else if provider.hasKey && !rejected {
+                status
                 Button("Remove Key") { store.setKey(provider.name, "") }
             } else {
-                SecureField("API key", text: $key, prompt: Text("Paste API key"))
+                SecureField("API key", text: $key, prompt: Text(rejected ? "Paste a new key" : "Paste API key"))
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 160)
@@ -148,6 +165,19 @@ private struct ProviderRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var status: some View {
+        switch check {
+        case .works: Text("Key works").font(.callout).foregroundStyle(.secondary)
+        case .unreachable(let reason):
+            Text("Couldn't check").font(.callout).foregroundStyle(.orange).help(reason)
+        default:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking…").font(.callout).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func save() {

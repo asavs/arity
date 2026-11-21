@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use board::{Clearance, Priority, RunState, TaskFields, TaskState};
+pub use catalog::KeyCheck;
 use journal::{Entry, Journal};
 use model::tool_calls_of;
 
@@ -221,6 +222,11 @@ impl Arity {
     pub fn remove_provider(&self, name: String) -> Result<()> {
         config::remove_provider(&self.dir, &name)?;
         Ok(keys::set(&self.dir, &name, "")?)
+    }
+
+    /// Whether a provider takes its key, checked without running a model. Blocks for a few seconds.
+    pub fn check_provider(&self, name: String) -> Result<KeyCheck> {
+        Ok(catalog::check(&self.dir, &name)?)
     }
 
     /// Store a provider's API key. An empty key removes it.

@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Arity, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Arity, KeyCheck, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -32,6 +32,7 @@ const USAGE: &str = "usage:
   arity provider add <name> <url> [--key]    add an OpenAI-compatible endpoint; --key if it needs one
   arity provider rm <name>                   remove one you added, and its key
   arity key    set <provider>                store an API key, from a hidden prompt or stdin
+  arity key    check <provider>              whether the provider takes its key; runs no model
   arity key    rm <provider>                 forget it
   arity workers [add|rm <model>]             the models tasks for agents are picked from
   arity login | logout                       sign in to ChatGPT, or out
@@ -191,8 +192,9 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         ("key", 3) if arg(1) == "set" => {
             arity.set_key(arg(2), read_secret(&format!("API key for {}: ", arg(2)))?)?;
-            println!("saved the key for {}", arg(2));
+            println!("saved the key for {}; {}", arg(2), describe(arity.check_provider(arg(2))?));
         }
+        ("key", 3) if arg(1) == "check" => println!("{}: {}", arg(2), describe(arity.check_provider(arg(2))?)),
         ("provider", 4 | 5) if arg(1) == "add" => {
             arity.add_provider(arg(2), arg(3), arg(4) == "--key")?;
             println!("added {}{}", arg(2), if arg(4) == "--key" { format!("; now run `arity key set {}`", arg(2)) } else { String::new() });
@@ -206,6 +208,15 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         _ => println!("{USAGE}"),
     }
     Ok(())
+}
+
+fn describe(check: KeyCheck) -> String {
+    match check {
+        KeyCheck::Works => "the key works".into(),
+        KeyCheck::Rejected { reason } => format!("the key was rejected: {reason}"),
+        KeyCheck::Unreachable { reason } => format!("could not reach it: {reason}"),
+        KeyCheck::NoKey => "no key set".into(),
+    }
 }
 
 /// One line from stdin, not echoed when it is a terminal.

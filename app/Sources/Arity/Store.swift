@@ -21,6 +21,8 @@ final class Store {
     var models: [String] = []
     var workers: [String] = []
     var providers: [Provider] = []
+    /// What checking each provider's key found. Missing while a check runs.
+    var keyChecks: [String: KeyCheck] = [:]
     var model = ""
     var showSettings = false
     /// The add-provider form, open with these values.
@@ -224,10 +226,23 @@ final class Store {
         }
     }
 
-    /// Store a provider's API key (empty removes it). Its models then appear.
+    /// Store a provider's API key (empty removes it), then check it. Its models then appear.
     func setKey(_ provider: String, _ key: String) {
         _ = attempt { try core.setKey(provider: provider, key: key) }
         loadModels(refresh: true)
+        checkKeys()
+    }
+
+    /// Check every saved key, off the main thread, without running a model.
+    func checkKeys() {
+        let core = self.core
+        for p in providers where p.needsKey && p.hasKey {
+            keyChecks[p.name] = nil
+            Task.detached {
+                let check = (try? core.checkProvider(name: p.name)) ?? .unreachable(reason: "the check failed")
+                await MainActor.run { self.keyChecks[p.name] = check }
+            }
+        }
     }
 
     func setWorker(_ model: String, _ on: Bool) {
