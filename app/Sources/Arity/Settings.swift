@@ -124,6 +124,14 @@ private struct PlanRow: View {
 
     private var check: KeyCheck? { store.keyChecks[plan.provider] }
 
+    private var usable: Bool {
+        switch plan.access {
+        case .open: return true
+        case .signIn(let who): return who != nil
+        case .key: return account.hasKey
+        }
+    }
+
     private var dot: Color {
         switch plan.access {
         case .open: return .green
@@ -149,6 +157,7 @@ private struct PlanRow: View {
                 } else {
                     Text(plan.note).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
+                UsageLine(usage: plan.usage, account: account.title, usable: usable)
             }
             Spacer()
             trailing
@@ -187,6 +196,65 @@ private struct PlanRow: View {
                 }
             }
         }
+    }
+}
+
+/// What is left of a plan's limits, or why that cannot be shown. The same for every plan.
+private struct UsageLine: View {
+    let usage: Usage
+    let account: String
+    /// Set up, so a missing reading means no reply yet rather than no way to send one.
+    let usable: Bool
+
+    var body: some View {
+        switch usage {
+        case .unlimited:
+            EmptyView()
+        case .noneYet where !usable:
+            EmptyView()
+        case .notReported:
+            Label("Usage not reported", systemImage: "gauge.with.dots.needle.bottom.0percent")
+                .font(.caption).foregroundStyle(.tertiary)
+                .help("\(account) doesn't tell other apps how much of this plan is used.")
+        case .noneYet:
+            Label("Usage shows after the first reply", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                .font(.caption).foregroundStyle(.tertiary)
+        case .limits(let limits, let age):
+            // The two closest to running out; the rest are in the tooltip.
+            let left = { (l: Limit) in l.limit == 0 ? 1 : Double(l.remaining) / Double(l.limit) }
+            let tightest = limits.sorted { (left($0), $0.name) < (left($1), $1.name) }.prefix(2)
+            let lowest = tightest.first.map(left) ?? 1
+            Label {
+                Text(tightest.map { "\($0.remaining.formatted())/\($0.limit.formatted()) \(Self.name($0.name))" }.joined(separator: " · "))
+                    .lineLimit(1).truncationMode(.tail)
+            } icon: {
+                Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                    .foregroundStyle(lowest < 0.1 ? .red : lowest < 0.3 ? .orange : .green)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .help(limits.map(Self.detail).joined(separator: "\n") + "\nAs of \(Self.duration(age)) ago.")
+        }
+    }
+
+    /// "requests-1h" -> "requests an hour"; plain names are the provider's shortest window.
+    static func name(_ raw: String) -> String {
+        let parts = raw.split(separator: "-", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return raw }
+        switch parts[1] {
+        case "1h": return "\(parts[0]) an hour"
+        case "1d": return "\(parts[0]) a day"
+        case "1m", "1min": return "\(parts[0]) a minute"
+        default: return "\(parts[0]) (\(parts[1]))"
+        }
+    }
+
+    static func detail(_ l: Limit) -> String {
+        let reset = l.resetsInSecs.map { ", full again in \(duration($0))" } ?? ""
+        return "\(l.remaining.formatted()) of \(l.limit.formatted()) \(name(l.name)) left\(reset)"
+    }
+
+    static func duration(_ secs: UInt64) -> String {
+        secs < 90 ? "\(secs)s" : secs < 5400 ? "\(secs / 60) min" : "\(secs / 3600) h"
     }
 }
 

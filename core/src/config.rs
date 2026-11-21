@@ -13,7 +13,8 @@
 //! field by field. `account` groups providers that share a key into one account
 //! with several plans, as OpenCode's Zen and Go do. `key` may
 //! name another provider whose key is shared; `session_header` names a header
-//! that carries a stable id per conversation.
+//! that carries a stable id per conversation. `"usage": "headers"` says it reports
+//! its limits on its replies.
 
 use std::path::Path;
 
@@ -47,6 +48,8 @@ pub struct Provider {
     pub note: String,
     /// Where to get its key, or to subscribe.
     pub page: Option<String>,
+    /// It reports its limits as `x-ratelimit-*` headers on its replies (`"usage": "headers"`).
+    pub usage_headers: bool,
 }
 
 const DEFAULT_WORKERS: &[&str] = &[
@@ -58,12 +61,12 @@ const DEFAULT_WORKERS: &[&str] = &[
 fn default_providers() -> Value {
     json!({
         "openai": { "url": "https://api.openai.com/v1", "key": true,
-                    "account": "openai", "account_title": "OpenAI", "title": "API", "note": "Pay per token",
+                    "account": "openai", "account_title": "OpenAI", "title": "API", "note": "Pay per token", "usage": "headers",
                     "page": "https://platform.openai.com/api-keys" },
         // API key from portal.nousresearch.com; see plans/v0.0.1.md.
         "nous": { "url": "https://inference-api.nousresearch.com/v1", "key": true,
                   "models": ["Hermes-4-70B", "Hermes-4-405B", "Hermes-4.3-36B"],
-                  "account": "nous", "account_title": "Nous Portal", "title": "Inference",
+                  "account": "nous", "account_title": "Nous Portal", "title": "Inference", "usage": "headers",
                   "note": "Free models on a subscription, credits for the rest", "page": "https://portal.nousresearch.com" },
         // OpenCode Zen, now "Console": API key from opencode.ai; every text model also speaks chat completions.
         "opencode": { "url": "https://opencode.ai/inference/openai/v1", "key": true,
@@ -130,6 +133,7 @@ fn parse(v: &Value) -> Result<Config> {
             title: p["title"].as_str().unwrap_or("Chat completions").into(),
             note: p["note"].as_str().unwrap_or(url).into(),
             page: p["page"].as_str().map(String::from),
+            usage_headers: p["usage"] == "headers",
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));

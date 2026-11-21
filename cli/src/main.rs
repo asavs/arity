@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, KeyCheck, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, KeyCheck, Usage, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -195,6 +195,15 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         _ => String::new(),
                     };
                     println!("  {:<12} {:<10} {}{how}", p.provider, p.title, p.note);
+                    match p.usage {
+                        Usage::Limits { limits, age_secs } => {
+                            let parts: Vec<String> = limits.iter().map(|l| format!("{} of {} {}", l.remaining, l.limit, l.name)).collect();
+                            println!("  {:<12} {:<10} left: {} (as of {age_secs}s ago)", "", "", parts.join(", "));
+                        }
+                        Usage::NoneYet => println!("  {:<12} {:<10} usage shows after the first reply", "", ""),
+                        Usage::NotReported => println!("  {:<12} {:<10} usage not reported", "", ""),
+                        Usage::Unlimited => {}
+                    }
                 }
             }
         }

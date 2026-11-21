@@ -16,10 +16,12 @@ mod codex_auth;
 mod config;
 mod dispatch;
 mod draft;
+mod endpoint;
 mod journal;
 mod keys;
 mod model;
 mod tools;
+mod usage;
 mod turn;
 
 use std::path::PathBuf;
@@ -27,6 +29,7 @@ use std::sync::Arc;
 
 pub use board::{Clearance, Priority, RunState, TaskFields, TaskState};
 pub use catalog::KeyCheck;
+pub use usage::{Limit, Usage};
 use journal::{Entry, Journal};
 use model::tool_calls_of;
 
@@ -166,6 +169,7 @@ pub struct Plan {
     pub access: Access,
     /// Where to get it, for a plan that needs a subscription.
     pub page: Option<String>,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
@@ -256,7 +260,13 @@ impl Arity {
                 a.key_page = p.page.clone();
             }
             let borrowed = p.key_name != p.name;
+            let usage = match (p.usage_headers, p.needs_key) {
+                (true, _) => usage::read(&self.dir, &p.name),
+                (false, false) => Usage::Unlimited,
+                (false, true) => Usage::NotReported,
+            };
             a.plans.push(Plan {
+                usage,
                 access: if p.needs_key { Access::Key } else { Access::Open },
                 page: if borrowed { p.page } else { None },
                 provider: p.name,
@@ -271,6 +281,7 @@ impl Arity {
                 note: "Your Plus or Pro plan, through OpenAI's sign-in for apps".into(),
                 access: Access::SignIn { account: codex_auth::account(&self.dir.join("codex-auth.json")) },
                 page: None,
+                usage: Usage::NotReported,
             });
         }
         let rank = |a: &Account| config::ACCOUNT_ORDER.iter().position(|n| *n == a.name).unwrap_or(usize::MAX);

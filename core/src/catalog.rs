@@ -3,10 +3,11 @@
 //! the `models` named for it in config.json.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::endpoint::{self, Endpoint};
 use crate::{codex_auth, config, keys};
 
 /// Offered for ChatGPT until its list has been fetched once.
@@ -22,22 +23,24 @@ pub fn models(data_dir: &Path, refresh: bool) -> anyhow::Result<Vec<String>> {
     let path = data_dir.join("models-cache.json");
     let mut cache: Value = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     let mut out = vec![];
-    let mut sources: Vec<(String, String, Option<String>, Vec<String>)> = vec![];
+    let mut sources: Vec<(String, Vec<String>)> = vec![];
     let auth = data_dir.join("codex-auth.json");
     if codex_auth::signed_in(&auth) {
-        let token = if refresh || !fresh(&cache["codex"]) { codex_auth::access(&auth).ok().map(|t| t.0) } else { None };
-        sources.push(("codex".into(), codex_auth::RESOURCE.into(), token, CODEX_MODELS.iter().map(|m| m.to_string()).collect()));
+        sources.push(("codex".into(), CODEX_MODELS.iter().map(|m| m.to_string()).collect()));
     }
     for p in config::load(data_dir)?.providers {
-        let key = keys::get(data_dir, &p.key_name);
-        if p.needs_key && key.is_none() {
-            continue;
+        if !p.needs_key || keys::get(data_dir, &p.key_name).is_some() {
+            sources.push((p.name, p.models));
         }
-        sources.push((p.name, p.url, key, p.models));
     }
-    for (name, url, key, fallback) in sources {
+    for (name, fallback) in sources {
         if refresh || !fresh(&cache[&name]) {
-            if let Some(ids) = fetch(&url, key.as_deref()) {
+            let endpoint = if name == "codex" {
+                codex_auth::access(&auth).ok().map(|(token, _)| Endpoint::bare("codex", codex_auth::RESOURCE, Some(token)))
+            } else {
+                Endpoint::open(data_dir, &name, "").ok()
+            };
+            if let Some(ids) = endpoint.and_then(|e| e.models()) {
                 cache[&name] = json!({ "at": now(), "ids": ids });
             }
         }
@@ -53,24 +56,6 @@ pub fn models(data_dir: &Path, refresh: bool) -> anyhow::Result<Vec<String>> {
 
 fn fresh(cached: &Value) -> bool {
     cached["at"].as_u64().is_some_and(|at| now() < at + MAX_AGE)
-}
-
-/// The ids from an OpenAI-style `GET /models`, or None if there is no such list.
-/// With a ChatGPT sign-in the list is `models`, with `slug`s, and only those marked
-/// `list` are meant to be offered.
-fn fetch(base: &str, key: Option<&str>) -> Option<Vec<String>> {
-    let client = reqwest::blocking::Client::builder().user_agent(crate::model::USER_AGENT).timeout(Duration::from_secs(5)).build().ok()?;
-    let mut req = client.get(format!("{base}/models"));
-    if let Some(key) = key {
-        req = req.bearer_auth(key);
-    }
-    let v: Value = req.send().ok()?.error_for_status().ok()?.json().ok()?;
-    let mut ids: Vec<String> = match v["data"].as_array() {
-        Some(data) => data.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect(),
-        None => v["models"].as_array()?.iter().filter(|m| m["visibility"] == "list").filter_map(|m| m["slug"].as_str().map(String::from)).collect(),
-    };
-    ids.sort();
-    Some(ids)
 }
 
 /// Whether a provider takes its key, found without running a model.
@@ -89,19 +74,15 @@ pub enum KeyCheck {
 pub fn check(data_dir: &Path, provider: &str) -> anyhow::Result<KeyCheck> {
     let p = config::load(data_dir)?.providers.into_iter().find(|p| p.name == provider)
         .ok_or_else(|| anyhow::anyhow!("no provider {provider} in config.json"))?;
-    let key = keys::get(data_dir, &p.key_name);
-    if p.needs_key && key.is_none() {
+    if p.needs_key && keys::get(data_dir, &p.key_name).is_none() {
         return Ok(KeyCheck::NoKey);
     }
-    let client = reqwest::blocking::Client::builder().user_agent(crate::model::USER_AGENT).timeout(Duration::from_secs(10)).build()?;
-    let auth = |req: reqwest::blocking::RequestBuilder| {
-        let req = match &key { Some(k) => req.bearer_auth(k), None => req };
-        p.session_header.iter().fold(req, |req, h| req.header(h, "arity-key-check"))
-    };
+    let e = Endpoint::open(data_dir, provider, "arity-key-check")?;
+    let client = endpoint::quick();
     let verdict = |resp: reqwest::Result<reqwest::blocking::Response>| -> Option<KeyCheck> {
         let resp = match resp {
-            Ok(r) => r,
-            Err(e) => return Some(KeyCheck::Unreachable { reason: e.without_url().to_string() }),
+            Ok(r) => e.observe(r),
+            Err(err) => return Some(KeyCheck::Unreachable { reason: err.without_url().to_string() }),
         };
         let status = resp.status();
         if status != 401 && status != 403 {
@@ -109,16 +90,14 @@ pub fn check(data_dir: &Path, provider: &str) -> anyhow::Result<KeyCheck> {
         }
         let v: Value = resp.json().unwrap_or_default();
         let said = v["message"].as_str().or(v["error"]["message"].as_str()).or(v["error"].as_str()).unwrap_or("the key was refused");
-        let reason = match &key { Some(k) => said.replace(k.as_str(), "[key]"), None => said.into() };
-        Some(KeyCheck::Rejected { reason })
+        Some(KeyCheck::Rejected { reason: e.redact(anyhow::anyhow!("{said}")).to_string() })
     };
-    if let Some(v) = verdict(auth(client.get(format!("{}/models", p.url))).send()) {
+    if let Some(v) = verdict(e.get(&client, "/models").send()) {
         return Ok(v);
     }
-    let model = fetch(&p.url, key.as_deref()).and_then(|ids| ids.into_iter().next()).or(p.models.first().cloned());
-    if let Some(model) = model.filter(|_| key.is_some()) {
-        let body = json!({ "model": model, "messages": [] });
-        if let Some(v) = verdict(auth(client.post(format!("{}/chat/completions", p.url))).json(&body).send()) {
+    let model = e.models().and_then(|ids| ids.into_iter().next()).or(p.models.first().cloned());
+    if let Some(model) = model.filter(|_| e.key.is_some()) {
+        if let Some(v) = verdict(e.post(&client, "/chat/completions").json(&json!({ "model": model, "messages": [] })).send()) {
             return Ok(v);
         }
     }
