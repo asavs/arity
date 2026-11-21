@@ -135,7 +135,7 @@ private struct ProviderRow: View {
                 HStack(spacing: 6) {
                     Text(Self.titles[provider.name] ?? provider.name)
                     if provider.needsKey && (!provider.hasKey || rejected), let link = Self.keyPages[provider.name] {
-                        Link("Get a key", destination: link).font(.caption)
+                        Link(provider.keyFrom == nil ? "Get a key" : "Subscribe", destination: link).font(.caption)
                     }
                 }
                 if case .rejected(let reason) = check {
@@ -147,6 +147,10 @@ private struct ProviderRow: View {
             Spacer()
             if !provider.needsKey {
                 Text("No key needed").font(.callout).foregroundStyle(.secondary)
+            } else if let from = provider.keyFrom {
+                // The key is set on the provider it comes from; a refusal here is about the account, not the key.
+                if provider.hasKey && !rejected { status }
+                Text("Uses the \(Self.titles[from] ?? from) key").font(.callout).foregroundStyle(.secondary)
             } else if provider.hasKey && !rejected {
                 status
                 Button("Remove Key") { store.setKey(provider.name, "") }

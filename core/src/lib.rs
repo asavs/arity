@@ -148,6 +148,8 @@ pub struct Provider {
     pub has_key: bool,
     /// One Arity comes with. It cannot be removed, only left without a key.
     pub builtin: bool,
+    /// The provider whose key this one uses, when it is not its own.
+    pub key_from: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -205,6 +207,7 @@ impl Arity {
             .into_iter()
             .map(|p| Provider {
                 has_key: keys::get(&self.dir, &p.key_name).is_some(),
+                key_from: (p.key_name != p.name).then_some(p.key_name),
                 name: p.name,
                 url: p.url,
                 needs_key: p.needs_key,
