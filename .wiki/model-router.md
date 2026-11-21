@@ -29,7 +29,7 @@ The weight between the two moves with supply. When a subscription's quota is abo
 
 The pick for a task is drawn among the top three allowed models, weighted by rank (half, a third, a sixth), so weaker models keep getting runs and their scores keep moving. See [Blind testing](blind-testing.md).
 
-A run can file tasks of its own with the same call a chat uses, so a subagent is a task one level down. Two levels is the floor.
+A run can file tasks of its own with the same call a chat uses, so a subagent is a task one level down. Two levels is the floor: a run there is not offered delegation, and a task it writes is its own todo.
 
 ## Scores
 

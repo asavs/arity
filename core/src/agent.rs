@@ -124,7 +124,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                     }
                     !live.stopped()
                 };
-                let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(worker, can_rate), &mut out)?;
+                let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate), &mut out)?;
                 lease.commit(db, &reply.to_json(), spec)?;
                 // Chats only: a run's speed would hint at its model before it is rated.
                 if let (false, false, Some((ttft, tps))) = (worker, reply.interrupted, clock.finish()) {

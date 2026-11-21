@@ -31,15 +31,58 @@ fn field_schema() -> Value {
     })
 }
 
+/// `add_task` for a run at the floor: no assignee and no choice, since what it
+/// writes is its own todo.
+fn todo_schema() -> Value {
+    let mut props = field_schema();
+    let obj = props.as_object_mut().unwrap();
+    obj.remove("assignee");
+    obj.remove("choice");
+    obj.insert("brief".into(), json!({"type": "string", "description": "Notes for yourself."}));
+    props
+}
+
+/// Who is calling the tools, which decides which tools they get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    /// A conversation the user talks in.
+    Chat,
+    /// A run above the floor: it may hand work to an agent, one level down.
+    Run,
+    /// A run at the floor (`board::MAX_DEPTH`): what it writes is its own todo.
+    RunAtFloor,
+}
+
+pub fn caller(db: &Connection, conv: &str) -> anyhow::Result<Caller> {
+    Ok(match board::run_depth(db, conv)? {
+        None => Caller::Chat,
+        Some(d) if d >= board::MAX_DEPTH => Caller::RunAtFloor,
+        Some(_) => Caller::Run,
+    })
+}
+
+/// Which tools a caller is offered. `rate` is offered only to a conversation
+/// with results of its own waiting to be rated.
+fn offered(caller: Caller, name: &str, can_rate: bool) -> bool {
+    match (caller, name) {
+        (_, "rate") => can_rate,
+        (_, "list_tasks" | "add_task") => true,
+        (Caller::Chat, _) => true,
+        (Caller::RunAtFloor, "complete_task") => true,
+        _ => false,
+    }
+}
+
 fn with_id(mut props: Value) -> Value {
     props["id"] = json!({"type": "integer"});
     props
 }
 
-/// Workers doing a task may read the board and file tasks of their own, the
-/// same call a chat makes one level down, but not change other tasks. `rate`
-/// is offered only to a conversation with results of its own waiting to be rated.
-pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
+/// A run gets the same `add_task` a chat uses, so a subagent is a task one level
+/// down. At the floor it gets `add_task` without an assignee or choice: a task it
+/// writes is its own todo, which it does and ticks off with `complete_task`.
+/// Runs cannot change other tasks.
+pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "propose_task",
@@ -85,10 +128,20 @@ pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
         },
     ];
     all.into_iter()
-        .filter(|t| match t.name {
-            "rate" => can_rate,
-            "list_tasks" | "add_task" => true,
-            _ => !worker,
+        .filter(|t| offered(caller, t.name, can_rate))
+        .map(|t| match (caller, t.name) {
+            (Caller::RunAtFloor, "add_task") => ToolSpec {
+                name: "add_task",
+                description: "Write a todo for yourself on the board. It is yours: do it in your reply, then mark it \
+                              done with complete_task. Nobody else picks it up.",
+                parameters: json!({"type": "object", "properties": todo_schema(), "required": ["title"]}),
+            },
+            (Caller::RunAtFloor, "complete_task") => ToolSpec {
+                name: "complete_task",
+                description: "Mark one of your own todos done, by id, after doing it.",
+                parameters: t.parameters,
+            },
+            _ => t,
         })
         .collect()
 }
@@ -102,8 +155,9 @@ const HANDED_OFF_BY_A_RUN: &str = "An agent will do it. Its result comes back to
 pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
     let result = (|| -> anyhow::Result<String> {
-        let worker = board::trial_of_conversation(db, conv)?.is_some();
-        if !matches!(name, "list_tasks" | "rate" | "add_task") && worker {
+        let caller = caller(db, conv)?;
+        let worker = caller != Caller::Chat;
+        if !offered(caller, name, true) {
             anyhow::bail!("you are doing a task: you can read the board and file tasks, not change others");
         }
         match name {
@@ -114,6 +168,27 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                      Change it again with propose_task.",
                     f.describe()
                 ))
+            }
+            "add_task" if caller == Caller::RunAtFloor => {
+                // Its own todo: whatever it says about who or which model, it is the run's.
+                let mut args = args.clone();
+                if let Some(obj) = args.as_object_mut() {
+                    obj.remove("assignee");
+                    obj.remove("choice");
+                    obj.remove("clearance");
+                }
+                let mut f = TaskFields { assignee: board::conversation_page(conv), ..Default::default() };
+                f.merge(&args)?;
+                let id = board::add_task(db, &f, Some(conv))?;
+                Ok(format!("added todo {id} for yourself. Do it in your reply, then mark it done with complete_task."))
+            }
+            "complete_task" if caller == Caller::RunAtFloor => {
+                let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
+                if board::task(db, id)?.fields.assignee != board::conversation_page(conv) {
+                    anyhow::bail!("task {id} is not one of your todos");
+                }
+                board::set_done(db, id, true)?;
+                Ok(format!("completed todo {id}"))
             }
             "add_task" => {
                 let mut f = TaskFields::default();
@@ -212,9 +287,10 @@ fn line(t: &board::TaskRow) -> String {
 mod tests {
     use super::*;
 
-    /// A run files a task with the same call a chat uses, one level down, until the floor.
+    /// A run files a task with the same call a chat uses, one level down. At the
+    /// floor it is not offered delegation: what it writes is its own todo.
     #[test]
-    fn a_run_files_subtasks_down_to_the_floor() -> anyhow::Result<()> {
+    fn a_run_at_the_floor_writes_its_own_todos() -> anyhow::Result<()> {
         let path = std::env::temp_dir().join(format!("arity-depth-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let db = crate::journal::Journal::open(&path)?;
@@ -222,27 +298,41 @@ mod tests {
         let run = |task: i64| {
             c.execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-' || ?1, 'lab:m')", rusqlite::params![task])
         };
-        let add = |conv: &str, title: &str| execute(c, conv, "lab:m", "add_task", &json!({ "title": title, "assignee": "agent" }).to_string());
-        // A chat files task 1; its run files task 2, which is the run's own, with the run's reply text.
-        assert!(add("chat", "top").starts_with("added task 1"));
+        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
+        let names = |conv: &str| -> Vec<&'static str> { specs(caller(c, conv).unwrap(), false).iter().map(|t| t.name).collect() };
+        let add_props = |conv: &str| specs(caller(c, conv).unwrap(), false).into_iter().find(|t| t.name == "add_task").unwrap().parameters;
+        // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
+        assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
         run(1)?;
-        let names: Vec<&str> = specs(true, false).iter().map(|t| t.name).collect();
-        assert_eq!(names, ["add_task", "list_tasks"], "a worker gets add_task like a chat");
-        let said = add("task-1", "sub");
+        assert_eq!(names("task-1"), ["add_task", "list_tasks"]);
+        assert!(add_props("task-1")["properties"]["assignee"].is_object(), "above the floor it may delegate");
+        let said = call("task-1", "add_task", json!({ "title": "sub", "assignee": "agent" }));
         assert!(said.starts_with("added task 2") && said.contains("comes back to this conversation"), "{said}");
-        let sub = board::task(c, 2)?;
-        assert_eq!(sub.created_by, "conversations/task-1");
+        assert_eq!(board::task(c, 2)?.created_by, "conversations/task-1");
+        // Task 2's run is at the floor: add_task has no assignee or choice, and complete_task is offered.
+        run(2)?;
+        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task"]);
+        let props = add_props("task-2");
+        assert!(props["properties"]["assignee"].is_null() && props["properties"]["choice"].is_null(), "{props}");
+        // Even asked for an agent, what it writes is its own todo: no pick, no run, nothing woken.
+        let said = call("task-2", "add_task", json!({ "title": "check the sums", "assignee": "agent", "choice": "smart" }));
+        assert!(said.starts_with("added todo 3"), "{said}");
+        let todo = board::task(c, 3)?;
+        assert_eq!((todo.fields.assignee.as_str(), todo.created_by.as_str()), ("conversations/task-2", "conversations/task-2"));
+        // The dispatcher only takes ready tasks whose assignee is an agent; a todo never is.
+        let pickable: i64 = c.query_row("SELECT count(*) FROM tasks WHERE id = 3 AND assignee = 'agent'", [], |r| r.get(0))?;
+        assert_eq!(pickable, 0);
+        let runs_of_todo: i64 = c.query_row("SELECT count(*) FROM trials WHERE task = 3", [], |r| r.get(0))?;
+        assert_eq!(runs_of_todo, 0, "a todo is never a run");
+        assert!(board::unrated_for(c, "task-2", "x")?.is_empty());
+        // It ticks off its own todo, and only its own.
+        assert_eq!(call("task-2", "complete_task", json!({ "id": 3 })), "completed todo 3");
+        assert!(call("task-2", "complete_task", json!({ "id": 1 })).contains("not one of your todos"));
+        assert!(call("task-1", "complete_task", json!({ "id": 1 })).starts_with("error:"), "above the floor runs change nothing");
         // A private run's tasks stay private, whatever it asks for.
         c.execute("UPDATE tasks SET choice = 'private' WHERE id = 1", [])?;
-        assert!(add("task-1", "another").starts_with("added task 3"));
-        assert_eq!(board::task(c, 3)?.fields.choice, board::Choice::Private);
-        // Task 2's run is at the floor: it is told to do the work itself.
-        run(2)?;
-        let said = add("task-2", "subsub");
-        assert!(said.starts_with("error:") && said.contains("do the work yourself"), "{said}");
-        assert!(board::task(c, 4).is_err());
-        // Workers still cannot change other tasks.
-        assert!(execute(c, "task-1", "lab:m", "complete_task", r#"{"id": 1}"#).starts_with("error:"));
+        assert!(call("task-1", "add_task", json!({ "title": "another", "assignee": "agent", "choice": "smart" })).starts_with("added task 4"));
+        assert_eq!(board::task(c, 4)?.fields.choice, board::Choice::Private);
         let _ = std::fs::remove_file(&path);
         Ok(())
     }

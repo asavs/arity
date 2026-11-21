@@ -25,8 +25,9 @@ pub const LEASE_SECS: i64 = 600;
 /// The assignee that wakes the dispatcher: any agent, picked blind.
 pub const AGENT: &str = "agent";
 
-/// How many levels of tasks filed by runs can stack up. A task filed in a chat
-/// is level 1; one its run files is level 2; a run at the floor cannot file more.
+/// How many levels of tasks for agents can stack up. A task filed in a chat is
+/// level 1; one its run hands to an agent is level 2. A run at the floor is not
+/// offered delegation: a task it writes is its own todo (see `tools::specs`).
 pub const MAX_DEPTH: i64 = 2;
 
 /// The user's page: `people/<login>`.
@@ -420,6 +421,8 @@ fn normalize_assignee(a: &str) -> Result<String> {
         "agent" | "an agent" | "any agent" => AGENT.into(),
         "me" | "user" | "the user" | "you" | "" => me(),
         _ if a.starts_with("people/") && a.len() > 7 => a.into(),
+        // A run's own todo, which it does itself.
+        _ if a.starts_with("conversations/") && a.len() > 14 => a.into(),
         _ => bail!("assignee must be \"agent\" or \"user\", not {a:?}"),
     })
 }
@@ -644,11 +647,9 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
     let (depth, parent) = parent_of(conn, origin)?;
     // Private work stays private all the way down: a private run's tasks are private too.
     let choice = if parent == Some(Choice::Private) { Choice::Private } else { f.choice };
-    if depth > MAX_DEPTH {
-        bail!(
-            "this run is already {} levels down, the deepest tasks go; do the work yourself in your reply instead of filing a task",
-            depth - 1
-        );
+    // The tools never offer delegation at the floor; this only guards the rule.
+    if depth > MAX_DEPTH && normalize_assignee(&f.assignee)? == AGENT {
+        bail!("a run at the floor cannot hand work to an agent");
     }
     conn.execute(
         "INSERT INTO tasks (title, brief, assignee, created_by, choice, priority, due, tags, origin, depth)
@@ -670,6 +671,13 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
     write_links(conn, id, f)?;
     refresh_ready(conn)?;
     Ok(id)
+}
+
+/// The level of the task whose run `conv` is, or None for a conversation that is not a run.
+pub fn run_depth(conn: &Connection, conv: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT t.depth FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1", params![conv], |r| r.get(0))
+        .optional()?)
 }
 
 /// The level a task filed in `origin` would be at, one below the task whose run
