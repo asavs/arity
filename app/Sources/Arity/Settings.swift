@@ -13,15 +13,22 @@ struct SettingsSheet: View {
             Form {
                 ForEach(store.accounts, id: \.name) { AccountSection(account: $0) }
                 Section {
-                    if store.models.isEmpty {
-                        Text("Sign in or add a key to see models.").foregroundStyle(.secondary)
+                    if store.workers.isEmpty {
+                        Text("No workers yet. Tasks for agents wait until you add one.").foregroundStyle(.secondary)
                     }
-                    ForEach(store.models, id: \.self) { model in
-                        Toggle(shortName(model), isOn: Binding(
-                            get: { store.workers.contains(model) },
-                            set: { store.setWorker(model, $0) }))
-                        .help(model)
+                    ForEach(store.workers, id: \.self) { model in
+                        HStack {
+                            Text(shortName(model)).help(model)
+                            Spacer()
+                            if !store.models.contains(model) {
+                                Text("Not offered now").font(.caption).foregroundStyle(.tertiary)
+                                    .help("None of your accounts lists this model at the moment.")
+                            }
+                            Button("Remove \(shortName(model))", systemImage: "minus.circle") { store.setWorker(model, false) }
+                                .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        }
                     }
+                    AddWorkerButton()
                 } header: {
                     HStack {
                         Text("Workers")
@@ -254,6 +261,63 @@ private struct UsageLine: View {
 
     static func duration(_ secs: UInt64) -> String {
         secs < 90 ? "\(secs)s" : secs < 5400 ? "\(secs / 60) min" : "\(secs / 3600) h"
+    }
+}
+
+/// Opens a searchable list of every model your accounts offer, to add one as a worker.
+private struct AddWorkerButton: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        @Bindable var store = store
+        Button("Add Worker…", systemImage: "plus") { store.choosingWorker = true }
+            .buttonStyle(.borderless)
+            .disabled(store.models.isEmpty)
+            .popover(isPresented: $store.choosingWorker, arrowEdge: .bottom) {
+                ModelChooser(models: store.models.filter { !store.workers.contains($0) }) { model in
+                    store.setWorker(model, true)
+                    store.choosingWorker = false
+                }
+            }
+    }
+}
+
+/// Every model, grouped by provider and filtered as you type. A List only
+/// builds the rows on screen, so hundreds of models cost nothing until seen.
+struct ModelChooser: View {
+    let models: [String]
+    let choose: (String) -> Void
+    @State private var query = ""
+
+    private var groups: [(provider: String, models: [String])] {
+        let words = query.lowercased().split(separator: " ")
+        let shown = models.filter { m in words.allSatisfy { m.lowercased().contains($0) } }
+        let byProvider = Dictionary(grouping: shown) { String($0.prefix { $0 != ":" }) }
+        return byProvider.keys.sorted().map { ($0, byProvider[$0]!) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Search \(models.count) models", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(10)
+            List {
+                ForEach(groups, id: \.provider) { group in
+                    Section("\(group.provider) · \(group.models.count)") {
+                        ForEach(group.models, id: \.self) { model in
+                            Button { choose(model) } label: {
+                                Text(model.split(separator: ":", maxSplits: 1).last.map(String.init) ?? model)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+        }
+        .frame(width: 360, height: 420)
     }
 }
 

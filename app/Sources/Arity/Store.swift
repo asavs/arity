@@ -26,6 +26,8 @@ final class Store {
     var keyChecks: [String: KeyCheck] = [:]
     var model = ""
     var showSettings = false
+    /// The searchable list for adding a worker is open.
+    var choosingWorker = false
     /// The add-provider form, open with these values.
     var addingProvider: ProviderPreset?
     /// Conversations with a turn running, here or in another process (the CLI, `arity work`).
