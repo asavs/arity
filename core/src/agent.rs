@@ -69,7 +69,7 @@ pub type Complete<'a> = dyn Fn(&str, &[Entry], &[ToolSpec], &mut Sink) -> Result
 /// and every message as it is written. Returns false, doing nothing, when a
 /// turn in another loop holds the conversation.
 pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
-    let model = Model::parse(spec, data_dir)?;
+    let model = Model::parse(spec, data_dir, conv)?;
     run_with(db, conv, spec, &|system, chain, tools, out| model.complete(system, chain, tools, out), on)
 }
 

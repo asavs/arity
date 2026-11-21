@@ -29,7 +29,7 @@ pub fn models(data_dir: &Path, refresh: bool) -> anyhow::Result<Vec<String>> {
         sources.push(("codex".into(), codex_auth::RESOURCE.into(), token, CODEX_MODELS.iter().map(|m| m.to_string()).collect()));
     }
     for p in config::load(data_dir)?.providers {
-        let key = keys::get(data_dir, &p.name);
+        let key = keys::get(data_dir, &p.key_name);
         if p.needs_key && key.is_none() {
             continue;
         }
@@ -59,7 +59,7 @@ fn fresh(cached: &Value) -> bool {
 /// With a ChatGPT sign-in the list is `models`, with `slug`s, and only those marked
 /// `list` are meant to be offered.
 fn fetch(base: &str, key: Option<&str>) -> Option<Vec<String>> {
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build().ok()?;
+    let client = reqwest::blocking::Client::builder().user_agent(crate::model::USER_AGENT).timeout(Duration::from_secs(5)).build().ok()?;
     let mut req = client.get(format!("{base}/models"));
     if let Some(key) = key {
         req = req.bearer_auth(key);

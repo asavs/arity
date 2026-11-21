@@ -106,8 +106,12 @@ private struct ProviderRow: View {
     @State private var key = ""
 
     /// Friendlier names, and where to get a key, for the providers Arity comes with.
-    static let titles = ["mlx": "MLX on this Mac", "nous": "Nous Portal", "opencode": "OpenCode Zen"]
-    static let keyPages = ["nous": URL(string: "https://portal.nousresearch.com")!, "opencode": URL(string: "https://opencode.ai")!]
+    static let titles = ["mlx": "MLX on this Mac", "nous": "Nous Portal", "opencode": "OpenCode Zen", "opencode-go": "OpenCode Go"]
+    static let keyPages = [
+        "nous": URL(string: "https://portal.nousresearch.com")!,
+        "opencode": URL(string: "https://opencode.ai")!,
+        "opencode-go": URL(string: "https://opencode.ai/go")!,
+    ]
 
     private var usable: Bool { !provider.needsKey || provider.hasKey }
 

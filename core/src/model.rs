@@ -8,6 +8,8 @@ use std::sync::mpsc;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
+use sha2::Digest;
+
 use crate::codex_auth;
 use crate::journal::Entry;
 use crate::tools::ToolSpec;
@@ -63,7 +65,7 @@ pub fn tool_calls_of(body: &Value) -> Vec<ToolCall> {
 
 pub enum Model {
     /// Any OpenAI-compatible chat endpoint. MLX by default.
-    Chat { base: String, model: String, key: Option<String> },
+    Chat { base: String, model: String, key: Option<String>, headers: Vec<(String, String)> },
     /// The ChatGPT subscription, signed in with `login`.
     Codex { model: String, auth: std::path::PathBuf },
 }
@@ -71,7 +73,8 @@ pub enum Model {
 impl Model {
     /// `codex:<model>`, or `<provider>:<model>` for a provider in config.json.
     /// A provider that needs a key and has none is refused here, before any call.
-    pub fn parse(spec: &str, data_dir: &std::path::Path) -> Result<Self> {
+    /// `conversation` fills a provider's session header, if it has one.
+    pub fn parse(spec: &str, data_dir: &std::path::Path, conversation: &str) -> Result<Self> {
         let (kind, model) = spec.split_once(':').ok_or_else(|| anyhow!("model must be <provider>:<id>, e.g. mlx:<id>"))?;
         if kind == "codex" {
             return Ok(Model::Codex { model: model.into(), auth: data_dir.join("codex-auth.json") });
@@ -81,17 +84,22 @@ impl Model {
             let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
             bail!("unknown provider {kind}; config.json has {} and codex", names.join(", "));
         };
-        let key = crate::keys::get(data_dir, kind);
+        let key = crate::keys::get(data_dir, &p.key_name);
         if p.needs_key && key.is_none() {
-            bail!("{kind} has no API key; run `arity key set {kind}` or add one in Settings");
+            bail!("{kind} has no API key; run `arity key set {}` or add one in Settings", p.key_name);
         }
-        Ok(Model::Chat { base: p.url.clone(), model: model.into(), key })
+        // Stable for the conversation, and says nothing about it.
+        let session = || sha2::Sha256::digest(conversation.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect();
+        let headers = p.session_header.iter().map(|h| (h.clone(), session())).collect();
+        Ok(Model::Chat { base: p.url.clone(), model: model.into(), key, headers })
     }
 
     /// The model's reply to the chain, streamed into `out` as it arrives.
     pub fn complete(&self, system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink) -> Result<Reply> {
         match self {
-            Model::Chat { base, model, key } => chat(base, model, key.as_deref(), system, chain, tools, out).map_err(|e| redact(e, key.as_deref())),
+            Model::Chat { base, model, key, headers } => {
+                chat(base, model, key.as_deref(), headers, system, chain, tools, out).map_err(|e| redact(e, key.as_deref()))
+            }
             Model::Codex { model, auth } => codex(model, auth, system, chain, tools, out),
         }
     }
@@ -116,8 +124,12 @@ fn user_text(e: &Entry) -> Option<&str> {
     }
 }
 
+/// Arity names itself to every endpoint; OpenCode Go asks clients to.
+pub const USER_AGENT: &str = concat!("Arity/", env!("CARGO_PKG_VERSION"));
+
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .expect("http client")
@@ -199,7 +211,8 @@ pub(crate) fn chat_messages(system: &str, chain: &[Entry]) -> Vec<Value> {
     messages
 }
 
-fn chat(base: &str, model: &str, key: Option<&str>, system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink) -> Result<Reply> {
+#[allow(clippy::too_many_arguments)]
+fn chat(base: &str, model: &str, key: Option<&str>, headers: &[(String, String)], system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink) -> Result<Reply> {
     let body = json!({
         "model": model,
         "messages": chat_messages(system, chain),
@@ -211,6 +224,9 @@ fn chat(base: &str, model: &str, key: Option<&str>, system: &str, chain: &[Entry
     let mut req = client().post(format!("{base}/chat/completions")).json(&body);
     if let Some(key) = key {
         req = req.bearer_auth(key);
+    }
+    for (name, value) in headers {
+        req = req.header(name, value);
     }
     let resp = req.send()?;
     let status = resp.status();
@@ -281,7 +297,7 @@ pub(crate) fn codex_input(chain: &[Entry]) -> Vec<Value> {
 }
 
 fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink) -> Result<Reply> {
-    let (token, account) = codex_auth::access(auth)?;
+    let (token, _account) = codex_auth::access(auth)?;
     let body = json!({
         "model": model,
         "instructions": system,
@@ -296,9 +312,6 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
     let resp = client()
         .post(CODEX_URL)
         .bearer_auth(token)
-        .header("chatgpt-account-id", account)
-        .header("OpenAI-Beta", "responses=experimental")
-        .header("originator", "arity")
         .json(&body)
         .send()?;
     if !resp.status().is_success() {
@@ -362,24 +375,40 @@ mod tests {
     #[test]
     fn specs_resolve_through_providers() -> Result<()> {
         let d = dir("parse", json!({ "lab": { "url": "http://lab:1/v1" } }));
-        match Model::parse("lab:org/m:q4", &d)? {
-            Model::Chat { base, model, key } => assert_eq!((base.as_str(), model.as_str(), key), ("http://lab:1/v1", "org/m:q4", None)),
+        match Model::parse("lab:org/m:q4", &d, "c")? {
+            Model::Chat { base, model, key, headers } => {
+                assert_eq!((base.as_str(), model.as_str(), key), ("http://lab:1/v1", "org/m:q4", None));
+                assert!(headers.is_empty());
+            }
             _ => panic!("lab is a chat provider"),
         }
-        assert!(matches!(Model::parse("mlx:x", &d)?, Model::Chat { .. }), "mlx is a provider by default");
-        assert!(matches!(Model::parse("codex:gpt", &d)?, Model::Codex { .. }));
-        assert!(Model::parse("nope:x", &d).is_err());
-        assert!(Model::parse("no-colon", &d).is_err());
+        assert!(matches!(Model::parse("mlx:x", &d, "c")?, Model::Chat { .. }), "mlx is a provider by default");
+        assert!(matches!(Model::parse("codex:gpt", &d, "c")?, Model::Codex { .. }));
+        assert!(Model::parse("nope:x", &d, "c").is_err());
+        assert!(Model::parse("no-colon", &d, "c").is_err());
         Ok(())
     }
 
     #[test]
     fn a_provider_without_its_key_is_refused() -> Result<()> {
         let d = dir("nokey", json!({}));
-        let err = Model::parse("nous:Hermes-4-70B", &d).err().expect("nous needs a key").to_string();
+        let err = Model::parse("nous:Hermes-4-70B", &d, "c").err().expect("nous needs a key").to_string();
         assert!(err.contains("arity key set nous"), "{err}");
         crate::keys::set(&d, "nous", "sk-test")?;
-        assert!(matches!(Model::parse("nous:Hermes-4-70B", &d)?, Model::Chat { key: Some(_), .. }));
+        assert!(matches!(Model::parse("nous:Hermes-4-70B", &d, "c")?, Model::Chat { key: Some(_), .. }));
+        // OpenCode Go shares OpenCode's key and sends a session id that is the same for one conversation only.
+        assert!(Model::parse("opencode-go:kimi-k3", &d, "c").is_err());
+        crate::keys::set(&d, "opencode", "sk-oc")?;
+        let session = |conv: &str| match Model::parse("opencode-go:kimi-k3", &d, conv).unwrap() {
+            Model::Chat { key, headers, .. } => (key, headers),
+            _ => panic!(),
+        };
+        let (key, h1) = session("chat-1");
+        assert_eq!(key.as_deref(), Some("sk-oc"));
+        assert_eq!(h1[0].0, "x-opencode-session");
+        assert!(!h1[0].1.contains("chat"));
+        assert_eq!(h1, session("chat-1").1);
+        assert_ne!(h1, session("chat-2").1);
         Ok(())
     }
 
@@ -401,7 +430,7 @@ mod tests {
         for (name, url) in [("echo", format!("http://127.0.0.1:{port}/v1")), ("closed", "http://127.0.0.1:9/v1".into())] {
             let d = dir(name, json!({ name: { "url": url, "key": true } }));
             crate::keys::set(&d, name, key)?;
-            let err = Model::parse(&format!("{name}:m"), &d)?.complete("", &[], &[], &mut |_| true).err().expect("call fails");
+            let err = Model::parse(&format!("{name}:m"), &d, "c")?.complete("", &[], &[], &mut |_| true).err().expect("call fails");
             let text = format!("{err:#} {err:?}");
             assert!(!text.contains(key), "{name}: {text}");
             assert!(!std::fs::read_to_string(d.join("config.json"))?.contains(key));

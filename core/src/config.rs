@@ -9,7 +9,9 @@
 //! ```
 //! A provider is any OpenAI-compatible chat endpoint. `key: true` means it needs
 //! an API key, kept in keys.json, never here. `models` is offered when the
-//! endpoint has no `/models` list. `mlx`, `nous` and `opencode` are there unless overridden.
+//! endpoint has no `/models` list. `mlx`, `nous`, `opencode` and `opencode-go` are there unless overridden. `key` may
+//! name another provider whose key is shared; `session_header` names a header
+//! that carries a stable id per conversation.
 
 use std::path::Path;
 
@@ -28,6 +30,10 @@ pub struct Provider {
     pub name: String,
     pub url: String,
     pub needs_key: bool,
+    /// Whose key it uses: its own name, or another provider's when they share one.
+    pub key_name: String,
+    /// A header that carries a stable id per conversation, for providers that ask for one.
+    pub session_header: Option<String>,
     pub models: Vec<String>,
     /// One of the providers Arity comes with; it can be changed but not removed.
     pub builtin: bool,
@@ -47,6 +53,9 @@ fn default_providers() -> Value {
                   "models": ["Hermes-4-70B", "Hermes-4-405B", "Hermes-4.3-36B"] },
         // OpenCode Zen, now "Console": API key from opencode.ai; every text model also speaks chat completions.
         "opencode": { "url": "https://opencode.ai/inference/openai/v1", "key": true },
+        // The OpenCode Go subscription, on the same key. Go asks other clients for a session id per conversation.
+        "opencode-go": { "url": "https://opencode.ai/inference/go/openai/v1", "key": "opencode",
+                         "session_header": "x-opencode-session" },
     })
 }
 
@@ -84,7 +93,9 @@ fn parse(v: &Value) -> Result<Config> {
         out.push(Provider {
             name: name.clone(),
             url: url.trim_end_matches('/').into(),
-            needs_key: p["key"].as_bool().unwrap_or(false),
+            needs_key: p["key"].as_bool().unwrap_or(false) || p["key"].is_string(),
+            key_name: p["key"].as_str().unwrap_or(name).into(),
+            session_header: p["session_header"].as_str().map(String::from),
             models: strings(&p["models"]),
             builtin: defaults.get(name).is_some(),
         });
@@ -145,12 +156,14 @@ mod tests {
             "providers": { "mlx": { "url": "http://h:1/v1/" }, "groq": { "url": "https://g/v1", "key": true } },
         }))?;
         let names: Vec<&str> = c.providers.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["groq", "mlx", "nous", "opencode"]);
+        assert_eq!(names, ["groq", "mlx", "nous", "opencode", "opencode-go"]);
         assert_eq!(c.providers[1].url, "http://h:1/v1");
         assert!(c.providers[0].needs_key && !c.providers[1].needs_key);
         assert!(parse(&json!({ "providers": { "a:b": { "url": "x" } } })).is_err());
         assert!(parse(&json!({ "providers": { "x": {} } })).is_err());
         assert!(c.providers[2].builtin && !c.providers[0].builtin);
+        let go = &c.providers[4];
+        assert!(go.needs_key && go.key_name == "opencode" && go.session_header.is_some());
         Ok(())
     }
 

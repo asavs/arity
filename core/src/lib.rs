@@ -203,7 +203,7 @@ impl Arity {
             .providers
             .into_iter()
             .map(|p| Provider {
-                has_key: keys::get(&self.dir, &p.name).is_some(),
+                has_key: keys::get(&self.dir, &p.key_name).is_some(),
                 name: p.name,
                 url: p.url,
                 needs_key: p.needs_key,
@@ -225,10 +225,11 @@ impl Arity {
 
     /// Store a provider's API key. An empty key removes it.
     pub fn set_key(&self, provider: String, key: String) -> Result<()> {
-        if !config::load(&self.dir)?.providers.iter().any(|p| p.name == provider) {
+        let providers = config::load(&self.dir)?.providers;
+        let Some(p) = providers.iter().find(|p| p.name == provider) else {
             return Err(ArityError::Failed(format!("no provider {provider} in config.json")));
-        }
-        Ok(keys::set(&self.dir, &provider, &key)?)
+        };
+        Ok(keys::set(&self.dir, &p.key_name, &key)?)
     }
 
     // Threads
