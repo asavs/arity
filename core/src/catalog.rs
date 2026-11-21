@@ -72,6 +72,31 @@ pub enum KeyCheck {
 /// messages from the first one. Either is refused at once for a bad key; a good
 /// key gets a complaint about the empty request instead, and nothing runs.
 pub fn check(data_dir: &Path, provider: &str) -> anyhow::Result<KeyCheck> {
+    let verdict = check_now(data_dir, provider)?;
+    remember(data_dir, provider, &verdict);
+    Ok(verdict)
+}
+
+/// Providers whose key was refused the last time it was checked. The pick
+/// leaves them out until a check says otherwise.
+pub fn rejected(data_dir: &Path) -> Vec<String> {
+    let all: Value = std::fs::read_to_string(data_dir.join("checks.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    all.as_object().into_iter().flatten().filter(|(_, v)| *v == "rejected").map(|(k, _)| k.clone()).collect()
+}
+
+fn remember(data_dir: &Path, provider: &str, verdict: &KeyCheck) {
+    let path = data_dir.join("checks.json");
+    let mut all: Value = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    all[provider] = json!(match verdict {
+        KeyCheck::Works => "works",
+        KeyCheck::Rejected { .. } => "rejected",
+        KeyCheck::Unreachable { .. } => "unreachable",
+        KeyCheck::NoKey => "no key",
+    });
+    let _ = std::fs::write(&path, all.to_string());
+}
+
+fn check_now(data_dir: &Path, provider: &str) -> anyhow::Result<KeyCheck> {
     let p = config::load(data_dir)?.providers.into_iter().find(|p| p.name == provider)
         .ok_or_else(|| anyhow::anyhow!("no provider {provider} in config.json"))?;
     if p.needs_key && keys::get(data_dir, &p.key_name).is_none() {
@@ -142,6 +167,7 @@ mod tests {
         assert_eq!(check(&d, "p")?, KeyCheck::Works);
         keys::set(&d, "p", "sk-bad-1234")?;
         assert_eq!(check(&d, "p")?, KeyCheck::Rejected { reason: "invalid key [key]".into() });
+        assert_eq!(rejected(&d), ["p"], "remembered for the pick");
         keys::set(&d, "dead", "sk-good")?;
         assert!(matches!(check(&d, "dead")?, KeyCheck::Unreachable { .. }));
         std::fs::remove_dir_all(&d)?;

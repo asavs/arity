@@ -4,14 +4,15 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, KeyCheck, Usage, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, Choice, Figures, KeyCheck, Usage, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
   arity ls                                   every thread: chats and tasks, by what needs you
   arity board                                the same list, tasks only
   arity log    <thread>                      read a thread
-  arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used
+  arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used,
+                                             or --smart, --fast, --free or --private to let Arity pick
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
@@ -26,6 +27,7 @@ const USAGE: &str = "usage:
   arity runs                                 runs, models hidden until rated
   arity rate   <run> <1-5> <note...>         rate a run yourself
   arity scores                               average rating per model
+  arity leaderboard                          per model: quality and speed, public and Arity's own
   arity reveal <run>                         which model did a run
   arity models [--refresh]                   models the configured providers offer
   arity providers                            accounts, their plans, and which have a key
@@ -83,7 +85,14 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         ("log", 2) => arity.messages(arg(1))?.iter().for_each(print),
         ("chat", n) if n >= 4 => {
-            let model = model_for(&arg(1), arg(2))?;
+            let model = match choice(&arg(2)) {
+                Some(c) => {
+                    let pick = arity.pick(c)?;
+                    println!("      {}: {}", pick.model, pick.reason);
+                    pick.model
+                }
+                None => model_for(&arg(1), arg(2))?,
+            };
             stop_on_ctrl_c(&arg(1));
             if !arity.send_with(&arg(1), &model, &args[3..].join(" "), &mut streamer(&model))? {
                 println!("a turn is running in {}; it answers this next", arg(1));
@@ -178,6 +187,28 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 println!("{:>5.2}  {:>3} rated  {}", s.average, s.rated, s.model);
             }
         }
+        ("leaderboard", 1) => {
+            // Each figure: the one the pick uses, then where it came from.
+            println!("{:<44} {:<26} {:<26} {}", "model", "quality (0-100)", "first token", "speed");
+            for s in arity.leaderboard()? {
+                let fig = |get: fn(&Figures) -> Option<f64>, n: i64, unit: &str, digits: usize| -> String {
+                    let Some(used) = get(&s.combined) else { return "-".into() };
+                    let mut from = vec![];
+                    if get(&s.public).is_some() { from.push("public".to_string()) }
+                    if get(&s.own).is_some() { from.push(format!("own {n}")) }
+                    format!("{used:.digits$}{unit} ({})", from.join(" + "))
+                };
+                let reach = if s.reachable { "" } else { "  (not reachable)" };
+                println!(
+                    "{:<44} {:<26} {:<26} {}{reach}",
+                    s.model,
+                    fig(|f| f.quality, s.rated, "", 0),
+                    fig(|f| f.ttft_ms, s.timed, " ms", 0),
+                    fig(|f| f.tokens_per_sec, s.timed, " tok/s", 0),
+                );
+            }
+            println!("\npublic figures and their sources: core/data/leaderboard.json; own n = rated runs or timed replies");
+        }
         ("reveal", 2) => println!("{}", arity.reveal(arg(1).parse()?)?),
         ("models", 1 | 2) => arity.models(arg(1) == "--refresh")?.iter().for_each(|m| println!("{m}")),
         ("providers", 1) => {
@@ -225,6 +256,16 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         _ => println!("{USAGE}"),
     }
     Ok(())
+}
+
+fn choice(flag: &str) -> Option<Choice> {
+    Some(match flag {
+        "--smart" => Choice::Smart,
+        "--fast" => Choice::Fast,
+        "--free" => Choice::Free,
+        "--private" => Choice::Private,
+        _ => return None,
+    })
 }
 
 fn describe(check: KeyCheck) -> String {

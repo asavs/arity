@@ -6,9 +6,17 @@
 
 ## What it does
 
-The model router decides which model runs an agent. It is the "Pick variant" step of [Instantiate](instantiate.md), so it runs when an agent is created or a cold agent is woken. A live agent never goes through it.
+The model router decides which model runs an agent, and which answers a chat. It is the "Pick variant" step of [Instantiate](instantiate.md), so it runs when an agent is created or a cold agent is woken. A live agent never goes through it.
 
 The choice is **blind**: neither the user nor the parent agent is told which model they are working with. That keeps grades honest, because a grader cannot favour a model by name.
+
+## Choosing for a chat
+
+A chat is not a blind run, so the user sees which model answered. Instead of a list of models they make one choice of four: **smart** (the best model they can reach), **fast** (the quickest), **free** (local models and subscriptions with quota left, never a pay-per-token key) or **private** (local models only). The router picks among the models they can reach now, from the leaderboard. A chat keeps its model once its first message is sent; a new choice picks again from the next message. Naming a model directly stays possible, for testing a particular one.
+
+## Leaderboard
+
+Per model, a quality figure and speeds (time to first token, output tokens per second), from two sources kept apart: public benchmarks and published speeds, and Arity's own ratings and measured speeds. Public figures are where a model starts; Arity's own take over as they accumulate. A model nothing is known about ranks last.
 
 ## How it chooses
 

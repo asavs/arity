@@ -24,7 +24,23 @@ final class Store {
     var accounts: [Account] = []
     /// What checking each provider's key found. Missing while a check runs.
     var keyChecks: [String: KeyCheck] = [:]
+    /// The model this chat uses: picked from `choice` at its first message, or named with Other….
     var model = ""
+    /// Smart, fast, free or private; nil when a model was named. Remembered between launches.
+    var choice: Choice? = Choice(stored: UserDefaults.standard.string(forKey: "choice")) {
+        didSet {
+            UserDefaults.standard.set(choice?.stored ?? "other", forKey: "choice")
+            if choice != oldValue { choiceChanged = true }
+        }
+    }
+    /// Why the pick came to `model`, in a few words, until another chat is selected.
+    var pickReason: String?
+    /// The choice changed since this chat's model was picked: the next message picks again.
+    private var choiceChanged = false
+    /// The searchable list for naming a model (Other…) is open.
+    var choosingModel = false
+    /// A message that could not be sent, handed back to the composer.
+    var unsent: String?
     var showSettings = false
     /// The searchable list for adding a worker is open.
     var choosingWorker = false
@@ -90,6 +106,8 @@ final class Store {
     private func loadSelection() {
         error = nil
         flushCard()
+        pickReason = nil
+        choiceChanged = false
         guard let selection else { messages = []; draft = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
         draft = thread?.card
@@ -105,10 +123,23 @@ final class Store {
         selection = (1...).lazy.map { "chat-\($0)" }.first { !taken.contains($0) }
     }
 
+    /// A chat keeps the model its first message was picked for, so a conversation
+    /// does not change model part way; a new choice picks again from the next message.
     func send(_ text: String) {
         guard let conv = selection else { return }
         flushCard()
-        run(conv) { core, model in try core.send(conversation: conv, model: model, text: text) }
+        let pick = choice.flatMap { messages.isEmpty || choiceChanged || model.isEmpty ? $0 : nil }
+        choiceChanged = false
+        run(conv, pick: pick, unsent: text) { core, model in try core.send(conversation: conv, model: model, text: text) }
+    }
+
+    /// Other…: use this model for the chat from the next message.
+    func chooseModel(_ name: String) {
+        choice = nil
+        choiceChanged = false
+        model = name
+        pickReason = nil
+        choosingModel = false
     }
 
     /// Stop the turn running in the selected thread, wherever it runs. The reply so far is kept.
@@ -298,12 +329,32 @@ final class Store {
     /// Model calls block, so they run off the main thread. Progress, the reply
     /// growing included, shows up through polling. A send while a turn is
     /// running returns at once; the running turn answers it next.
-    private func run(_ conv: String, _ work: @escaping @Sendable (Arity, String) throws -> Void) {
+    /// With `pick`, the model is picked first; if that fails nothing is sent and
+    /// `unsent` goes back to the composer.
+    private func run(_ conv: String, pick: Choice? = nil, unsent: String? = nil,
+                     _ work: @escaping @Sendable (Arity, String) throws -> Void) {
         error = nil
         starting.insert(conv)
-        let core = self.core, model = self.model
+        let core = self.core, named = self.model
         Task.detached {
-            let result = Result { try work(core, model) }
+            var model = named
+            if let pick {
+                switch Result(catching: { try core.pick(choice: pick) }) {
+                case .success(let p):
+                    model = p.model
+                    await MainActor.run {
+                        if self.selection == conv { self.model = p.model; self.pickReason = p.reason }
+                    }
+                case .failure(let e):
+                    await MainActor.run {
+                        self.starting.remove(conv)
+                        if self.selection == conv { self.error = Self.describe(e); self.unsent = unsent }
+                    }
+                    return
+                }
+            }
+            let chosen = model
+            let result = Result { try work(core, chosen) }
             await MainActor.run {
                 self.starting.remove(conv)
                 if case .failure(let e) = result, self.selection == conv { self.error = Self.describe(e) }
@@ -319,5 +370,40 @@ final class Store {
     nonisolated static func describe(_ error: Error) -> String {
         if case ArityError.Failed(let message) = error { return message }
         return error.localizedDescription
+    }
+}
+
+extension Choice {
+    static let all: [Choice] = [.smart, .fast, .free, .private]
+
+    init?(stored: String?) {
+        switch stored {
+        case "fast": self = .fast
+        case "free": self = .free
+        case "private": self = .private
+        case "other": return nil
+        default: self = .smart
+        }
+    }
+
+    var stored: String {
+        switch self {
+        case .smart: "smart"
+        case .fast: "fast"
+        case .free: "free"
+        case .private: "private"
+        }
+    }
+
+    var title: String { stored.capitalized }
+
+    /// What it promises, for the subtitle before the first message and the tooltip.
+    var blurb: String {
+        switch self {
+        case .smart: "The best model you can reach"
+        case .fast: "The quickest model you can reach"
+        case .free: "Local models, or a subscription with quota left; never a paid key"
+        case .private: "Only models on this Mac"
+        }
     }
 }

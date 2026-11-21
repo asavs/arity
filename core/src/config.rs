@@ -14,7 +14,11 @@
 //! with several plans, as OpenCode's Zen and Go do. `key` may
 //! name another provider whose key is shared; `session_header` names a header
 //! that carries a stable id per conversation. `"usage": "headers"` says it reports
-//! its limits on its replies.
+//! its limits on its replies. `"billing": "subscription"` marks a flat-fee plan,
+//! whose models count as free while it has quota left; otherwise a keyed provider
+//! is pay per token. `free_suffix` marks models that are free on the provider's
+//! subscription, such as Nous's `:free` ones. A provider on this computer
+//! (localhost) is local.
 
 use std::path::Path;
 
@@ -50,6 +54,19 @@ pub struct Provider {
     pub page: Option<String>,
     /// It reports its limits as `x-ratelimit-*` headers on its replies (`"usage": "headers"`).
     pub usage_headers: bool,
+    /// A flat-fee plan (`"billing": "subscription"`), rather than pay per token.
+    pub subscription: bool,
+    /// Models whose id ends with this are free on the subscription (`"free_suffix": ":free"`).
+    pub free_suffix: Option<String>,
+}
+
+impl Provider {
+    /// Runs on this computer.
+    pub fn local(&self) -> bool {
+        let host = self.url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("");
+        let host = if self.url.contains("://[") { "::1" } else { host };
+        matches!(host, "127.0.0.1" | "localhost" | "::1") || host.ends_with(".localhost")
+    }
 }
 
 const DEFAULT_WORKERS: &[&str] = &[
@@ -66,7 +83,7 @@ fn default_providers() -> Value {
         // API key from portal.nousresearch.com; see plans/v0.0.1.md.
         "nous": { "url": "https://inference-api.nousresearch.com/v1", "key": true,
                   "models": ["Hermes-4-70B", "Hermes-4-405B", "Hermes-4.3-36B"],
-                  "account": "nous", "account_title": "Nous Portal", "title": "Inference", "usage": "headers",
+                  "account": "nous", "account_title": "Nous Portal", "title": "Inference", "usage": "headers", "free_suffix": ":free",
                   "note": "Free models on a subscription, credits for the rest", "page": "https://portal.nousresearch.com" },
         // OpenCode Zen, now "Console": API key from opencode.ai; every text model also speaks chat completions.
         "opencode": { "url": "https://opencode.ai/inference/openai/v1", "key": true,
@@ -75,7 +92,7 @@ fn default_providers() -> Value {
         // The OpenCode Go subscription, on the same key. Go asks other clients for a session id per conversation.
         "opencode-go": { "url": "https://opencode.ai/inference/go/openai/v1", "key": "opencode",
                          "session_header": "x-opencode-session",
-                         "account": "opencode", "account_title": "OpenCode", "title": "Go", "note": "Subscription",
+                         "account": "opencode", "account_title": "OpenCode", "title": "Go", "note": "Subscription", "billing": "subscription",
                          "page": "https://opencode.ai/go" },
         "mlx": { "url": "http://127.0.0.1:8080/v1",
                  "account": "mac", "account_title": "This Mac", "title": "MLX", "note": "mlx_vlm.server on port 8080" },
@@ -134,6 +151,8 @@ fn parse(v: &Value) -> Result<Config> {
             note: p["note"].as_str().unwrap_or(url).into(),
             page: p["page"].as_str().map(String::from),
             usage_headers: p["usage"] == "headers",
+            subscription: p["billing"] == "subscription",
+            free_suffix: p["free_suffix"].as_str().map(String::from),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -202,6 +221,11 @@ mod tests {
         let go = &c.providers[5];
         assert_eq!((go.account.as_str(), go.title.as_str()), ("opencode", "Go"));
         assert!(go.needs_key && go.key_name == "opencode" && go.session_header.is_some());
+        assert!(go.subscription && !c.providers[4].subscription, "Go is a subscription, Zen is not");
+        assert!(!c.providers[1].local(), "mlx moved to another host is not local");
+        let defaults = parse(&json!({}))?;
+        assert!(defaults.providers.iter().find(|p| p.name == "mlx").unwrap().local());
+        assert!(!defaults.providers.iter().find(|p| p.name == "nous").unwrap().local());
         Ok(())
     }
 

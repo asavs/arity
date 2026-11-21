@@ -19,6 +19,7 @@ mod draft;
 mod endpoint;
 mod journal;
 mod keys;
+mod leaderboard;
 mod model;
 mod tools;
 mod usage;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 
 pub use board::{Clearance, Priority, RunState, TaskFields, TaskState};
 pub use catalog::KeyCheck;
+pub use leaderboard::{Choice, Figures, Pick, Standing};
 pub use usage::{Limit, Usage};
 use journal::{Entry, Journal};
 use model::tool_calls_of;
@@ -219,6 +221,22 @@ impl Arity {
     /// for a day; `refresh` fetches them again. May block for a few seconds.
     pub fn models(&self, refresh: bool) -> Result<Vec<String>> {
         Ok(catalog::models(&self.dir, refresh)?)
+    }
+
+    /// The model a choice comes to among those the user can reach now, and why.
+    /// Fails, saying what is missing, when the choice has no candidates. Blocks
+    /// briefly: it checks that local servers are up.
+    pub fn pick(&self, choice: Choice) -> Result<Pick> {
+        let candidates = self.candidates()?;
+        let board = self.standings(&candidates)?;
+        Ok(leaderboard::choose(choice, &candidates, &board)?)
+    }
+
+    /// Every model the user can reach or that anything is known about: public
+    /// figures, Arity's own, and what the pick makes of them together.
+    pub fn leaderboard(&self) -> Result<Vec<Standing>> {
+        let candidates = self.candidates()?;
+        self.standings(&candidates)
     }
 
     /// The models tasks for an agent are picked from, from config.json.
@@ -548,6 +566,54 @@ impl Arity {
             e => on(e),
         };
         Ok(agent::run(&db, &self.dir, conv, model, &mut masked)?)
+    }
+
+    /// The models the user can reach now, and how: everything the usable providers
+    /// offer, less local servers that are not running and providers whose key was
+    /// refused when last checked.
+    fn candidates(&self) -> Result<Vec<leaderboard::Candidate>> {
+        use leaderboard::{Candidate, Reach};
+        let providers = config::load(&self.dir)?.providers;
+        let rejected = catalog::rejected(&self.dir);
+        let mut up: std::collections::HashMap<String, bool> = Default::default();
+        let quota_left = |provider: &str| match usage::read(&self.dir, provider) {
+            Usage::Limits { limits, .. } => limits.iter().all(|l| l.remaining > 0),
+            _ => true, // not reported: assume there is some
+        };
+        let mut out = vec![];
+        for model in catalog::models(&self.dir, false)? {
+            let Some((name, id)) = model.split_once(':') else { continue };
+            let reach = if name == "codex" {
+                Reach::Subscription { quota_left: true }
+            } else {
+                let Some(p) = providers.iter().find(|p| p.name == name) else { continue };
+                if rejected.contains(&p.name) {
+                    continue;
+                }
+                if p.local() {
+                    let alive = *up.entry(p.name.clone()).or_insert_with(|| {
+                        let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(800)).build();
+                        client.is_ok_and(|c| c.get(format!("{}/models", p.url)).send().is_ok())
+                    });
+                    if !alive {
+                        continue;
+                    }
+                    Reach::Local
+                } else if p.subscription || p.free_suffix.as_deref().is_some_and(|s| id.ends_with(s)) {
+                    Reach::Subscription { quota_left: quota_left(&p.name) }
+                } else {
+                    Reach::Pay
+                }
+            };
+            out.push(Candidate { model, reach });
+        }
+        Ok(out)
+    }
+
+    fn standings(&self, candidates: &[leaderboard::Candidate]) -> Result<Vec<Standing>> {
+        let own = leaderboard::own(self.journal()?.conn())?;
+        let names: Vec<String> = candidates.iter().map(|c| c.model.clone()).collect();
+        Ok(leaderboard::standings(&leaderboard::public(), &own, &names))
     }
 
     fn journal(&self) -> anyhow::Result<Journal> {

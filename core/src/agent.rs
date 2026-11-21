@@ -3,6 +3,7 @@
 //! fresh process after a crash makes the same decision the dead one would have.
 
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Result, bail};
 use serde_json::json;
@@ -114,8 +115,10 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 };
                 let can_rate = !board::unrated_for(db.conn(), conv, spec)?.is_empty();
                 let live = lease.live.clone();
+                let mut clock = Stopwatch::start();
                 let mut out = |text: &str| {
                     if !text.is_empty() {
+                        clock.text(text);
                         live.push(text);
                         on(Event::Text(text));
                     }
@@ -123,6 +126,10 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 };
                 let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(worker, can_rate), &mut out)?;
                 lease.commit(db, &reply.to_json(), spec)?;
+                // Chats only: a run's speed would hint at its model before it is rated.
+                if let (false, false, Some((ttft, tps))) = (worker, reply.interrupted, clock.finish()) {
+                    crate::leaderboard::record_speed(db.conn(), spec, ttft, tps)?;
+                }
                 if reply.interrupted {
                     lease.release(db, true)?;
                     show(&mut shown, on)?;
@@ -145,6 +152,36 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
         }
     }
     bail!("stopped after {MAX_STEPS} steps")
+}
+
+/// Times a streamed reply: how long until its first text, and how fast the rest came.
+struct Stopwatch {
+    start: Instant,
+    first: Option<Instant>,
+    chars: usize,
+}
+
+impl Stopwatch {
+    fn start() -> Self {
+        Stopwatch { start: Instant::now(), first: None, chars: 0 }
+    }
+
+    fn text(&mut self, text: &str) {
+        self.first.get_or_insert_with(Instant::now);
+        self.chars += text.chars().count();
+    }
+
+    /// Time to first token in milliseconds, and output tokens per second. None
+    /// for a reply with no text (only tool calls); no speed for one too short to
+    /// time. Tokens are estimated at four characters each, since streams do not
+    /// count them.
+    fn finish(&self) -> Option<(f64, Option<f64>)> {
+        let first = self.first?;
+        let ttft = first.duration_since(self.start).as_secs_f64() * 1000.0;
+        let rest = first.elapsed().as_secs_f64();
+        let tps = (rest >= 0.25 && self.chars >= 40).then(|| self.chars as f64 / 4.0 / rest);
+        Some((ttft, tps))
+    }
 }
 
 /// The rating gate, for an agent that delegated on its own: its conversation
@@ -279,6 +316,9 @@ mod tests {
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
         assert_eq!(db.chain("c")?[1].body["text"], "Hello world");
         assert!(turn::partial(db.conn(), "c")?.is_none() && turn::running(db.conn())?.is_empty());
+        // The reply was timed: its first text came about immediately, and it was too short for a speed.
+        let (ttft, tps): (f64, Option<f64>) = db.conn().query_row("SELECT ttft_ms, tps FROM speeds WHERE model = 'test:m'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        assert!(ttft < 400.0 && tps.is_none(), "{ttft} {tps:?}");
         Ok(())
     }
 

@@ -62,19 +62,49 @@ struct ThreadView: View {
             }
         }
         .navigationTitle(store.thread?.title ?? "New chat")
-        .navigationSubtitle(store.thread?.task.map { details($0, me: store.me) } ?? shortName(store.model))
+        .navigationSubtitle(store.thread?.task.map { details($0, me: store.me) } ?? chatSubtitle)
         .onAppear { composing = true }
+        .onChange(of: store.unsent) {
+            if let text = store.unsent { message = text; store.unsent = nil }
+        }
     }
 
-    /// The message field and model picker. Collapsed to a line or so while a card is open.
+    /// Which model answers, quietly: the one picked and why, or what the choice
+    /// will pick before the chat's first message.
+    private var chatSubtitle: String {
+        if let choice = store.choice, store.messages.isEmpty || store.model.isEmpty { return choice.blurb }
+        return [shortName(store.model), store.pickReason].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// Smart, fast, free or private, and Other… to name a model. Arity picks the
+    /// model when the chat's first message is sent.
+    private var modelChoice: some View {
+        @Bindable var store = store
+        return HStack(spacing: 4) {
+            Picker("Model", selection: $store.choice) {
+                ForEach(Choice.all, id: \.self) { Text($0.title).tag(Optional($0)).help($0.blurb) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help(store.choice?.blurb ?? "Pick for me instead of naming a model")
+
+            Button(store.choice == nil ? shortName(store.model) : "Other…") { store.choosingModel = true }
+                .buttonStyle(.borderless)
+                .foregroundStyle(store.choice == nil ? .primary : .secondary)
+                .lineLimit(1)
+                .help("Name a model yourself")
+                .popover(isPresented: $store.choosingModel, arrowEdge: .bottom) {
+                    ModelChooser(models: store.models) { store.chooseModel($0) }
+                }
+        }
+    }
+
+    /// The message field and model choice. Collapsed to a line or so while a card is open.
     private func composer(prompt: String, lines: ClosedRange<Int>) -> some View {
         @Bindable var store = store
         return HStack(alignment: .bottom, spacing: 8) {
-            Picker("Model", selection: $store.model) {
-                ForEach(store.models, id: \.self) { Text(shortName($0)).tag($0) }
-            }
-            .labelsHidden()
-            .fixedSize()
+            modelChoice
 
             if store.draft == nil {
                 Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
@@ -114,7 +144,7 @@ struct ThreadView: View {
     /// The person edits it directly or asks the model to; Add puts it on the board.
     private func cardComposer(_ card: TaskFields) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            composer(prompt: "Ask \(shortName(store.model)) to change the card", lines: 1...3)
+            composer(prompt: store.model.isEmpty ? "Ask to change the card" : "Ask \(shortName(store.model)) to change the card", lines: 1...3)
             Divider()
             TaskCard(fields: Binding { store.draft ?? card } set: { store.editCard($0) })
                 .disabled(busy)
