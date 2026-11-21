@@ -125,7 +125,7 @@ mod tests {
         propose(c, "chat", &json!({"clearance": "local", "priority": "high"}))?;
         let mut f = current(&db.chain("chat")?).unwrap();
         assert_eq!((f.title.as_str(), f.assignee.as_str()), ("Summarise the README", AGENT), "kept across proposals");
-        assert_eq!((f.clearance, f.priority), (board::Clearance::Local, board::Priority::High));
+        assert_eq!((f.choice, f.priority), (board::Choice::Private, board::Priority::High), "the old clearance field still reads");
         f.tags = vec!["docs".into()];
         edit(c, "chat", &f)?;
         let n = db.chain("chat")?.len();

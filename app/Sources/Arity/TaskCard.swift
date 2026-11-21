@@ -26,12 +26,12 @@ struct TaskCard: View {
                         Text("An agent").tag(true)
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    label("Clearance")
-                    Picker("Clearance", selection: $fields.clearance) {
-                        Text("Any model").tag(Clearance.any)
-                        Text("Local only").tag(Clearance.local)
+                    label("Model")
+                    Picker("Model", selection: $fields.choice) {
+                        ForEach(Choice.all, id: \.self) { Text($0.title).tag($0).help($0.blurb) }
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    .help(fields.choice.blurb)
                 }
                 GridRow {
                     label("Priority")

@@ -20,7 +20,7 @@ use serde_json::json;
 
 use crate::board::{LEASE_SECS, now};
 use crate::journal::{Journal, chain, insert};
-use crate::leaderboard::Candidate;
+use crate::leaderboard::{self, Candidate, Choice};
 use crate::{agent, config};
 
 /// What is said about a failing run before it is rated. Nothing in it hints at the model.
@@ -69,7 +69,7 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
     if !waiting {
         return Ok(Did::Nothing);
     }
-    let reach: Vec<String> = reachable()?.into_iter().map(|c| c.model).collect();
+    let reach = reachable()?;
     let Some((trial, task, conv, model)) = db.immediate(|c| claim(c, data_dir, &reach))? else {
         return Ok(Did::Nothing);
     };
@@ -101,7 +101,7 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
         }
         Err(e) => {
             let detail = format!("{e:#}");
-            if !reach.contains(&model) {
+            if !reach.iter().any(|c| c.model == model) {
                 // Its model is out of reach: end this run unscored and let the task be picked again.
                 db.immediate(|c| {
                     c.execute(
@@ -127,7 +127,7 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
 /// A run is taken over once its lease runs out, or sooner when it has not been
 /// renewed for a little while and no turn is running in its conversation: the
 /// conversation's own lease lapses within seconds of its process dying.
-fn claim(c: &Connection, data_dir: &Path, reachable: &[String]) -> Result<Option<(i64, i64, String, String)>> {
+fn claim(c: &Connection, data_dir: &Path, reachable: &[Candidate]) -> Result<Option<(i64, i64, String, String)>> {
     let stale: Option<(i64, i64, String, String)> = c
         .query_row(
             "SELECT id, task, conversation, model FROM trials tr
@@ -143,22 +143,26 @@ fn claim(c: &Connection, data_dir: &Path, reachable: &[String]) -> Result<Option
         c.execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS])?;
         return Ok(stale);
     }
-    // Ready tasks for an agent, most pressing first. A task whose clearance no
-    // reachable worker meets is skipped rather than blocking the rest.
-    let mut workers = config::load(data_dir)?.workers;
-    workers.retain(|m| reachable.contains(m));
+    // Ready tasks for an agent, most pressing first. The blind pick draws among
+    // the top three reachable workers the task's choice allows (an empty
+    // `workers` list allows every reachable model). A task no worker suits is
+    // skipped rather than blocking the rest.
+    let workers = config::load(data_dir)?.workers;
+    let pool: Vec<Candidate> = reachable.iter().filter(|c| workers.is_empty() || workers.contains(&c.model)).cloned().collect();
+    let names: Vec<String> = pool.iter().map(|c| c.model.clone()).collect();
+    let board = leaderboard::standings(&leaderboard::public(), &leaderboard::own(c)?, &names);
     let mut stmt = c.prepare(
-        "SELECT id, title, brief, clearance FROM tasks
+        "SELECT id, title, brief, choice FROM tasks
          WHERE assignee = 'agent' AND state = 'ready'
          ORDER BY priority DESC, due IS NULL, due, id",
     )?;
     let waiting: Vec<(i64, String, Option<String>, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let picked = waiting.into_iter().find_map(|(task, title, brief, clearance)| {
-        let cleared: Vec<&String> = workers.iter().filter(|m| clearance != "local" || m.starts_with("mlx:")).collect();
-        // The blind pick: uniform among the workers cleared for the task.
-        (!cleared.is_empty()).then(|| (task, title, brief, cleared[rand::random_range(0..cleared.len())].clone()))
+    let picked = waiting.into_iter().find_map(|(task, title, brief, choice)| {
+        let choice = Choice::parse(&choice).unwrap_or(Choice::Smart);
+        let model = leaderboard::blind(choice, &pool, &board, &mut |n| rand::random_range(0..n)).ok()?;
+        Some((task, title, brief, model))
     });
     let Some((task, title, details, model)) = picked else { return Ok(None) };
     // Each run has its own conversation; a task reopened and run again gets a fresh one.

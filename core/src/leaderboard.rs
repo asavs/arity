@@ -96,6 +96,23 @@ pub enum Choice {
     Private,
 }
 
+impl Choice {
+    pub const ALL: [Choice; 4] = [Choice::Smart, Choice::Fast, Choice::Free, Choice::Private];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::Smart => "smart",
+            Choice::Fast => "fast",
+            Choice::Free => "free",
+            Choice::Private => "private",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Choice> {
+        Choice::ALL.into_iter().find(|c| c.name() == s.trim().to_lowercase())
+    }
+}
+
 /// The model a choice came to, and why, in a few words.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct Pick {
@@ -282,53 +299,14 @@ fn wait(f: &Figures) -> Option<f64> {
 
 // The pick
 
-/// The model a choice comes to among the candidates. Smart, free and private take
-/// the best quality, with speed breaking ties and standing in where no model has
-/// a quality figure; fast takes the shortest wait. A model with no figures at all
-/// ranks last.
+/// The model a choice comes to among the candidates, for a chat: the best one
+/// (see `rank`), and why.
 pub fn choose(choice: Choice, candidates: &[Candidate], board: &[Standing]) -> Result<Pick> {
-    let allowed = |r: Reach| match choice {
-        Choice::Smart | Choice::Fast => true,
-        Choice::Private => r == Reach::Local,
-        Choice::Free => matches!(r, Reach::Local | Reach::Subscription { quota_left: true }),
-    };
-    let pool: Vec<&Candidate> = candidates.iter().filter(|c| allowed(c.reach)).collect();
-    if pool.is_empty() {
-        bail!("{}", match choice {
-            Choice::Private => "No local model is running. Start mlx_vlm.server on port 8080 (This Mac in Settings), or another local server.",
-            Choice::Free => {
-                if candidates.iter().any(|c| c.reach == Reach::Subscription { quota_left: false }) {
-                    "No free model: no local server is running, and your subscriptions have used up their quota for now."
-                } else {
-                    "No free model: no local server is running, and no subscription is signed in."
-                }
-            }
-            Choice::Smart | Choice::Fast => "No model is reachable. Sign in to ChatGPT, add an API key, or start a local server.",
-        });
-    }
-    let none = Figures::default();
-    let standing = |m: &str| board.iter().find(|s| s.model == m);
-    let figures = |m: &str| standing(m).map_or(&none, |s| &s.combined);
-    // A rated model with no public figure starts from the average of the pool's public figures.
-    let public: Vec<f64> = pool.iter().filter_map(|c| standing(&c.model)?.public.quality).collect();
-    let prior = if public.is_empty() { 0.0 } else { public.iter().sum::<f64>() / public.len() as f64 };
-    let quality = |m: &str| figures(m).quality.or_else(|| standing(m)?.shift.map(|s| prior + s));
-    // Lower sorts first. f64s become ordered keys; a missing figure goes after every known one.
-    let key = |c: &&Candidate| {
-        let f = figures(&c.model);
-        let w = wait(f).unwrap_or(f64::INFINITY);
-        let q = quality(&c.model).map_or(f64::INFINITY, |q| -q);
-        match choice {
-            Choice::Fast => (w, 0.0),
-            _ => (q, w),
-        }
-    };
-    let mut ranked = pool.clone();
-    ranked.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap().then(a.model.cmp(&b.model)));
+    let (ranked, scale) = rank(choice, candidates, board)?;
     let best = ranked[0];
-    let f = figures(&best.model);
-    let q = quality(&best.model);
-    let n = pool.len();
+    let f = scale.figures(&best.model);
+    let q = scale.quality(&best.model);
+    let n = ranked.len();
     let of = match choice {
         Choice::Private => plural(n, "local model"),
         Choice::Free => plural(n, "free model"),
@@ -347,6 +325,88 @@ pub fn choose(choice: Choice, candidates: &[Candidate], board: &[Standing]) -> R
         }
     };
     Ok(Pick { model: best.model.clone(), reason })
+}
+
+/// How likely each of the top three is to be picked for a task: the best half
+/// the time, the second a third, the third a sixth.
+pub const BLIND_WEIGHTS: [u32; 3] = [3, 2, 1];
+
+/// The pick for a task, which stays a blind test: drawn among the top three
+/// models the choice allows, weighted by rank, so weaker ones keep getting runs
+/// and their scores keep moving. `roll(n)` returns a number below n.
+pub fn blind(choice: Choice, candidates: &[Candidate], board: &[Standing], roll: &mut dyn FnMut(u32) -> u32) -> Result<String> {
+    let (ranked, _) = rank(choice, candidates, board)?;
+    let top = &ranked[..ranked.len().min(BLIND_WEIGHTS.len())];
+    let mut r = roll(BLIND_WEIGHTS[..top.len()].iter().sum());
+    for (c, w) in top.iter().zip(BLIND_WEIGHTS) {
+        if r < w {
+            return Ok(c.model.clone());
+        }
+        r -= w;
+    }
+    Ok(top[0].model.clone())
+}
+
+/// The figures one ranking reads: a candidate's own, and its quality as the pool sees it.
+struct Scale<'a> {
+    board: &'a [Standing],
+    /// Where a rated model with no public figure starts: the pool's average public figure.
+    prior: f64,
+    none: Figures,
+}
+
+impl Scale<'_> {
+    fn standing(&self, m: &str) -> Option<&Standing> {
+        self.board.iter().find(|s| s.model == m)
+    }
+    fn figures(&self, m: &str) -> &Figures {
+        self.standing(m).map_or(&self.none, |s| &s.combined)
+    }
+    fn quality(&self, m: &str) -> Option<f64> {
+        self.figures(m).quality.or_else(|| self.standing(m)?.shift.map(|s| self.prior + s))
+    }
+}
+
+/// The candidates the choice allows, best first. Smart, free and private take
+/// the best quality, with speed breaking ties and standing in where no model has
+/// a quality figure; fast takes the shortest wait. A model with no figures at
+/// all ranks last. Fails, saying what is missing, when none is allowed.
+fn rank<'a, 'b>(choice: Choice, candidates: &'a [Candidate], board: &'b [Standing]) -> Result<(Vec<&'a Candidate>, Scale<'b>)> {
+    let allowed = |r: Reach| match choice {
+        Choice::Smart | Choice::Fast => true,
+        Choice::Private => r == Reach::Local,
+        Choice::Free => matches!(r, Reach::Local | Reach::Subscription { quota_left: true }),
+    };
+    let mut pool: Vec<&Candidate> = candidates.iter().filter(|c| allowed(c.reach)).collect();
+    if pool.is_empty() {
+        bail!("{}", match choice {
+            Choice::Private => "No local model is running. Start mlx_vlm.server on port 8080 (This Mac in Settings), or another local server.",
+            Choice::Free => {
+                if candidates.iter().any(|c| c.reach == Reach::Subscription { quota_left: false }) {
+                    "No free model: no local server is running, and your subscriptions have used up their quota for now."
+                } else {
+                    "No free model: no local server is running, and no subscription is signed in."
+                }
+            }
+            Choice::Smart | Choice::Fast => "No model is reachable. Sign in to ChatGPT, add an API key, or start a local server.",
+        });
+    }
+    let mut scale = Scale { board, prior: 0.0, none: Figures::default() };
+    let public: Vec<f64> = pool.iter().filter_map(|c| scale.standing(&c.model)?.public.quality).collect();
+    if !public.is_empty() {
+        scale.prior = public.iter().sum::<f64>() / public.len() as f64;
+    }
+    // Lower sorts first. f64s become ordered keys; a missing figure goes after every known one.
+    let key = |c: &&Candidate| {
+        let w = wait(scale.figures(&c.model)).unwrap_or(f64::INFINITY);
+        let q = scale.quality(&c.model).map_or(f64::INFINITY, |q| -q);
+        match choice {
+            Choice::Fast => (w, 0.0),
+            _ => (q, w),
+        }
+    };
+    pool.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap().then(a.model.cmp(&b.model)));
+    Ok((pool, scale))
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -468,6 +528,30 @@ mod tests {
         assert_eq!(pick(Choice::Fast, &two, &HashMap::new())?.model, "mlx:org/local-fast");
         let lone = only(&["mlx:org/unknown"]);
         assert_eq!(pick(Choice::Private, &lone, &HashMap::new())?.reason, "the only local model");
+        Ok(())
+    }
+
+    /// A task's pick is drawn from the top three, so the third-best still gets runs and the fourth none.
+    #[test]
+    fn a_tasks_pick_still_gives_lower_ranked_models_runs() -> Result<()> {
+        let all = candidates();
+        let b = board(&HashMap::new());
+        // Smart ranks big (60), sub-model (45), quick (30), then the local ones.
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        for _ in 0..1200 {
+            let m = blind(Choice::Smart, &all, &b, &mut |n| rand::random_range(0..n))?;
+            *counts.entry(m).or_default() += 1;
+        }
+        let n = |m: &str| counts.get(m).copied().unwrap_or(0);
+        assert!(n("openai:big") > n("codex:sub-model") && n("codex:sub-model") > n("groq:quick"), "{counts:?}");
+        assert!(n("groq:quick") > 100, "the third is picked about a sixth of the time: {counts:?}");
+        assert_eq!(n("mlx:org/local-good"), 0, "the fourth never");
+        // Every roll lands on one of the top three, in rank order.
+        let order: Vec<String> = (0..6).map(|r| blind(Choice::Smart, &all, &b, &mut |_| r).unwrap()).collect();
+        assert_eq!(order, ["openai:big", "openai:big", "openai:big", "codex:sub-model", "codex:sub-model", "groq:quick"]);
+        // Fewer than three allowed: drawn among those. Private still keeps to local models.
+        let local = blind(Choice::Private, &all, &b, &mut |n| n - 1)?;
+        assert!(local.starts_with("mlx:"), "{local}");
         Ok(())
     }
 

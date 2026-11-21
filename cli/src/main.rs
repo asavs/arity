@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, Choice, Figures, KeyCheck, Usage, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, Choice, Figures, KeyCheck, Usage, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -16,7 +16,8 @@ const USAGE: &str = "usage:
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
-  arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model
+  arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
+                                             drawn among the top three its choice allows
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
   arity done   <task>                        mark a task done
   arity draft  <conv>                        the task card open in a conversation
@@ -39,7 +40,7 @@ const USAGE: &str = "usage:
   arity workers [add|rm <model>]             the models tasks for agents are picked from
   arity login | logout                       sign in to ChatGPT, or out
 
-fields: --title <t>  --agent | --me  --local | --any  --priority low|normal|high|urgent
+fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
         --due YYYY-MM-DD  --blocked-by <id,id>  --tag <t> (repeatable)  --no-tags
 
 data: $ARITY_HOME, or ~/Library/Application Support/Arity";
@@ -403,8 +404,9 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
             "--agent" => fields["assignee"] = json!("agent"),
             "--me" => fields["assignee"] = json!("user"),
             "--for" => fields["assignee"] = json!(value(a)?),
-            "--local" => fields["clearance"] = json!("local"),
-            "--any" => fields["clearance"] = json!("any"),
+            "--smart" | "--fast" | "--free" | "--private" => fields["choice"] = json!(&a[2..]),
+            "--local" => fields["choice"] = json!("private"),
+            "--any" => fields["choice"] = json!("smart"),
             "--priority" => fields["priority"] = json!(value(a)?),
             "--due" => fields["due"] = json!(value(a)?),
             "--no-due" => fields["due"] = Value::Null,
@@ -451,8 +453,8 @@ fn thread_line(thread: &Thread, me: &str) -> String {
     if f.priority != Priority::Normal {
         extra.push(format!("{:?}", f.priority).to_lowercase());
     }
-    if f.clearance == Clearance::Local {
-        extra.push("local only".into());
+    if f.choice != Choice::Smart {
+        extra.push(format!("{:?}", f.choice).to_lowercase());
     }
     if let Some(d) = &f.due {
         extra.push(format!("due {d}"));

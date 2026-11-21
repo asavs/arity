@@ -95,7 +95,7 @@ func details(_ task: BoardTask, me: String) -> String {
     }
     if f.priority != .normal { parts.append(f.priority.name) }
     if let due = f.due { parts.append("Due \(due)") }
-    if f.clearance == .local { parts.append("Local only") }
+    if f.choice != .smart { parts.append(f.choice.title) }
     if !f.blockedBy.isEmpty { parts.append("After " + f.blockedBy.map { "#\($0)" }.joined(separator: ", ")) }
     parts += f.tags.map { "#\($0)" }
     return parts.joined(separator: " · ")

@@ -38,7 +38,7 @@ Anything that needs the user's own device, such as a one-time code or a passkey,
 
 Clearance is a field on every [task](database.md#tasks). It limits three things: which credentials are granted, which machines the task can run on, and which models can be picked.
 
-- **Two levels for models:** local models only, or cloud models allowed. A task that touches banking can be kept on local models so that nothing leaves the user's machines.
+- **For models it is the task's choice:** smart, fast, free or private. Private keeps a task on local models, so a task that touches banking leaves nothing on other machines; tasks a private run files are private too.
 - **It covers people as well as models,** which is what allows sharing Arity with others. Sharing itself is [set aside for now](open-questions.md#sharing-with-other-people).
 - **The router applies it first,** before weighing quality or cost.
 

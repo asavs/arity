@@ -20,14 +20,16 @@ Per model, a quality figure and speeds (time to first token, output tokens per s
 
 ## How it chooses
 
-1. **Rule out what is not allowed.** A task's clearance can restrict it to local models. See [Access](access.md#clearance).
+1. **Rule out what is not allowed.** A task carries one of the same four choices as a chat. Private restricts it to local models, free to local models and subscriptions with quota left; only models the user can reach count. See [Access](access.md#clearance).
 2. **Balance two things for what remains:**
    - **The right intelligence for the task**, from scores.
    - **Spending tokens wisely**, from the endpoint pool.
 
 The weight between the two moves with supply. When a subscription's quota is about to reset, its remaining tokens are nearly free, so cost counts for more in that moment. That shifts which model is picked. It does not change any score.
 
-The router also spends some picks on options it is unsure about, to keep learning. See [Blind testing](blind-testing.md).
+The pick for a task is drawn among the top three allowed models, weighted by rank (half, a third, a sixth), so weaker models keep getting runs and their scores keep moving. See [Blind testing](blind-testing.md).
+
+A run can file tasks of its own with the same call a chat uses, so a subagent is a task one level down. Two levels is the floor.
 
 ## Scores
 

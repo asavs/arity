@@ -17,11 +17,17 @@ use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
+pub use crate::leaderboard::Choice;
+
 /// How long a claim on a trial lasts before another dispatcher may take it over.
 pub const LEASE_SECS: i64 = 600;
 
 /// The assignee that wakes the dispatcher: any agent, picked blind.
 pub const AGENT: &str = "agent";
+
+/// How many levels of tasks filed by runs can stack up. A task filed in a chat
+/// is level 1; one its run files is level 2; a run at the floor cannot file more.
+pub const MAX_DEPTH: i64 = 2;
 
 /// The user's page: `people/<login>`.
 pub fn me() -> String {
@@ -95,8 +101,15 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
         migrate_v0(&tx, &cols)?;
         let broken: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
         anyhow::ensure!(broken == 0, "migrating tasks would break {broken} links; nothing was changed");
-    } else if !cols.iter().any(|c| c == "origin") {
-        tx.execute_batch("ALTER TABLE tasks ADD COLUMN origin TEXT")?;
+    } else {
+        if !cols.iter().any(|c| c == "origin") {
+            tx.execute_batch("ALTER TABLE tasks ADD COLUMN origin TEXT")?;
+        }
+        if !columns("tasks")?.iter().any(|c| c == "choice") {
+            migrate_choice(&tx)?;
+            let broken: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+            anyhow::ensure!(broken == 0, "migrating tasks would break {broken} links; nothing was changed");
+        }
     }
     if !columns("trials")?.iter().any(|c| c == "abandoned") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0")?;
@@ -119,7 +132,8 @@ fn create_tasks(c: &Connection, name: &str) -> Result<()> {
              origin     TEXT,                     -- the conversation it was filed in, if any
              state      TEXT NOT NULL DEFAULT 'open'
                         CHECK (state IN ('open', 'ready', 'assigned', 'in_gates', 'done')),
-             clearance  TEXT NOT NULL DEFAULT 'any' CHECK (clearance IN ('any', 'local')),
+             choice     TEXT NOT NULL DEFAULT 'smart' CHECK (choice IN ('smart', 'fast', 'free', 'private')),
+             depth      INTEGER NOT NULL DEFAULT 1, -- 1 filed by a person or chat, 2 by that task's run, ...
              priority   INTEGER NOT NULL DEFAULT 1, -- 0 low, 1 normal, 2 high, 3 urgent
              due        TEXT,                     -- YYYY-MM-DD
              tags       TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
@@ -156,6 +170,23 @@ fn migrate_v0(c: &Connection, cols: &[String]) -> Result<()> {
     )?;
     c.execute_batch("DROP TABLE tasks; ALTER TABLE tasks_new RENAME TO tasks;")?;
     refresh_ready(c)?;
+    Ok(())
+}
+
+/// Tasks used to carry a clearance, any or local; now they carry one of the four
+/// choices, and `local` is what `private` means. The table is rebuilt because
+/// the old column's check allows only the old values. Ids are kept.
+fn migrate_choice(c: &Connection) -> Result<()> {
+    create_tasks(c, "tasks_new")?;
+    c.execute_batch(
+        "INSERT INTO tasks_new (id, title, brief, assignee, created_by, origin, state, choice, priority, due, tags, created, edits)
+         SELECT id, title, brief, assignee, created_by, origin, state,
+                CASE clearance WHEN 'local' THEN 'private' ELSE 'smart' END,
+                priority, due, tags, created, edits
+         FROM tasks;
+         DROP TABLE tasks;
+         ALTER TABLE tasks_new RENAME TO tasks;",
+    )?;
     Ok(())
 }
 
@@ -210,14 +241,6 @@ pub fn now() -> i64 {
 
 // Fields
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum Clearance {
-    /// Any configured model may do it.
-    Any,
-    /// Only models running on this computer (`mlx:`).
-    Local,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
 pub enum Priority {
     Low,
@@ -241,15 +264,6 @@ impl Priority {
     }
 }
 
-impl Clearance {
-    pub fn name(self) -> &'static str {
-        match self {
-            Clearance::Any => "any",
-            Clearance::Local => "local",
-        }
-    }
-}
-
 /// What a person or a model fills in for a task. The same fields go into
 /// `add_task`, `update_task`, `propose_task` and the draft card.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -259,7 +273,8 @@ pub struct TaskFields {
     pub brief: String,
     /// `people/<login>`, or `agent` for any agent.
     pub assignee: String,
-    pub clearance: Clearance,
+    /// Which models may do it and how they rank: private keeps it on this computer.
+    pub choice: Choice,
     pub priority: Priority,
     /// YYYY-MM-DD.
     pub due: Option<String>,
@@ -274,7 +289,7 @@ impl Default for TaskFields {
             title: String::new(),
             brief: String::new(),
             assignee: me(),
-            clearance: Clearance::Any,
+            choice: Choice::Smart,
             priority: Priority::Normal,
             due: None,
             blocked_by: vec![],
@@ -289,7 +304,7 @@ impl TaskFields {
             "title": self.title,
             "brief": self.brief,
             "assignee": self.assignee,
-            "clearance": self.clearance.name(),
+            "choice": self.choice.name(),
             "priority": self.priority.name(),
             "due": self.due,
             "blocked_by": self.blocked_by,
@@ -307,11 +322,19 @@ impl TaskFields {
                 "title" => self.title = s(),
                 "brief" | "details" => self.brief = s(),
                 "assignee" | "for" => self.assignee = normalize_assignee(&s())?,
+                "choice" => {
+                    let c = s().to_lowercase();
+                    self.choice = if c.is_empty() {
+                        Choice::Smart
+                    } else {
+                        Choice::parse(&c).ok_or_else(|| anyhow!("choice must be smart, fast, free or private, not {c:?}"))?
+                    }
+                }
+                // What the field was called before; old task cards in the journal still say it.
                 "clearance" => {
-                    self.clearance = match s().to_lowercase().as_str() {
-                        "any" | "" => Clearance::Any,
-                        "local" | "local only" => Clearance::Local,
-                        other => bail!("clearance must be any or local, not {other:?}"),
+                    self.choice = match s().to_lowercase().as_str() {
+                        "local" | "local only" => Choice::Private,
+                        _ => Choice::Smart,
                     }
                 }
                 "priority" => {
@@ -376,7 +399,7 @@ impl TaskFields {
             out.push(format!("brief: {}", self.brief));
         }
         out.push(format!("assignee: {}", self.assignee));
-        out.push(format!("clearance: {}", self.clearance.name()));
+        out.push(format!("choice: {}", self.choice.name()));
         out.push(format!("priority: {}", self.priority.name()));
         if let Some(d) = &self.due {
             out.push(format!("due: {d}"));
@@ -506,7 +529,7 @@ pub struct TaskRow {
 pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let blockers = all_blockers(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.clearance,
+        "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.choice,
                 t.priority, t.due, t.tags,
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
                 t.origin, t.created, r.note, tr.model
@@ -534,7 +557,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 title: r.get(1)?,
                 brief: r.get(2)?,
                 assignee: r.get(3)?,
-                clearance: if r.get::<_, String>(6)? == "local" { Clearance::Local } else { Clearance::Any },
+                choice: Choice::parse(&r.get::<_, String>(6)?).unwrap_or(Choice::Smart),
                 priority: Priority::from_rank(r.get(7)?),
                 due: r.get(8)?,
                 blocked_by: blockers.iter().filter(|(t, _)| *t == id).map(|(_, b)| *b).collect(),
@@ -618,25 +641,52 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
         Some(conv) => author(conn, conv)?,
         None => me(),
     };
+    let (depth, parent) = parent_of(conn, origin)?;
+    // Private work stays private all the way down: a private run's tasks are private too.
+    let choice = if parent == Some(Choice::Private) { Choice::Private } else { f.choice };
+    if depth > MAX_DEPTH {
+        bail!(
+            "this run is already {} levels down, the deepest tasks go; do the work yourself in your reply instead of filing a task",
+            depth - 1
+        );
+    }
     conn.execute(
-        "INSERT INTO tasks (title, brief, assignee, created_by, clearance, priority, due, tags, origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO tasks (title, brief, assignee, created_by, choice, priority, due, tags, origin, depth)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             f.title.trim(),
             Some(f.brief.trim()).filter(|b| !b.is_empty()),
             normalize_assignee(&f.assignee)?,
             created_by,
-            f.clearance.name(),
+            choice.name(),
             f.priority.rank(),
             f.due,
             serde_json::to_string(&clean_tags(&f.tags))?,
             origin,
+            depth,
         ],
     )?;
     let id = conn.last_insert_rowid();
     write_links(conn, id, f)?;
     refresh_ready(conn)?;
     Ok(id)
+}
+
+/// The level a task filed in `origin` would be at, one below the task whose run
+/// `origin` is (1 when it is filed by a person or a chat), and that task's choice.
+fn parent_of(conn: &Connection, origin: Option<&str>) -> Result<(i64, Option<Choice>)> {
+    let Some(conv) = origin else { return Ok((1, None)) };
+    let parent: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT t.depth, t.choice FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
+            params![conv],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match parent {
+        Some((d, choice)) => (d + 1, Choice::parse(&choice)),
+        None => (1, None),
+    })
 }
 
 /// Replace a task's fields. The assignee can change only before work starts:
@@ -649,7 +699,7 @@ pub fn update_task(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
         bail!("task {id} is already being worked on; its assignee cannot change now");
     }
     conn.execute(
-        "UPDATE tasks SET title = ?2, brief = ?3, assignee = ?4, clearance = ?5, priority = ?6, due = ?7, tags = ?8,
+        "UPDATE tasks SET title = ?2, brief = ?3, assignee = ?4, choice = ?5, priority = ?6, due = ?7, tags = ?8,
              edits = edits + 1
          WHERE id = ?1",
         params![
@@ -657,7 +707,7 @@ pub fn update_task(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
             f.title.trim(),
             Some(f.brief.trim()).filter(|b| !b.is_empty()),
             assignee,
-            f.clearance.name(),
+            f.choice.name(),
             f.priority.rank(),
             f.due,
             serde_json::to_string(&clean_tags(&f.tags))?,
@@ -974,6 +1024,48 @@ mod tests {
         assert_eq!(out, format!("rated task {child}: 3/5"));
         let rater: Option<String> = c.query_row("SELECT rater_model FROM ratings WHERE trial = ?1", params![run], |r| r.get(0))?;
         assert_eq!(rater.as_deref(), Some("mlx:b"));
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_clearance_to_choice_in_place() -> Result<()> {
+        let path = temp("choice");
+        {
+            // The board with clearance, any or local, behind a check that allows only those.
+            let c = Connection::open(&path)?;
+            c.execute_batch(
+                "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, brief TEXT, assignee TEXT NOT NULL,
+                     created_by TEXT NOT NULL, origin TEXT, state TEXT NOT NULL DEFAULT 'open',
+                     clearance TEXT NOT NULL DEFAULT 'any' CHECK (clearance IN ('any', 'local')),
+                     priority INTEGER NOT NULL DEFAULT 1, due TEXT, tags TEXT NOT NULL DEFAULT '[]',
+                     created TEXT NOT NULL DEFAULT (datetime('now')), edits INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE trials (id INTEGER PRIMARY KEY, task INTEGER NOT NULL REFERENCES tasks(id),
+                     conversation TEXT NOT NULL, harness TEXT NOT NULL DEFAULT 'arity', model TEXT NOT NULL,
+                     started TEXT NOT NULL DEFAULT (datetime('now')), ended TEXT, result TEXT, error TEXT,
+                     lease_until INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE ratings (trial INTEGER PRIMARY KEY REFERENCES trials(id), score INTEGER NOT NULL,
+                     note TEXT NOT NULL, rated_by TEXT NOT NULL, rater_model TEXT,
+                     rated_at TEXT NOT NULL DEFAULT (datetime('now')));
+                 INSERT INTO tasks (id, title, assignee, created_by, origin, state, clearance, priority, due, tags) VALUES
+                     (3, 'private notes', 'agent', 'people/x', 'chat-1', 'done', 'local', 2, '2026-12-01', '[\"a\"]'),
+                     (7, 'anything', 'agent', 'people/x', NULL, 'ready', 'any', 1, NULL, '[]');
+                 INSERT INTO trials (id, task, conversation, model, ended, result, reported) VALUES
+                     (1, 3, 'task-3', 'mlx:qwen', datetime('now'), 'done', 1);
+                 INSERT INTO ratings (trial, score, note, rated_by) VALUES (1, 4, 'ok', 'people/x');",
+            )?;
+        }
+        for _ in 0..2 {
+            // Twice: opening again changes nothing.
+            let db = crate::journal::Journal::open(&path)?;
+            let c = db.conn();
+            let a = task(c, 3)?;
+            assert_eq!((a.fields.choice, a.fields.priority, a.fields.due.as_deref()), (Choice::Private, Priority::High, Some("2026-12-01")));
+            assert_eq!((a.origin.as_deref(), a.fields.tags.clone(), a.score), (Some("chat-1"), vec!["a".to_string()], Some(4)), "the run still links");
+            assert_eq!(task(c, 7)?.fields.choice, Choice::Smart);
+            let depth: i64 = c.query_row("SELECT depth FROM tasks WHERE id = 7", [], |r| r.get(0))?;
+            assert_eq!(depth, 1);
+        }
         let _ = std::fs::remove_file(&path);
         Ok(())
     }

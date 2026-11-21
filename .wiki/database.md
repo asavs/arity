@@ -37,6 +37,7 @@ A task is a todo with fields.
 | Field | Meaning | Used by |
 |---|---|---|
 | Clearance | Who is allowed to see or do the task, people as well as models | Instantiation, to limit which agents, models and credentials it can use; blind testing, to keep experiments off sensitive work |
+| Choice | Smart, fast, free or private: which models may do it and how they rank. Private keeps it on local models | The model router |
 | Priority | How important it is | Ordering; high priority work gets the best known variant |
 | Blocks and blockers | Which tasks must finish first | Deciding which tasks are ready |
 | Requirements | What the task needs to run: Xcode, an NVIDIA RTX card, computer use | Building the agent's loadout, and matching the task to a machine (see [Computers](computers.md)) |

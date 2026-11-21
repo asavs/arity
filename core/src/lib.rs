@@ -28,7 +28,7 @@ mod turn;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use board::{Clearance, Priority, RunState, TaskFields, TaskState};
+pub use board::{Priority, RunState, TaskFields, TaskState};
 pub use catalog::KeyCheck;
 pub use leaderboard::{Choice, Figures, Pick, Standing};
 pub use usage::{Limit, Usage};

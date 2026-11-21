@@ -21,8 +21,9 @@ fn field_schema() -> Value {
         "brief": {"type": "string", "description": "Everything whoever does it needs to know to do it well."},
         "assignee": {"type": "string", "description": "\"agent\" hands it to an agent: one is picked to do it, and the \
             user rates its result. \"user\" puts it on the user's own list."},
-        "clearance": {"type": "string", "enum": ["any", "local"], "description": "\"local\" keeps it to models running on \
-            the user's computer, for private work."},
+        "choice": {"type": "string", "enum": ["smart", "fast", "free", "private"], "description": "Which kind of model \
+            an agent should be: \"smart\" the best available (the default), \"fast\" the quickest, \"free\" one that costs \
+            nothing extra, \"private\" only models on the user's computer, for private work."},
         "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
         "due": {"type": "string", "description": "A date, YYYY-MM-DD."},
         "blocked_by": {"type": "array", "items": {"type": "integer"}, "description": "Ids of tasks that must be done first."},
@@ -35,8 +36,9 @@ fn with_id(mut props: Value) -> Value {
     props
 }
 
-/// Workers doing a task may read the board but not change it. `rate` is
-/// offered only to a conversation with results of its own waiting to be rated.
+/// Workers doing a task may read the board and file tasks of their own, the
+/// same call a chat makes one level down, but not change other tasks. `rate`
+/// is offered only to a conversation with results of its own waiting to be rated.
 pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
@@ -82,18 +84,27 @@ pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
             }, "required": ["task", "score", "note"]}),
         },
     ];
-    all.into_iter().filter(|t| if t.name == "rate" { can_rate } else { !worker || t.name == "list_tasks" }).collect()
+    all.into_iter()
+        .filter(|t| match t.name {
+            "rate" => can_rate,
+            "list_tasks" | "add_task" => true,
+            _ => !worker,
+        })
+        .collect()
 }
 
 const HANDED_OFF: &str = "An agent will do it and the user will rate its result. \
                           Do not wait or check on it: finish your reply now.";
+const HANDED_OFF_BY_A_RUN: &str = "An agent will do it. Its result comes back to this conversation for you to rate, \
+                                   after your own reply is in: finish your reply now with what you can do yourself.";
 
 /// `conv` is the conversation calling the tool, and `model` the model it is running on.
 pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
     let result = (|| -> anyhow::Result<String> {
-        if !matches!(name, "list_tasks" | "rate") && board::trial_of_conversation(db, conv)?.is_some() {
-            anyhow::bail!("you are doing a task and can only read the board");
+        let worker = board::trial_of_conversation(db, conv)?.is_some();
+        if !matches!(name, "list_tasks" | "rate" | "add_task") && worker {
+            anyhow::bail!("you are doing a task: you can read the board and file tasks, not change others");
         }
         match name {
             "propose_task" => {
@@ -108,7 +119,11 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 let mut f = TaskFields::default();
                 f.merge(&args)?;
                 let id = board::add_task(db, &f, Some(conv))?;
-                Ok(if f.assignee == AGENT { format!("added task {id}. {HANDED_OFF}") } else { format!("added task {id}") })
+                Ok(match (f.assignee == AGENT, worker) {
+                    (true, false) => format!("added task {id}. {HANDED_OFF}"),
+                    (true, true) => format!("added task {id}. {HANDED_OFF_BY_A_RUN}"),
+                    _ => format!("added task {id}"),
+                })
             }
             "update_task" => {
                 let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
@@ -176,8 +191,8 @@ fn line(t: &board::TaskRow) -> String {
     if f.priority != board::Priority::Normal {
         parts.push(format!("{} priority", f.priority.name()));
     }
-    if f.clearance == board::Clearance::Local {
-        parts.push("local only".into());
+    if f.choice != board::Choice::Smart {
+        parts.push(format!("for a {} model", f.choice.name()));
     }
     if let Some(d) = &f.due {
         parts.push(format!("due {d}"));
@@ -191,4 +206,44 @@ fn line(t: &board::TaskRow) -> String {
     }
     let line = parts.join("; ");
     if f.brief.is_empty() { line } else { format!("{line}\n    brief: {}", f.brief.replace('\n', "\n    ")) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run files a task with the same call a chat uses, one level down, until the floor.
+    #[test]
+    fn a_run_files_subtasks_down_to_the_floor() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-depth-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let run = |task: i64| {
+            c.execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-' || ?1, 'lab:m')", rusqlite::params![task])
+        };
+        let add = |conv: &str, title: &str| execute(c, conv, "lab:m", "add_task", &json!({ "title": title, "assignee": "agent" }).to_string());
+        // A chat files task 1; its run files task 2, which is the run's own, with the run's reply text.
+        assert!(add("chat", "top").starts_with("added task 1"));
+        run(1)?;
+        let names: Vec<&str> = specs(true, false).iter().map(|t| t.name).collect();
+        assert_eq!(names, ["add_task", "list_tasks"], "a worker gets add_task like a chat");
+        let said = add("task-1", "sub");
+        assert!(said.starts_with("added task 2") && said.contains("comes back to this conversation"), "{said}");
+        let sub = board::task(c, 2)?;
+        assert_eq!(sub.created_by, "conversations/task-1");
+        // A private run's tasks stay private, whatever it asks for.
+        c.execute("UPDATE tasks SET choice = 'private' WHERE id = 1", [])?;
+        assert!(add("task-1", "another").starts_with("added task 3"));
+        assert_eq!(board::task(c, 3)?.fields.choice, board::Choice::Private);
+        // Task 2's run is at the floor: it is told to do the work itself.
+        run(2)?;
+        let said = add("task-2", "subsub");
+        assert!(said.starts_with("error:") && said.contains("do the work yourself"), "{said}");
+        assert!(board::task(c, 4).is_err());
+        // Workers still cannot change other tasks.
+        assert!(execute(c, "task-1", "lab:m", "complete_task", r#"{"id": 1}"#).starts_with("error:"));
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
 }
