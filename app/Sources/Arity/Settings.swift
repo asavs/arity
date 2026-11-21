@@ -159,7 +159,7 @@ private struct PlanRow: View {
                 }
                 UsageLine(usage: plan.usage, account: account.title, usable: usable)
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
             trailing
         }
         .padding(.vertical, 2)
@@ -220,18 +220,17 @@ private struct UsageLine: View {
             Label("Usage shows after the first reply", systemImage: "gauge.with.dots.needle.bottom.50percent")
                 .font(.caption).foregroundStyle(.tertiary)
         case .limits(let limits, let age):
-            // The two closest to running out; the rest are in the tooltip.
+            // The two closest to running out, as bars of what is used; the numbers are in the tooltip.
             let left = { (l: Limit) in l.limit == 0 ? 1 : Double(l.remaining) / Double(l.limit) }
             let tightest = limits.sorted { (left($0), $0.name) < (left($1), $1.name) }.prefix(2)
-            let lowest = tightest.first.map(left) ?? 1
-            Label {
-                Text(tightest.map { "\($0.remaining.formatted())/\($0.limit.formatted()) \(Self.name($0.name))" }.joined(separator: " · "))
-                    .lineLimit(1).truncationMode(.tail)
-            } icon: {
-                Image(systemName: "gauge.with.dots.needle.bottom.50percent")
-                    .foregroundStyle(lowest < 0.1 ? .red : lowest < 0.3 ? .orange : .green)
+            HStack(spacing: 14) {
+                ForEach(Array(tightest), id: \.name) { l in
+                    HStack(spacing: 6) {
+                        Text(Self.name(l.name)).font(.caption).foregroundStyle(.secondary).fixedSize()
+                        UsageBar(left: left(l))
+                    }
+                }
             }
-            .font(.caption).foregroundStyle(.secondary)
             .help(limits.map(Self.detail).joined(separator: "\n") + "\nAs of \(Self.duration(age)) ago.")
         }
     }
@@ -255,6 +254,23 @@ private struct UsageLine: View {
 
     static func duration(_ secs: UInt64) -> String {
         secs < 90 ? "\(secs)s" : secs < 5400 ? "\(secs / 60) min" : "\(secs / 3600) h"
+    }
+}
+
+/// How much of a limit is used: fills up as it is used, orange then red as it runs low.
+private struct UsageBar: View {
+    /// The share still left, 0 to 1.
+    let left: Double
+
+    var body: some View {
+        let used = min(max(1 - left, 0), 1)
+        ZStack(alignment: .leading) {
+            Capsule().fill(.quaternary)
+            Capsule().fill(left < 0.1 ? Color.red : left < 0.3 ? .orange : .green)
+                .frame(width: max(used * 72, used > 0 ? 4 : 0))
+        }
+        .frame(width: 72, height: 5)
+        .accessibilityLabel("\(Int((used * 100).rounded()))% used")
     }
 }
 
