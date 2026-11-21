@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Arity, KeyCheck, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, KeyCheck, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -28,7 +28,7 @@ const USAGE: &str = "usage:
   arity scores                               average rating per model
   arity reveal <run>                         which model did a run
   arity models [--refresh]                   models the configured providers offer
-  arity providers                            providers in config.json, and which have a key
+  arity providers                            accounts, their plans, and which have a key
   arity provider add <name> <url> [--key]    add an OpenAI-compatible endpoint; --key if it needs one
   arity provider rm <name>                   remove one you added, and its key
   arity key    set <provider>                store an API key, from a hidden prompt or stdin
@@ -181,13 +181,21 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("reveal", 2) => println!("{}", arity.reveal(arg(1).parse()?)?),
         ("models", 1 | 2) => arity.models(arg(1) == "--refresh")?.iter().for_each(|m| println!("{m}")),
         ("providers", 1) => {
-            for p in arity.providers()? {
-                let key = match (p.needs_key, p.has_key) {
-                    (false, _) => "no key needed",
-                    (true, true) => "key set",
-                    (true, false) => "needs a key: arity key set",
+            for a in arity.accounts()? {
+                let key = match (&a.key_for, a.has_key) {
+                    (None, _) => String::new(),
+                    (Some(_), true) => " · key set".into(),
+                    (Some(k), false) => format!(" · needs a key: arity key set {k}"),
                 };
-                println!("{:<10} {:<45} {key}", p.name, p.url);
+                println!("{}{key}", a.title);
+                for p in a.plans {
+                    let how = match p.access {
+                        Access::SignIn { account: Some(who) } => format!(" · signed in as {who}"),
+                        Access::SignIn { account: None } => " · arity login".into(),
+                        _ => String::new(),
+                    };
+                    println!("  {:<12} {:<10} {}{how}", p.provider, p.title, p.note);
+                }
             }
         }
         ("key", 3) if arg(1) == "set" => {

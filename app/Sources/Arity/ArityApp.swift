@@ -54,7 +54,7 @@ struct ContentView: View {
             }
             ToolbarItem {
                 Button("Models", systemImage: "cpu") { store.showSettings = true }
-                    .help("ChatGPT, providers and keys, and worker models (⌘,)")
+                    .help("Your accounts, their keys and plans, and worker models (⌘,)")
             }
             ToolbarItem {
                 Button("New Chat", systemImage: "square.and.pencil") { store.newChat() }

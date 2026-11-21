@@ -20,7 +20,8 @@ final class Store {
     /// What the configured providers offer, and which of them tasks for agents are picked from.
     var models: [String] = []
     var workers: [String] = []
-    var providers: [Provider] = []
+    /// OpenAI, OpenCode, Nous, this Mac, and any the user added, each with its plans.
+    var accounts: [Account] = []
     /// What checking each provider's key found. Missing while a check runs.
     var keyChecks: [String: KeyCheck] = [:]
     var model = ""
@@ -208,7 +209,7 @@ final class Store {
 
     /// Model lists are fetched from each provider and cached, so this runs off the main thread.
     func loadModels(refresh: Bool = false) {
-        providers = attempt { try core.providers() } ?? []
+        accounts = attempt { try core.accounts() } ?? []
         workers = attempt { try core.workerModels() } ?? []
         let core = self.core
         Task.detached {
@@ -236,11 +237,13 @@ final class Store {
     /// Check every saved key, off the main thread, without running a model.
     func checkKeys() {
         let core = self.core
-        for p in providers where p.needsKey && p.hasKey {
-            keyChecks[p.name] = nil
-            Task.detached {
-                let check = (try? core.checkProvider(name: p.name)) ?? .unreachable(reason: "the check failed")
-                await MainActor.run { self.keyChecks[p.name] = check }
+        for a in accounts where a.hasKey {
+            for p in a.plans where p.access == .key {
+                keyChecks[p.provider] = nil
+                Task.detached {
+                    let check = (try? core.checkProvider(name: p.provider)) ?? .unreachable(reason: "the check failed")
+                    await MainActor.run { self.keyChecks[p.provider] = check }
+                }
             }
         }
     }

@@ -139,17 +139,43 @@ pub struct Score {
     pub average: f64,
 }
 
-/// A place models are reached through, from config.json. Its key is never shown.
+/// Somewhere you have models: OpenAI, OpenCode, Nous, this Mac. It holds at
+/// most one key, shared by its plans. The key itself is never shown.
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct Provider {
+pub struct Account {
     pub name: String,
-    pub url: String,
-    pub needs_key: bool,
+    pub title: String,
+    /// The provider to give the key to, if any plan needs one.
+    pub key_for: Option<String>,
     pub has_key: bool,
-    /// One Arity comes with. It cannot be removed, only left without a key.
-    pub builtin: bool,
-    /// The provider whose key this one uses, when it is not its own.
-    pub key_from: Option<String>,
+    /// Where to get a key.
+    pub key_page: Option<String>,
+    /// Added by the user, so it can be removed.
+    pub removable: bool,
+    pub plans: Vec<Plan>,
+}
+
+/// One way of reaching an account's models, with its own models and limits.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Plan {
+    /// The model prefix: a provider in config.json, or `codex` for the ChatGPT plan.
+    pub provider: String,
+    pub title: String,
+    /// What it costs, in a few words.
+    pub note: String,
+    pub access: Access,
+    /// Where to get it, for a plan that needs a subscription.
+    pub page: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum Access {
+    /// Nothing to set up.
+    Open,
+    /// The account's key.
+    Key,
+    /// The ChatGPT sign-in; `account` is who is signed in.
+    SignIn { account: Option<String> },
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -201,19 +227,55 @@ impl Arity {
         Ok(config::set_worker(&self.dir, &model, on)?)
     }
 
-    pub fn providers(&self) -> Result<Vec<Provider>> {
-        Ok(config::load(&self.dir)?
-            .providers
-            .into_iter()
-            .map(|p| Provider {
-                has_key: keys::get(&self.dir, &p.key_name).is_some(),
-                key_from: (p.key_name != p.name).then_some(p.key_name),
-                name: p.name,
-                url: p.url,
-                needs_key: p.needs_key,
-                builtin: p.builtin,
-            })
-            .collect())
+    /// Every account and its plans: the built-in ones first, then those the user added.
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        let mut out: Vec<Account> = vec![];
+        for p in config::load(&self.dir)?.providers {
+            let i = match out.iter().position(|a| a.name == p.account) {
+                Some(i) => i,
+                None => {
+                    out.push(Account {
+                        name: p.account.clone(),
+                        title: p.account_title.clone(),
+                        key_for: None,
+                        has_key: false,
+                        key_page: None,
+                        removable: !p.builtin,
+                        plans: vec![],
+                    });
+                    out.len() - 1
+                }
+            };
+            let a = &mut out[i];
+            if p.needs_key && a.key_for.is_none() {
+                a.has_key = keys::get(&self.dir, &p.key_name).is_some();
+                a.key_for = Some(p.key_name.clone());
+            }
+            // The key's own provider says where to get it; a plan on a borrowed key links to subscribing.
+            if p.needs_key && p.key_name == p.name {
+                a.key_page = p.page.clone();
+            }
+            let borrowed = p.key_name != p.name;
+            a.plans.push(Plan {
+                access: if p.needs_key { Access::Key } else { Access::Open },
+                page: if borrowed { p.page } else { None },
+                provider: p.name,
+                title: p.title,
+                note: p.note,
+            });
+        }
+        if let Some(a) = out.iter_mut().find(|a| a.name == "openai") {
+            a.plans.insert(0, Plan {
+                provider: "codex".into(),
+                title: "ChatGPT".into(),
+                note: "Your Plus or Pro plan, through OpenAI's sign-in for apps".into(),
+                access: Access::SignIn { account: codex_auth::account(&self.dir.join("codex-auth.json")) },
+                page: None,
+            });
+        }
+        let rank = |a: &Account| config::ACCOUNT_ORDER.iter().position(|n| *n == a.name).unwrap_or(usize::MAX);
+        out.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.name.cmp(&b.name)));
+        Ok(out)
     }
 
     /// Add an OpenAI-compatible endpoint to config.json, or change one.

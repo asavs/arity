@@ -1,8 +1,8 @@
 import ArityCore
 import SwiftUI
 
-/// Where models come from: the ChatGPT sign-in, OpenAI-compatible providers with
-/// their keys, and which models tasks for agents may be given.
+/// Where models come from: your accounts, each with a key and the plans it
+/// opens, and which models tasks for agents may be given.
 struct SettingsSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -11,26 +11,7 @@ struct SettingsSheet: View {
         @Bindable var store = store
         VStack(spacing: 0) {
             Form {
-                Section {
-                    ChatGPTRow()
-                } header: {
-                    Text("ChatGPT")
-                } footer: {
-                    Text("Uses your Plus or Pro plan through OpenAI's sign-in for apps.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Section {
-                    ForEach(store.providers, id: \.name) { ProviderRow(provider: $0) }
-                } header: {
-                    HStack {
-                        Text("Providers")
-                        Spacer()
-                        AddProviderMenu()
-                    }
-                } footer: {
-                    Text("Any OpenAI-compatible endpoint. Keys stay in keys.json in the data folder.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                ForEach(store.accounts, id: \.name) { AccountSection(account: $0) }
                 Section {
                     if store.models.isEmpty {
                         Text("Sign in or add a key to see models.").foregroundStyle(.secondary)
@@ -56,6 +37,7 @@ struct SettingsSheet: View {
             }
             .formStyle(.grouped)
             HStack {
+                AddProviderMenu()
                 if let error = store.error {
                     Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).lineLimit(2)
                 }
@@ -64,129 +46,147 @@ struct SettingsSheet: View {
             }
             .padding(12)
         }
-        .frame(width: 540, height: 620)
+        .frame(width: 560, height: 680)
         .onAppear { store.checkKeys() }
         .sheet(item: $store.addingProvider) { AddProviderSheet(preset: $0) }
     }
 }
 
-private struct ChatGPTRow: View {
+/// An account: its key, if it takes one, then a row per plan.
+private struct AccountSection: View {
     @Environment(Store.self) private var store
+    let account: Account
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: store.chatgptAccount == nil ? "person.crop.circle" : "person.crop.circle.badge.checkmark")
-                .font(.title2)
-                .foregroundStyle(store.chatgptAccount == nil ? Color.secondary : Color.green)
-            if store.signingIn {
-                ProgressView().controlSize(.small)
-                Text("Finish signing in in your browser…")
+        Section {
+            // Plans that need no key come first, so the key sits just above the plans it opens.
+            ForEach(account.plans.filter { $0.access != .key }, id: \.provider) { PlanRow(account: account, plan: $0) }
+            if let owner = account.keyFor { KeyRow(account: account, owner: owner) }
+            ForEach(account.plans.filter { $0.access == .key }, id: \.provider) { PlanRow(account: account, plan: $0) }
+        } header: {
+            HStack {
+                Text(account.title)
                 Spacer()
-                Button("Cancel") { store.cancelSignIn() }
-            } else if let account = store.chatgptAccount {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Signed in")
-                    Text(account).font(.caption).foregroundStyle(.secondary)
+                if account.removable {
+                    Button("Remove \(account.title)", systemImage: "minus.circle") { store.removeProvider(account.name) }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        .help("Remove this account and its key")
                 }
-                Spacer()
-                Button("Sign Out") { store.signOutOfChatGPT() }
-            } else {
-                Text("Not signed in").foregroundStyle(.secondary)
-                Spacer()
-                Button("Sign In with ChatGPT") { store.signInToChatGPT() }
-                    .buttonStyle(.borderedProminent)
             }
         }
-        .padding(.vertical, 2)
     }
 }
 
-private struct ProviderRow: View {
+private struct KeyRow: View {
     @Environment(Store.self) private var store
-    let provider: Provider
+    let account: Account
+    /// The provider the key is stored for.
+    let owner: String
     @State private var key = ""
 
-    /// Friendlier names, and where to get a key, for the providers Arity comes with.
-    static let titles = ["mlx": "MLX on this Mac", "nous": "Nous Portal", "opencode": "OpenCode Zen", "opencode-go": "OpenCode Go"]
-    static let keyPages = [
-        "nous": URL(string: "https://portal.nousresearch.com")!,
-        "opencode": URL(string: "https://opencode.ai")!,
-        "opencode-go": URL(string: "https://opencode.ai/go")!,
-    ]
-
-    private var check: KeyCheck? { store.keyChecks[provider.name] }
-    private var rejected: Bool { if case .rejected = check { return true }; return false }
-
-    private var dot: Color {
-        if !provider.needsKey { return .green }
-        guard provider.hasKey else { return .secondary.opacity(0.4) }
-        switch check {
-        case .works: return .green
-        case .rejected: return .red
-        case .unreachable: return .orange
-        case .noKey, nil: return .secondary.opacity(0.4)
-        }
-    }
+    /// The key's own plan refused it, so a new one is wanted.
+    private var refused: Bool { if case .rejected = store.keyChecks[owner] { return true }; return false }
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle().fill(dot).frame(width: 8, height: 8)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(Self.titles[provider.name] ?? provider.name)
-                    if provider.needsKey && (!provider.hasKey || rejected), let link = Self.keyPages[provider.name] {
-                        Link(provider.keyFrom == nil ? "Get a key" : "Subscribe", destination: link).font(.caption)
-                    }
-                }
-                if case .rejected(let reason) = check {
-                    Text(reason).font(.caption).foregroundStyle(.red).lineLimit(2)
-                } else {
-                    Text(provider.url).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
+            Image(systemName: "key").foregroundStyle(.secondary).frame(width: 16)
+            Text("API key")
+            if !account.hasKey || refused, let page = account.keyPage.flatMap(URL.init(string:)) {
+                Link("Get a key", destination: page).font(.caption)
             }
             Spacer()
-            if !provider.needsKey {
-                Text("No key needed").font(.callout).foregroundStyle(.secondary)
-            } else if let from = provider.keyFrom {
-                // The key is set on the provider it comes from; a refusal here is about the account, not the key.
-                if provider.hasKey && !rejected { status }
-                Text("Uses the \(Self.titles[from] ?? from) key").font(.callout).foregroundStyle(.secondary)
-            } else if provider.hasKey && !rejected {
-                status
-                Button("Remove Key") { store.setKey(provider.name, "") }
+            if account.hasKey && !refused {
+                Text("Saved").font(.callout).foregroundStyle(.secondary)
+                Button("Remove Key") { store.setKey(owner, "") }
             } else {
-                SecureField("API key", text: $key, prompt: Text(rejected ? "Paste a new key" : "Paste API key"))
+                SecureField("API key", text: $key, prompt: Text(refused ? "Paste a new key" : "Paste API key"))
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
+                    .frame(width: 180)
                     .onSubmit(save)
                 Button("Save", action: save).disabled(key.isEmpty)
-            }
-            if !provider.builtin {
-                Button("Remove \(provider.name)", systemImage: "minus.circle") { store.removeProvider(provider.name) }
-                    .labelStyle(.iconOnly).buttonStyle(.borderless)
-                    .help("Remove this provider and its key")
             }
         }
         .padding(.vertical, 2)
     }
 
-    @ViewBuilder private var status: some View {
-        switch check {
-        case .works: Text("Key works").font(.callout).foregroundStyle(.secondary)
-        case .unreachable(let reason):
-            Text("Couldn't check").font(.callout).foregroundStyle(.orange).help(reason)
-        default:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Checking…").font(.callout).foregroundStyle(.secondary)
+    private func save() {
+        store.setKey(owner, key)
+        key = ""
+    }
+}
+
+/// A plan: whether it works, what it costs or why it is refused, and what to do about it.
+private struct PlanRow: View {
+    @Environment(Store.self) private var store
+    let account: Account
+    let plan: Plan
+
+    private var check: KeyCheck? { store.keyChecks[plan.provider] }
+
+    private var dot: Color {
+        switch plan.access {
+        case .open: return .green
+        case .signIn(let who): return who == nil ? .secondary.opacity(0.4) : .green
+        case .key:
+            guard account.hasKey else { return .secondary.opacity(0.4) }
+            switch check {
+            case .works: return .green
+            case .rejected: return .red
+            case .unreachable: return .orange
+            case .noKey, nil: return .secondary.opacity(0.4)
             }
         }
     }
 
-    private func save() {
-        store.setKey(provider.name, key)
-        key = ""
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle().fill(dot).frame(width: 8, height: 8).frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(plan.title)
+                if case .rejected(let reason) = check, account.hasKey {
+                    Text(reason).font(.caption).foregroundStyle(.red).lineLimit(2)
+                } else {
+                    Text(plan.note).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            Spacer()
+            trailing
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var trailing: some View {
+        switch plan.access {
+        case .open:
+            EmptyView()
+        case .signIn(let who):
+            if store.signingIn {
+                ProgressView().controlSize(.small)
+                Text("Finish in your browser…").font(.callout).foregroundStyle(.secondary)
+                Button("Cancel") { store.cancelSignIn() }
+            } else if let who {
+                Text(who).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                Button("Sign Out") { store.signOutOfChatGPT() }
+            } else {
+                Button("Sign In with ChatGPT") { store.signInToChatGPT() }.buttonStyle(.borderedProminent)
+            }
+        case .key:
+            if !account.hasKey {
+                Text("Needs the key").font(.callout).foregroundStyle(.secondary)
+            } else {
+                switch check {
+                case .works: Text("Works").font(.callout).foregroundStyle(.secondary)
+                case .rejected:
+                    if let page = plan.page.flatMap(URL.init(string:)) { Link("Subscribe", destination: page).font(.callout) }
+                case .unreachable(let reason):
+                    Text("Couldn't check").font(.callout).foregroundStyle(.orange).help(reason)
+                case .noKey, nil:
+                    ProgressView().controlSize(.small)
+                    Text("Checking…").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 
@@ -201,7 +201,6 @@ struct ProviderPreset: Identifiable {
     static let custom = ProviderPreset(title: "Custom", name: "", url: "https://", needsKey: true)
     static let all = [
         ProviderPreset(title: "OpenRouter", name: "openrouter", url: "https://openrouter.ai/api/v1", needsKey: true),
-        ProviderPreset(title: "OpenAI API", name: "openai", url: "https://api.openai.com/v1", needsKey: true),
         ProviderPreset(title: "Groq", name: "groq", url: "https://api.groq.com/openai/v1", needsKey: true),
         ProviderPreset(title: "Mistral", name: "mistral", url: "https://api.mistral.ai/v1", needsKey: true),
         ProviderPreset(title: "DeepSeek", name: "deepseek", url: "https://api.deepseek.com/v1", needsKey: true),
@@ -216,7 +215,7 @@ private struct AddProviderMenu: View {
 
     var body: some View {
         Menu {
-            ForEach(ProviderPreset.all.filter { p in !store.providers.contains { $0.name == p.name } }) { p in
+            ForEach(ProviderPreset.all.filter { p in !store.accounts.contains { $0.plans.contains { $0.provider == p.name } } }) { p in
                 Button(p.title) { store.addingProvider = p }
             }
             Divider()
