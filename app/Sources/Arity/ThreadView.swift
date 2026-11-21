@@ -9,6 +9,8 @@ struct ThreadView: View {
     @Environment(Store.self) private var store
     @State private var message = ""
     @FocusState private var composing: Bool
+    /// The view is scrolled to the end, so a growing reply keeps it there. Scrolling up lets go.
+    @State private var pinned = true
 
     private var busy: Bool { store.selection.map(store.running.contains) ?? false }
 
@@ -26,9 +28,16 @@ struct ThreadView: View {
                     .padding()
                 }
                 .defaultScrollAnchor(.bottom)
-                .onChange(of: store.messages.count) {
-                    withAnimation { proxy.scrollTo(busy ? "busy" : store.messages.last?.id, anchor: .bottom) }
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 40
+                } action: { _, atEnd in pinned = atEnd }
+                .onChange(of: store.messages.last?.text) {
+                    if pinned { proxy.scrollTo(busy ? "busy" : store.messages.last?.id, anchor: .bottom) }
                 }
+                .onChange(of: store.messages.count) {
+                    if pinned { proxy.scrollTo(busy ? "busy" : store.messages.last?.id, anchor: .bottom) }
+                }
+                .onChange(of: store.selection) { pinned = true }
             }
 
             if let error = store.error {
@@ -81,12 +90,23 @@ struct ThreadView: View {
                 .lineLimit(lines)
                 .focused($composing)
                 .onSubmit(send)
+                .onExitCommand { if busy { store.stop() } }
 
-            Button("Send", systemImage: "arrow.up.circle.fill", action: send)
-                .labelStyle(.iconOnly)
-                .font(.title2)
-                .buttonStyle(.borderless)
-                .disabled(busy || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            // While a turn runs, Stop sits where Send is, until something is typed to send after it.
+            if busy && message.isEmpty {
+                Button("Stop", systemImage: "stop.circle.fill") { store.stop() }
+                    .labelStyle(.iconOnly)
+                    .font(.title2)
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Stop the reply (Esc)")
+            } else {
+                Button("Send", systemImage: "arrow.up.circle.fill", action: send)
+                    .labelStyle(.iconOnly)
+                    .font(.title2)
+                    .buttonStyle(.borderless)
+                    .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
     }
 
@@ -119,7 +139,7 @@ struct ThreadView: View {
 
     private func send() {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !busy else { return }
+        guard !text.isEmpty else { return }
         message = ""
         store.send(text)
     }

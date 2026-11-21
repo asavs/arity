@@ -1,7 +1,10 @@
 //! `arity`, the command-line front end. Everything it does goes through
 //! `arity_core::Arity`, the same object the Mac app uses.
 
-use arity_core::{Arity, Clearance, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use arity_core::{Arity, Clearance, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -10,6 +13,7 @@ const USAGE: &str = "usage:
   arity log    <thread>                      read a thread
   arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used
   arity resume <conv> [model]                carry on a conversation that stopped
+  arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
@@ -73,12 +77,22 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("log", 2) => arity.messages(arg(1))?.iter().for_each(print),
         ("chat", n) if n >= 4 => {
             let model = model_for(&arg(1), arg(2))?;
-            arity.send_with(&arg(1), &model, &args[3..].join(" "), &mut |m| print(m))?;
+            stop_on_ctrl_c(&arg(1));
+            if !arity.send_with(&arg(1), &model, &args[3..].join(" "), &mut streamer(&model))? {
+                println!("a turn is running in {}; it answers this next", arg(1));
+            }
         }
         ("resume", 2 | 3) => {
             let model = model_for(&arg(1), arg(2))?;
-            arity.resume_with(&arg(1), &model, &mut |m| print(m))?;
+            stop_on_ctrl_c(&arg(1));
+            if !arity.resume_with(&arg(1), &model, &mut streamer(&model))? {
+                println!("a turn is already running in {}", arg(1));
+            }
         }
+        ("stop", 2) => match arity.stop(arg(1))? {
+            true => println!("stopping {}", arg(1)),
+            false => println!("nothing is running in {}", arg(1)),
+        },
         ("fork", 3) => {
             arity.fork(arg(1).parse()?, arg(2))?;
             println!("{} now branches from entry #{}", arg(2), arg(1));
@@ -163,6 +177,53 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         _ => println!("{USAGE}"),
     }
     Ok(())
+}
+
+/// Prints the reply as it arrives, then each message as it is written. The
+/// finished reply's text is already on screen, so only its line is ended.
+fn streamer(model: &str) -> impl FnMut(Event) {
+    let who = model.to_string();
+    let mut streaming = false;
+    move |e| match e {
+        Event::Text(t) => {
+            if !streaming {
+                print!("      {who}: ");
+                streaming = true;
+            }
+            print!("{t}");
+            let _ = std::io::stdout().flush();
+        }
+        Event::Message(m) if streaming && m.kind == MessageKind::Assistant => {
+            println!();
+            streaming = false;
+        }
+        Event::Message(m) => {
+            if std::mem::take(&mut streaming) {
+                println!();
+            }
+            print(m)
+        }
+    }
+}
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Ctrl-C stops the turn the way `arity stop` would, keeping the reply so far.
+/// A second Ctrl-C quits at once.
+fn stop_on_ctrl_c(conv: &str) {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        if INTERRUPTED.swap(true, Ordering::SeqCst) {
+            unsafe { libc::_exit(130) };
+        }
+    }
+    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+    let conv = conv.to_string();
+    std::thread::spawn(move || {
+        while !INTERRUPTED.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = Arity::new(None).stop(conv);
+    });
 }
 
 fn print(m: &Message) {
