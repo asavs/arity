@@ -137,6 +137,8 @@ pub struct Provider {
     pub url: String,
     pub needs_key: bool,
     pub has_key: bool,
+    /// One Arity comes with. It cannot be removed, only left without a key.
+    pub builtin: bool,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -192,8 +194,25 @@ impl Arity {
         Ok(config::load(&self.dir)?
             .providers
             .into_iter()
-            .map(|p| Provider { has_key: keys::get(&self.dir, &p.name).is_some(), name: p.name, url: p.url, needs_key: p.needs_key })
+            .map(|p| Provider {
+                has_key: keys::get(&self.dir, &p.name).is_some(),
+                name: p.name,
+                url: p.url,
+                needs_key: p.needs_key,
+                builtin: p.builtin,
+            })
             .collect())
+    }
+
+    /// Add an OpenAI-compatible endpoint to config.json, or change one.
+    pub fn add_provider(&self, name: String, url: String, needs_key: bool) -> Result<()> {
+        Ok(config::add_provider(&self.dir, &name, &url, needs_key)?)
+    }
+
+    /// Remove a provider the user added, and its key.
+    pub fn remove_provider(&self, name: String) -> Result<()> {
+        config::remove_provider(&self.dir, &name)?;
+        Ok(keys::set(&self.dir, &name, "")?)
     }
 
     /// Store a provider's API key. An empty key removes it.
@@ -386,6 +405,20 @@ impl Arity {
 
     pub fn chatgpt_signed_in(&self) -> bool {
         codex_auth::signed_in(&self.dir.join("codex-auth.json"))
+    }
+
+    /// The signed-in ChatGPT account's email, if any.
+    pub fn chatgpt_account(&self) -> Option<String> {
+        codex_auth::account(&self.dir.join("codex-auth.json"))
+    }
+
+    /// Stop a ChatGPT sign-in that is waiting for the browser.
+    pub fn cancel_chatgpt_sign_in(&self) {
+        codex_auth::cancel()
+    }
+
+    pub fn sign_out_chatgpt(&self) -> Result<()> {
+        Ok(codex_auth::logout(&self.dir.join("codex-auth.json"))?)
     }
 }
 

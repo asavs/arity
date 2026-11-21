@@ -23,10 +23,15 @@ final class Store {
     var providers: [Provider] = []
     var model = ""
     var showSettings = false
+    /// The add-provider form, open with these values.
+    var addingProvider: ProviderPreset?
     /// Chats with a model turn in flight.
     var running: Set<String> = []
     var error: String?
-    var signedInToChatGPT = false
+    /// The signed-in ChatGPT account's email, or nil.
+    var chatgptAccount: String?
+    /// A ChatGPT sign-in is waiting for the browser.
+    var signingIn = false
     /// The user's page, `people/<login>`: the assignee for "Me".
     let me: String
 
@@ -41,7 +46,7 @@ final class Store {
 
     init() {
         me = core.me()
-        signedInToChatGPT = core.chatgptSignedIn()
+        chatgptAccount = core.chatgptAccount()
         loadModels()
         refresh()
         startDispatcher()
@@ -212,16 +217,44 @@ final class Store {
         workers = attempt { try core.workerModels() } ?? workers
     }
 
+    /// Opens the browser; the sheet shows progress until the sign-in comes back or is cancelled.
     func signInToChatGPT() {
+        error = nil
+        signingIn = true
         let core = self.core
         Task.detached {
             let result = Result { try core.signInChatgpt() }
             await MainActor.run {
-                if case .failure(let e) = result { self.error = Self.describe(e) }
-                self.signedInToChatGPT = core.chatgptSignedIn()
-                self.loadModels()
+                self.signingIn = false
+                if case .failure(let e) = result, !Self.describe(e).contains("cancelled") { self.error = Self.describe(e) }
+                self.chatgptAccount = core.chatgptAccount()
+                self.loadModels(refresh: true)
             }
         }
+    }
+
+    func cancelSignIn() {
+        core.cancelChatgptSignIn()
+    }
+
+    func signOutOfChatGPT() {
+        _ = attempt { try core.signOutChatgpt() }
+        chatgptAccount = core.chatgptAccount()
+        loadModels()
+    }
+
+    /// Add a provider, and its key if one was given. False if the core refused it.
+    func addProvider(_ name: String, _ url: String, needsKey: Bool, key: String) -> Bool {
+        error = nil
+        guard attempt({ try core.addProvider(name: name, url: url, needsKey: needsKey) }) != nil else { return false }
+        if needsKey && !key.isEmpty { _ = attempt { try core.setKey(provider: name, key: key) } }
+        loadModels(refresh: true)
+        return true
+    }
+
+    func removeProvider(_ name: String) {
+        _ = attempt { try core.removeProvider(name: name) }
+        loadModels()
     }
 
     /// Model calls block, so they run off the main thread. Progress shows up through polling.

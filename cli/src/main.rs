@@ -25,10 +25,12 @@ const USAGE: &str = "usage:
   arity reveal <run>                         which model did a run
   arity models [--refresh]                   models the configured providers offer
   arity providers                            providers in config.json, and which have a key
+  arity provider add <name> <url> [--key]    add an OpenAI-compatible endpoint; --key if it needs one
+  arity provider rm <name>                   remove one you added, and its key
   arity key    set <provider>                store an API key, from a hidden prompt or stdin
   arity key    rm <provider>                 forget it
   arity workers [add|rm <model>]             the models tasks for agents are picked from
-  arity login                                sign in with ChatGPT
+  arity login | logout                       sign in to ChatGPT, or out
 
 fields: --title <t>  --agent | --me  --local | --any  --priority low|normal|high|urgent
         --due YYYY-MM-DD  --blocked-by <id,id>  --tag <t> (repeatable)  --no-tags
@@ -177,6 +179,12 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             arity.set_key(arg(2), read_secret(&format!("API key for {}: ", arg(2)))?)?;
             println!("saved the key for {}", arg(2));
         }
+        ("provider", 4 | 5) if arg(1) == "add" => {
+            arity.add_provider(arg(2), arg(3), arg(4) == "--key")?;
+            println!("added {}{}", arg(2), if arg(4) == "--key" { format!("; now run `arity key set {}`", arg(2)) } else { String::new() });
+        }
+        ("provider", 3) if arg(1) == "rm" => arity.remove_provider(arg(2))?,
+        ("logout", 1) => arity.sign_out_chatgpt()?,
         ("key", 3) if arg(1) == "rm" => arity.set_key(arg(2), String::new())?,
         ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
         ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,

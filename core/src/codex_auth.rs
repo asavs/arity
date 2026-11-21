@@ -106,9 +106,35 @@ pub fn login(path: &Path) -> Result<String> {
     let id = claims(tokens["id_token"].as_str().unwrap_or_default()).ok_or_else(|| anyhow!("no ID token"))?;
     let aud_ok = id["aud"].as_str() == Some(issued.as_str()) || id["aud"].as_array().is_some_and(|a| a.iter().any(|x| x == &json!(issued)));
     ensure!(aud_ok && id["nonce"].as_str() == Some(nonce.as_str()), "the ID token is not for this sign-in");
+    let who = id["email"].as_str().or(id["sub"].as_str()).unwrap_or("your account").to_string();
     saved["client_id"] = json!(issued);
+    saved["email"] = json!(who);
     save(path, saved, &tokens)?;
-    Ok(id["email"].as_str().or(id["sub"].as_str()).unwrap_or("signed in").into())
+    Ok(who)
+}
+
+/// Who is signed in, if anyone.
+pub fn account(path: &Path) -> Option<String> {
+    signed_in(path).then(|| read(path)["email"].as_str().unwrap_or("signed in").to_string())
+}
+
+/// Forget the tokens. The client id and host id stay, so signing in again
+/// reuses the registration instead of making a new one.
+pub fn logout(path: &Path) -> Result<()> {
+    let mut saved = read(path);
+    if let Some(o) = saved.as_object_mut() {
+        for k in ["access_token", "refresh_token", "expires_at", "email"] {
+            o.remove(k);
+        }
+    }
+    write(path, &saved)
+}
+
+/// Stop a sign-in that is waiting for the browser.
+pub fn cancel() {
+    if let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:1455") {
+        let _ = s.write_all(b"GET /cancel HTTP/1.1\r\n\r\n");
+    }
 }
 
 /// A valid access token, refreshing it first if it is about to expire, and the
@@ -196,6 +222,9 @@ fn serve(listener: TcpListener) -> Result<String> {
         }
         // "GET /auth/callback?code=...&state=... HTTP/1.1"
         let target = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+        if target == "/cancel" && stream.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
+            bail!("sign-in cancelled");
+        }
         let Some(query) = target.strip_prefix("/auth/callback?") else {
             let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
             continue;

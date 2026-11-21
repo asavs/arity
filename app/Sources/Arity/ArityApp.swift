@@ -53,8 +53,8 @@ struct ContentView: View {
                     .popover(isPresented: $showScores, arrowEdge: .bottom) { Scores() }
             }
             ToolbarItem {
-                Button("Settings", systemImage: "key") { store.showSettings = true }
-                    .help("API keys and worker models (⌘,)")
+                Button("Models", systemImage: "cpu") { store.showSettings = true }
+                    .help("ChatGPT, providers and keys, and worker models (⌘,)")
             }
             ToolbarItem {
                 Button("New Chat", systemImage: "square.and.pencil") { store.newChat() }

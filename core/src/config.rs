@@ -29,6 +29,8 @@ pub struct Provider {
     pub url: String,
     pub needs_key: bool,
     pub models: Vec<String>,
+    /// One of the providers Arity comes with; it can be changed but not removed.
+    pub builtin: bool,
 }
 
 const DEFAULT_WORKERS: &[&str] = &[
@@ -70,7 +72,8 @@ fn parse(v: &Value) -> Result<Config> {
     let strings = |v: &Value| -> Vec<String> {
         v.as_array().map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect()).unwrap_or_default()
     };
-    let mut providers = default_providers();
+    let defaults = default_providers();
+    let mut providers = defaults.clone();
     for (name, p) in v["providers"].as_object().into_iter().flatten() {
         providers[name] = p.clone();
     }
@@ -83,10 +86,39 @@ fn parse(v: &Value) -> Result<Config> {
             url: url.trim_end_matches('/').into(),
             needs_key: p["key"].as_bool().unwrap_or(false),
             models: strings(&p["models"]),
+            builtin: defaults.get(name).is_some(),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Config { workers: strings(&v["workers"]), providers: out })
+}
+
+/// Add an OpenAI-compatible provider, or change one, keeping the rest of the file.
+pub fn add_provider(data_dir: &Path, name: &str, url: &str, needs_key: bool) -> Result<()> {
+    let (name, url) = (name.trim(), url.trim().trim_end_matches('/'));
+    anyhow::ensure!(
+        !name.is_empty() && name != "codex" && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        "a provider's name is lowercase letters, digits and dashes, and not codex"
+    );
+    anyhow::ensure!(url.starts_with("http://") || url.starts_with("https://"), "the URL starts with http:// or https://");
+    let mut v = read(data_dir)?;
+    if !v["providers"].is_object() {
+        v["providers"] = json!({});
+    }
+    v["providers"][name] = json!({ "url": url, "key": needs_key });
+    parse(&v)?;
+    std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
+/// Remove a provider the user added. Built-in ones go back to their defaults.
+pub fn remove_provider(data_dir: &Path, name: &str) -> Result<()> {
+    let mut v = read(data_dir)?;
+    if let Some(p) = v["providers"].as_object_mut() {
+        p.remove(name);
+    }
+    std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
 }
 
 /// Add a model to `workers`, or take it out. Leaves the rest of the file as it is.
@@ -118,6 +150,23 @@ mod tests {
         assert!(c.providers[0].needs_key && !c.providers[1].needs_key);
         assert!(parse(&json!({ "providers": { "a:b": { "url": "x" } } })).is_err());
         assert!(parse(&json!({ "providers": { "x": {} } })).is_err());
+        assert!(c.providers[2].builtin && !c.providers[0].builtin);
+        Ok(())
+    }
+
+    #[test]
+    fn providers_are_added_and_removed() -> Result<()> {
+        let d = std::env::temp_dir().join(format!("arity-config-{}", std::process::id()));
+        add_provider(&d, "groq", "https://api.groq.com/openai/v1/", true)?;
+        let g = load(&d)?.providers.into_iter().find(|p| p.name == "groq").unwrap();
+        assert_eq!((g.url.as_str(), g.needs_key, g.builtin), ("https://api.groq.com/openai/v1", true, false));
+        assert!(add_provider(&d, "Bad Name", "https://x", false).is_err());
+        assert!(add_provider(&d, "codex", "https://x", false).is_err());
+        assert!(add_provider(&d, "x", "ftp://x", false).is_err());
+        remove_provider(&d, "groq")?;
+        assert!(!load(&d)?.providers.iter().any(|p| p.name == "groq"));
+        assert!(!load(&d)?.workers.is_empty(), "the rest of the file is kept");
+        std::fs::remove_dir_all(&d)?;
         Ok(())
     }
 }

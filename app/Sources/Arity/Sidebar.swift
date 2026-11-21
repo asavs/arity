@@ -24,8 +24,8 @@ struct Sidebar: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if !store.signedInToChatGPT {
-                Button("Sign in with ChatGPT") { store.signInToChatGPT() }
+            if store.models.isEmpty {
+                Button("Connect Models…", systemImage: "cpu") { store.showSettings = true }
                     .padding(10)
             }
         }
