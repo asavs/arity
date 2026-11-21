@@ -20,6 +20,7 @@ mod journal;
 mod keys;
 mod model;
 mod tools;
+mod turn;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,6 +43,13 @@ pub struct Message {
     pub text: String,
     /// Which model wrote it. None while the conversation is an unrated run.
     pub model: Option<String>,
+}
+
+/// What a running turn reports to a Rust caller: the reply's text as it
+/// arrives, and each message once it is written.
+pub enum Event<'a> {
+    Text(&'a str),
+    Message(&'a Message),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -258,11 +266,17 @@ impl Arity {
 
     pub fn messages(&self, conversation: String) -> Result<Vec<Message>> {
         let db = self.journal()?;
-        let hidden = match board::trial_of_conversation(db.conn(), &conversation)? {
-            Some(trial) => !board::is_rated(db.conn(), trial)?,
-            None => false,
-        };
-        let mut out: Vec<Message> = db.chain(&conversation)?.iter().flat_map(messages_of).collect();
+        let hidden = hidden(&db, &conversation)?;
+        let chain = db.chain(&conversation)?;
+        let head = chain.last().map_or(0, |e| e.id);
+        let mut out: Vec<Message> = chain.iter().flat_map(messages_of).collect();
+        // A turn in progress, in this process or another: the reply so far, then what waits for it.
+        if let Some((text, model)) = turn::partial(db.conn(), &conversation)? {
+            out.push(Message { id: "live".into(), entry: head, kind: MessageKind::Assistant, text, model });
+        }
+        for (id, text) in turn::queued(db.conn(), &conversation)? {
+            out.push(Message { id: format!("queued.{id}"), entry: head, kind: MessageKind::User, text, model: None });
+        }
         if hidden {
             out.iter_mut().for_each(|m| m.model = None);
         }
@@ -273,10 +287,8 @@ impl Arity {
     /// None for an unrated run, which would give the model away.
     pub fn last_model(&self, conversation: String) -> Result<Option<String>> {
         let db = self.journal()?;
-        if let Some(trial) = board::trial_of_conversation(db.conn(), &conversation)? {
-            if !board::is_rated(db.conn(), trial)? {
-                return Ok(None);
-            }
+        if hidden(&db, &conversation)? {
+            return Ok(None);
         }
         Ok(db.chain(&conversation)?.into_iter().rev().find_map(|e| e.model))
     }
@@ -287,14 +299,28 @@ impl Arity {
     }
 
     /// Add the user's message and run the model until it stops calling tools.
-    /// Blocks; call it off the main thread.
+    /// Blocks; call it off the main thread. If a turn is already running in the
+    /// conversation, in any process, the message waits for it and this returns at once.
     pub fn send(&self, conversation: String, model: String, text: String) -> Result<()> {
-        self.send_with(&conversation, &model, &text, &mut |_| {})
+        self.send_with(&conversation, &model, &text, &mut |_| {})?;
+        Ok(())
+    }
+
+    /// Stop the turn running in a conversation, in whichever process runs it.
+    /// The reply so far is kept. False if nothing was running.
+    pub fn stop(&self, conversation: String) -> Result<bool> {
+        Ok(turn::stop(self.journal()?.conn(), &conversation)?)
+    }
+
+    /// Conversations a turn is running in, in any process.
+    pub fn running(&self) -> Result<Vec<String>> {
+        Ok(turn::running(self.journal()?.conn())?)
     }
 
     /// Carry on a conversation that stopped part way, for example after a failed model call.
     pub fn resume(&self, conversation: String, model: String) -> Result<()> {
-        self.resume_with(&conversation, &model, &mut |_| {})
+        self.resume_with(&conversation, &model, &mut |_| {})?;
+        Ok(())
     }
 
     /// A new conversation sharing history up to and including `entry`.
@@ -422,18 +448,23 @@ impl Arity {
     }
 }
 
-/// Rust-only variants that report each new message as it is written. The CLI
-/// prints with these; the app instead watches `revision`.
+/// Rust-only variants that report text and messages as they come. The CLI
+/// prints with these; the app instead watches `revision`. Both return false
+/// when another loop is running the conversation; a sent message then waits for it.
 impl Arity {
-    pub fn send_with(&self, conv: &str, model: &str, text: &str, on: &mut dyn FnMut(&Message)) -> Result<()> {
-        let db = self.journal()?;
-        db.append(conv, "user", &serde_json::json!({ "text": text }), None)?;
-        agent::run(&db, &self.dir, conv, model, on)?;
-        Ok(())
+    pub fn send_with(&self, conv: &str, model: &str, text: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
+        turn::send(&self.journal()?, conv, text)?;
+        self.resume_with(conv, model, on)
     }
 
-    pub fn resume_with(&self, conv: &str, model: &str, on: &mut dyn FnMut(&Message)) -> Result<()> {
-        Ok(agent::run(&self.journal()?, &self.dir, conv, model, on)?)
+    pub fn resume_with(&self, conv: &str, model: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
+        let db = self.journal()?;
+        let hidden = hidden(&db, conv)?;
+        let mut masked = |e: Event| match e {
+            Event::Message(m) if hidden => on(Event::Message(&Message { model: None, ..m.clone() })),
+            e => on(e),
+        };
+        Ok(agent::run(&db, &self.dir, conv, model, &mut masked)?)
     }
 
     fn journal(&self) -> anyhow::Result<Journal> {
@@ -458,6 +489,14 @@ impl From<board::TaskRow> for BoardTask {
             note: t.note,
         }
     }
+}
+
+/// An unrated run's thread, where the model stays hidden.
+fn hidden(db: &Journal, conv: &str) -> anyhow::Result<bool> {
+    Ok(match board::trial_of_conversation(db.conn(), conv)? {
+        Some(trial) => !board::is_rated(db.conn(), trial)?,
+        None => false,
+    })
 }
 
 fn default_dir() -> PathBuf {
@@ -489,6 +528,9 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
             }
             for (i, c) in tool_calls_of(&e.body).into_iter().enumerate() {
                 out.push(msg(i + 1, MessageKind::ToolCall, format!("{}({})", c.name, c.arguments)));
+            }
+            if e.body["interrupted"] == true {
+                out.push(Message { model: None, ..msg(1, MessageKind::Notice, "Stopped.".into()) });
             }
             out
         }

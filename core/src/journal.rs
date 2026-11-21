@@ -46,6 +46,7 @@ impl Journal {
                  head INTEGER NOT NULL REFERENCES entries(id)
              );",
         )?;
+        conn.execute_batch(crate::turn::TABLES)?;
         crate::board::migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -99,14 +100,16 @@ impl Journal {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Changes whenever anything is written: an entry, a fork, or a task. Cheap enough to poll.
+    /// Changes whenever anything is written: an entry, a fork, a task, or a turn's text so far. Cheap enough to poll.
     pub fn revision(&self) -> Result<String> {
         Ok(self.conn.query_row(
             "SELECT (SELECT ifnull(max(id), 0) FROM entries) || '.' || (SELECT count(*) FROM conversations)
                  || '.' || (SELECT count(*) + ifnull(sum(edits), 0) FROM tasks)
                  || '.' || (SELECT count(*) FROM task_blockers)
                  || '.' || (SELECT count(*) + count(ended) + count(error) FROM trials)
-                 || '.' || (SELECT count(*) FROM ratings)",
+                 || '.' || (SELECT count(*) FROM ratings)
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(seq), 0) FROM turns)
+                 || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)",
             [],
             |r| r.get(0),
         )?)

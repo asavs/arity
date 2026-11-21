@@ -25,8 +25,11 @@ final class Store {
     var showSettings = false
     /// The add-provider form, open with these values.
     var addingProvider: ProviderPreset?
-    /// Chats with a model turn in flight.
-    var running: Set<String> = []
+    /// Conversations with a turn running, here or in another process (the CLI, `arity work`).
+    var running: Set<String> { starting.union(active) }
+    /// Sends from this window not yet seen running in the core.
+    private var starting: Set<String> = []
+    private var active: Set<String> = []
     var error: String?
     /// The signed-in ChatGPT account's email, or nil.
     var chatgptAccount: String?
@@ -51,9 +54,17 @@ final class Store {
         refresh()
         startDispatcher()
         Task { [weak self] in
+            var tick = 0
             while let self {
-                try? await Task.sleep(for: .milliseconds(400))
-                self.refresh()
+                try? await Task.sleep(for: .milliseconds(80))
+                tick += 1
+                // While the selected thread's reply grows, reread just its messages, often,
+                // so the text flows; everything else is checked a couple of times a second.
+                if let conv = self.selection, self.running.contains(conv) {
+                    let latest = (try? self.core.messages(conversation: conv)) ?? self.messages
+                    if latest != self.messages { self.messages = latest }
+                }
+                if tick % 5 == 0 { self.refresh() }
             }
         }
     }
@@ -63,6 +74,7 @@ final class Store {
         guard let rev = attempt({ try core.revision() }), force || rev != revision else { return }
         revision = rev
         threads = attempt { try core.threads() } ?? []
+        active = Set(attempt { try core.running() } ?? [])
         scores = attempt { try core.scores() } ?? []
         if let selection {
             messages = attempt { try core.messages(conversation: selection) } ?? []
@@ -92,6 +104,12 @@ final class Store {
         guard let conv = selection else { return }
         flushCard()
         run(conv) { core, model in try core.send(conversation: conv, model: model, text: text) }
+    }
+
+    /// Stop the turn running in the selected thread, wherever it runs. The reply so far is kept.
+    func stop() {
+        guard let conv = selection else { return }
+        _ = attempt { try core.stop(conversation: conv) }
     }
 
     /// Carry on after a failed step. The journal knows where it stopped.
@@ -257,15 +275,17 @@ final class Store {
         loadModels()
     }
 
-    /// Model calls block, so they run off the main thread. Progress shows up through polling.
+    /// Model calls block, so they run off the main thread. Progress, the reply
+    /// growing included, shows up through polling. A send while a turn is
+    /// running returns at once; the running turn answers it next.
     private func run(_ conv: String, _ work: @escaping @Sendable (Arity, String) throws -> Void) {
         error = nil
-        running.insert(conv)
+        starting.insert(conv)
         let core = self.core, model = self.model
         Task.detached {
             let result = Result { try work(core, model) }
             await MainActor.run {
-                self.running.remove(conv)
+                self.starting.remove(conv)
                 if case .failure(let e) = result, self.selection == conv { self.error = Self.describe(e) }
                 self.refresh(force: true)
             }

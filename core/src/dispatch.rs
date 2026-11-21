@@ -33,10 +33,12 @@ pub fn work_once(db: &Journal, data_dir: &Path) -> Result<Did> {
         return Ok(Did::Nothing);
     };
     // Renew the lease after every step, so a long run is not taken over.
-    let mut renew = |_: &crate::Message| {
+    let mut renew = |_: crate::Event| {
         let _ = db.conn().execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS]);
     };
-    match agent::run(db, data_dir, &conv, &model, &mut renew) {
+    let ran = agent::run(db, data_dir, &conv, &model, &mut renew)
+        .and_then(|ran| if ran { Ok(()) } else { Err(anyhow::anyhow!("another turn is running in {conv}")) });
+    match ran {
         Ok(()) => {
             let result = db
                 .chain(&conv)?
@@ -151,6 +153,7 @@ fn deliver_report(db: &Journal, data_dir: &Path) -> Result<Option<Did>> {
     })?;
     let Some((task, rater)) = found else { return Ok(None) };
     if let Some((conv, model)) = &rater {
+        // A turn already running there reads the report as its next input.
         agent::run(db, data_dir, conv, model, &mut |_| {})?;
     }
     Ok(Some(Did::Reported { task, rater: rater.map(|(conv, _)| conv) }))

@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "Arity",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     targets: [
         .binaryTarget(name: "arity_coreFFI", path: "build/arity_coreFFI.xcframework"),
         .target(
