@@ -150,6 +150,8 @@ pub fn own(c: &Connection) -> Result<HashMap<String, Own>> {
 pub struct Public {
     /// The model's id, without provider or organisation.
     pub model: String,
+    /// Other ids the same model goes by on other providers.
+    pub aliases: Vec<String>,
     pub figures: Figures,
     pub sources: Vec<String>,
 }
@@ -167,11 +169,20 @@ fn parse_public(v: &Value) -> Vec<Public> {
         .filter_map(|m| {
             Some(Public {
                 model: m["model"].as_str()?.into(),
+                aliases: m["aliases"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect(),
                 figures: Figures { quality: m["quality"].as_f64(), ttft_ms: m["ttft_ms"].as_f64(), tokens_per_sec: m["tps"].as_f64() },
                 sources: m["sources"].as_object().into_iter().flatten().map(|(k, s)| format!("{k}: {}", s.as_str().unwrap_or_default())).collect(),
             })
         })
         .collect()
+}
+
+impl Public {
+    /// Whether this entry is about the model `spec` names.
+    fn matches(&self, spec: &str) -> bool {
+        let id = bare(spec);
+        self.model.to_lowercase() == id || self.aliases.iter().any(|a| a.to_lowercase() == id)
+    }
 }
 
 /// "mlx:mlx-community/Qwen3.5-4B-MLX-4bit" -> "qwen3.5-4b-mlx-4bit"
@@ -205,14 +216,14 @@ pub fn standings(public: &[Public], own: &HashMap<String, Own>, reachable: &[Str
     let mut out: Vec<Standing> = names
         .iter()
         .map(|m| {
-            let p = public.iter().find(|p| p.model.to_lowercase() == bare(m));
+            let p = public.iter().find(|p| p.matches(m));
             let o = own.get(m).cloned().unwrap_or_default();
             standing(m, p, &o, reachable.contains(m))
         })
         .collect();
     // Public entries no model here matches, so the whole seed can be inspected.
     for p in public {
-        if !names.iter().any(|m| bare(m) == p.model.to_lowercase()) {
+        if !names.iter().any(|m| p.matches(m)) {
             out.push(standing(&p.model, Some(p), &Own::default(), false));
         }
     }
@@ -424,5 +435,7 @@ mod tests {
             assert_eq!(figures, p.sources.len(), "{}: one source per figure", p.model);
         }
         assert_eq!(bare("mlx:mlx-community/Qwen3.5-4B-MLX-4bit"), "qwen3.5-4b-mlx-4bit");
+        let p = Public { model: "Kimi-K3".into(), aliases: vec!["kimi-k3-instruct".into()], ..Default::default() };
+        assert!(p.matches("opencode:kimi-k3") && p.matches("together:moonshotai/Kimi-K3-Instruct") && !p.matches("mlx:kimi"));
     }
 }
