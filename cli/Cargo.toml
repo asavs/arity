@@ -1,0 +1,11 @@
+[package]
+name = "arity-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "arity"
+path = "src/main.rs"
+
+[dependencies]
+arity-core = { path = "../core" }

@@ -5,3 +5,8 @@ spike/*/upstream/
 spike/*/host/
 *.sqlite
 *.sqlite-*
+spike/*/target/
+/target/
+app/build/
+app/.build/
+app/Sources/ArityCore/arity_core.swift
