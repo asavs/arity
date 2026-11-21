@@ -23,7 +23,11 @@ const USAGE: &str = "usage:
   arity rate   <run> <1-5> <note...>         rate a run yourself
   arity scores                               average rating per model
   arity reveal <run>                         which model did a run
-  arity models                               suggested models (any mlx:<id> or codex:<id> works)
+  arity models [--refresh]                   models the configured providers offer
+  arity providers                            providers in config.json, and which have a key
+  arity key    set <provider>                store an API key, from a hidden prompt or stdin
+  arity key    rm <provider>                 forget it
+  arity workers [add|rm <model>]             the models tasks for agents are picked from
   arity login                                sign in with ChatGPT
 
 fields: --title <t>  --agent | --me  --local | --any  --priority low|normal|high|urgent
@@ -158,11 +162,47 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ("reveal", 2) => println!("{}", arity.reveal(arg(1).parse()?)?),
-        ("models", 1) => arity.suggested_models().iter().for_each(|m| println!("{m}")),
+        ("models", 1 | 2) => arity.models(arg(1) == "--refresh")?.iter().for_each(|m| println!("{m}")),
+        ("providers", 1) => {
+            for p in arity.providers()? {
+                let key = match (p.needs_key, p.has_key) {
+                    (false, _) => "no key needed",
+                    (true, true) => "key set",
+                    (true, false) => "needs a key: arity key set",
+                };
+                println!("{:<10} {:<45} {key}", p.name, p.url);
+            }
+        }
+        ("key", 3) if arg(1) == "set" => {
+            arity.set_key(arg(2), read_secret(&format!("API key for {}: ", arg(2)))?)?;
+            println!("saved the key for {}", arg(2));
+        }
+        ("key", 3) if arg(1) == "rm" => arity.set_key(arg(2), String::new())?,
+        ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
+        ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,
         ("login", 1) => println!("Signed in. ChatGPT account {}.", arity.sign_in_chatgpt()?),
         _ => println!("{USAGE}"),
     }
     Ok(())
+}
+
+/// One line from stdin, not echoed when it is a terminal.
+fn read_secret(prompt: &str) -> std::io::Result<String> {
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal();
+    let stty = |arg: &str| std::process::Command::new("stty").arg(arg).stdin(std::process::Stdio::inherit()).status();
+    if tty {
+        eprint!("{prompt}");
+        stty("-echo")?;
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    if tty {
+        stty("echo")?;
+        eprintln!();
+    }
+    read?;
+    Ok(line.trim().to_string())
 }
 
 fn print(m: &Message) {

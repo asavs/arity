@@ -20,6 +20,10 @@ struct ArityApp: App {
                 Button("New Chat") { store.newChat() }
                     .keyboardShortcut("n")
             }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { store.showSettings = true }
+                    .keyboardShortcut(",")
+            }
         }
     }
 }
@@ -41,11 +45,16 @@ struct ContentView: View {
                                        description: Text("Pick a thread on the left, or press ⌘N."))
             }
         }
+        .sheet(isPresented: Bindable(store).showSettings) { SettingsSheet().environment(store) }
         .toolbar {
             ToolbarItem {
                 Button("Scores", systemImage: "chart.bar") { showScores.toggle() }
                     .help("Average rating per model")
                     .popover(isPresented: $showScores, arrowEdge: .bottom) { Scores() }
+            }
+            ToolbarItem {
+                Button("Settings", systemImage: "key") { store.showSettings = true }
+                    .help("API keys and worker models (⌘,)")
             }
             ToolbarItem {
                 Button("New Chat", systemImage: "square.and.pencil") { store.newChat() }

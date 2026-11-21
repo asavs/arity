@@ -11,11 +11,13 @@
 
 mod agent;
 mod board;
+mod catalog;
 mod codex_auth;
 mod config;
 mod dispatch;
 mod draft;
 mod journal;
+mod keys;
 mod model;
 mod tools;
 
@@ -128,6 +130,15 @@ pub struct Score {
     pub average: f64,
 }
 
+/// A place models are reached through, from config.json. Its key is never shown.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Provider {
+    pub name: String,
+    pub url: String,
+    pub needs_key: bool,
+    pub has_key: bool,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum ArityError {
@@ -142,14 +153,6 @@ impl From<anyhow::Error> for ArityError {
 }
 
 type Result<T> = std::result::Result<T, ArityError>;
-
-/// Models offered for talking to directly. Any `mlx:<id>` or `codex:<id>` also works.
-const SUGGESTED_MODELS: &[&str] = &[
-    "codex:gpt-6.1-terra",
-    "codex:gpt-6.2-sol",
-    "mlx:mlx-community/Qwen3.5-4B-MLX-4bit",
-    "mlx:mlx-community/gemma-4-e4b-it-4bit",
-];
 
 #[derive(uniffi::Object)]
 pub struct Arity {
@@ -169,13 +172,36 @@ impl Arity {
         self.dir.display().to_string()
     }
 
-    pub fn suggested_models(&self) -> Vec<String> {
-        SUGGESTED_MODELS.iter().map(|s| s.to_string()).collect()
+    /// What the usable providers offer, as `<provider>:<id>`. Lists are cached
+    /// for a day; `refresh` fetches them again. May block for a few seconds.
+    pub fn models(&self, refresh: bool) -> Result<Vec<String>> {
+        Ok(catalog::models(&self.dir, refresh)?)
     }
 
     /// The models tasks for an agent are picked from, from config.json.
     pub fn worker_models(&self) -> Result<Vec<String>> {
         Ok(config::load(&self.dir)?.workers)
+    }
+
+    /// Add a model to the workers in config.json, or take it out.
+    pub fn set_worker(&self, model: String, on: bool) -> Result<()> {
+        Ok(config::set_worker(&self.dir, &model, on)?)
+    }
+
+    pub fn providers(&self) -> Result<Vec<Provider>> {
+        Ok(config::load(&self.dir)?
+            .providers
+            .into_iter()
+            .map(|p| Provider { has_key: keys::get(&self.dir, &p.name).is_some(), name: p.name, url: p.url, needs_key: p.needs_key })
+            .collect())
+    }
+
+    /// Store a provider's API key. An empty key removes it.
+    pub fn set_key(&self, provider: String, key: String) -> Result<()> {
+        if !config::load(&self.dir)?.providers.iter().any(|p| p.name == provider) {
+            return Err(ArityError::Failed(format!("no provider {provider} in config.json")));
+        }
+        Ok(keys::set(&self.dir, &provider, &key)?)
     }
 
     // Threads

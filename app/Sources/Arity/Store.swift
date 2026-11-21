@@ -17,8 +17,12 @@ final class Store {
     /// The task card open in the selected chat, as last edited here or in the core.
     var draft: TaskFields?
     var scores: [Score] = []
+    /// What the configured providers offer, and which of them tasks for agents are picked from.
     var models: [String] = []
+    var workers: [String] = []
+    var providers: [Provider] = []
     var model = ""
+    var showSettings = false
     /// Chats with a model turn in flight.
     var running: Set<String> = []
     var error: String?
@@ -37,9 +41,8 @@ final class Store {
 
     init() {
         me = core.me()
-        models = core.suggestedModels()
-        model = models.first ?? ""
         signedInToChatGPT = core.chatgptSignedIn()
+        loadModels()
         refresh()
         startDispatcher()
         Task { [weak self] in
@@ -176,6 +179,39 @@ final class Store {
         }
     }
 
+    // Providers, keys and models
+
+    /// Model lists are fetched from each provider and cached, so this runs off the main thread.
+    func loadModels(refresh: Bool = false) {
+        providers = attempt { try core.providers() } ?? []
+        workers = attempt { try core.workerModels() } ?? []
+        let core = self.core
+        Task.detached {
+            let result = Result { try core.models(refresh: refresh) }
+            await MainActor.run {
+                switch result {
+                case .success(let list):
+                    let current = self.model
+                    self.models = list
+                    if !current.isEmpty && !list.contains(current) { self.models.append(current) }
+                    if self.model.isEmpty { self.model = list.first ?? "" }
+                case .failure(let e): self.error = Self.describe(e)
+                }
+            }
+        }
+    }
+
+    /// Store a provider's API key (empty removes it). Its models then appear.
+    func setKey(_ provider: String, _ key: String) {
+        _ = attempt { try core.setKey(provider: provider, key: key) }
+        loadModels(refresh: true)
+    }
+
+    func setWorker(_ model: String, _ on: Bool) {
+        _ = attempt { try core.setWorker(model: model, on: on) }
+        workers = attempt { try core.workerModels() } ?? workers
+    }
+
     func signInToChatGPT() {
         let core = self.core
         Task.detached {
@@ -183,6 +219,7 @@ final class Store {
             await MainActor.run {
                 if case .failure(let e) = result { self.error = Self.describe(e) }
                 self.signedInToChatGPT = core.chatgptSignedIn()
+                self.loadModels()
             }
         }
     }

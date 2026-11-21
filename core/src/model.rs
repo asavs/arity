@@ -1,5 +1,5 @@
 //! Model access. Two wire formats cover the spike:
-//! - OpenAI chat completions: MLX, and later Nous Portal, OpenRouter, any API key.
+//! - OpenAI chat completions: any provider in config.json (MLX, Nous Portal, any API key).
 //! - OpenAI Responses on the ChatGPT backend: the ChatGPT subscription.
 
 use std::io::{BufRead, BufReader};
@@ -61,25 +61,39 @@ pub enum Model {
 }
 
 impl Model {
-    /// `mlx:<model>` or `codex:<model>`.
+    /// `codex:<model>`, or `<provider>:<model>` for a provider in config.json.
+    /// A provider that needs a key and has none is refused here, before any call.
     pub fn parse(spec: &str, data_dir: &std::path::Path) -> Result<Self> {
-        let (kind, model) = spec.split_once(':').ok_or_else(|| anyhow!("model must be mlx:<id> or codex:<id>"))?;
-        Ok(match kind {
-            "mlx" => Model::Chat {
-                base: std::env::var("ARITY_MLX_URL").unwrap_or_else(|_| "http://127.0.0.1:8080/v1".into()),
-                model: model.into(),
-                key: None,
-            },
-            "codex" => Model::Codex { model: model.into(), auth: data_dir.join("codex-auth.json") },
-            other => bail!("unknown provider {other}"),
-        })
+        let (kind, model) = spec.split_once(':').ok_or_else(|| anyhow!("model must be <provider>:<id>, e.g. mlx:<id>"))?;
+        if kind == "codex" {
+            return Ok(Model::Codex { model: model.into(), auth: data_dir.join("codex-auth.json") });
+        }
+        let providers = crate::config::load(data_dir)?.providers;
+        let Some(p) = providers.iter().find(|p| p.name == kind) else {
+            let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+            bail!("unknown provider {kind}; config.json has {} and codex", names.join(", "));
+        };
+        let key = crate::keys::get(data_dir, kind);
+        if p.needs_key && key.is_none() {
+            bail!("{kind} has no API key; run `arity key set {kind}` or add one in Settings");
+        }
+        Ok(Model::Chat { base: p.url.clone(), model: model.into(), key })
     }
 
     pub fn complete(&self, system: &str, chain: &[Entry], tools: &[ToolSpec]) -> Result<Reply> {
         match self {
-            Model::Chat { base, model, key } => chat(base, model, key.as_deref(), system, chain, tools),
+            Model::Chat { base, model, key } => chat(base, model, key.as_deref(), system, chain, tools).map_err(|e| redact(e, key.as_deref())),
             Model::Codex { model, auth } => codex(model, auth, system, chain, tools),
         }
+    }
+}
+
+/// An error with the key cut out, in case a server echoed it back. Errors reach
+/// the journal and the screen; keys must not.
+fn redact(e: anyhow::Error, key: Option<&str>) -> anyhow::Error {
+    match key {
+        Some(k) if format!("{e:#}").contains(k) => anyhow!("{}", format!("{e:#}").replace(k, "[key]")),
+        _ => e,
     }
 }
 
@@ -237,4 +251,67 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
         }
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn dir(name: &str, providers: Value) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("arity-model-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("config.json"), json!({ "workers": [], "providers": providers }).to_string()).unwrap();
+        d
+    }
+
+    #[test]
+    fn specs_resolve_through_providers() -> Result<()> {
+        let d = dir("parse", json!({ "lab": { "url": "http://lab:1/v1" } }));
+        match Model::parse("lab:org/m:q4", &d)? {
+            Model::Chat { base, model, key } => assert_eq!((base.as_str(), model.as_str(), key), ("http://lab:1/v1", "org/m:q4", None)),
+            _ => panic!("lab is a chat provider"),
+        }
+        assert!(matches!(Model::parse("mlx:x", &d)?, Model::Chat { .. }), "mlx is a provider by default");
+        assert!(matches!(Model::parse("codex:gpt", &d)?, Model::Codex { .. }));
+        assert!(Model::parse("nope:x", &d).is_err());
+        assert!(Model::parse("no-colon", &d).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_provider_without_its_key_is_refused() -> Result<()> {
+        let d = dir("nokey", json!({}));
+        let err = Model::parse("nous:Hermes-4-70B", &d).err().expect("nous needs a key").to_string();
+        assert!(err.contains("arity key set nous"), "{err}");
+        crate::keys::set(&d, "nous", "sk-test")?;
+        assert!(matches!(Model::parse("nous:Hermes-4-70B", &d)?, Model::Chat { key: Some(_), .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_never_appears_in_an_error() -> Result<()> {
+        // A server that rejects the request and echoes every header back, key included.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let echo = serde_json::to_string(&String::from_utf8_lossy(&buf[..n])).unwrap();
+                let body = format!("{{\"error\": {echo}}}");
+                let _ = write!(s, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            }
+        });
+        let key = "sk-secret-0123456789";
+        for (name, url) in [("echo", format!("http://127.0.0.1:{port}/v1")), ("closed", "http://127.0.0.1:9/v1".into())] {
+            let d = dir(name, json!({ name: { "url": url, "key": true } }));
+            crate::keys::set(&d, name, key)?;
+            let err = Model::parse(&format!("{name}:m"), &d)?.complete("", &[], &[]).err().expect("call fails");
+            let text = format!("{err:#} {err:?}");
+            assert!(!text.contains(key), "{name}: {text}");
+            assert!(!std::fs::read_to_string(d.join("config.json"))?.contains(key));
+        }
+        Ok(())
+    }
 }
