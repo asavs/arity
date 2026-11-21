@@ -2,6 +2,8 @@
 
 Arity is a multi-agent system. One person works with a small hierarchy of agents. A central router decides which model runs each agent without telling anyone which it picked, and finished work is graded so that later picks improve.
 
+It is built as a Rust core that owns one durable journal, with a command-line tool and a Mac app over it.
+
 ![Baseline architecture](diagrams/baseline.svg)
 
 ## How to read the baseline

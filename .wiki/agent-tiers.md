@@ -14,7 +14,7 @@ The tier says where an agent sits and how long it lives. What it is good at is i
 
 ## One mechanism for everyone
 
-The user is one more participant, not a special case. The same messages, the same delivery rules and the same pages in the database apply to people and to models. The aim is one small recursive mechanism, built on a single durable harness (pi-durable).
+The user is one more participant, not a special case. The same messages, the same delivery rules and the same pages in the database apply to people and to models. The aim is one small recursive mechanism, built on a single durable journal that Arity owns.
 
 ## Who can talk to whom
 
@@ -49,7 +49,7 @@ A report goes one way: up, to whoever asked for the work. That is the parent age
 
 Reports are graded. See [Blind testing](blind-testing.md#grading).
 
-A report that arrives for a parent that has gone cold [gets no special handling](open-questions.md#reports-to-a-cold-parent).
+A report usually arrives after its recipient has finished its turn. It is delivered like any message: a cold recipient is woken to read it.
 
 ## Agent lifecycle
 

@@ -61,6 +61,7 @@ The router picks one option per slot. A run can differ from the role's defaults 
 
 - **The grader does not see the variant while grading.** It is revealed afterwards, and a reveal option is available at any time.
 - **The grader's own variant is recorded with the grade.** Models tend to favour output from their own family.
+- **A model never grades a run it did itself.**
 - **Scores are kept per role, tier and kind of task.**
 
 ## Limits on experimenting

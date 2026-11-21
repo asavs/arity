@@ -73,10 +73,6 @@ The fixed lists that requirements and gates are chosen from. Raised in [Database
 
 Left out on purpose to avoid overbuilding.
 
-### Reports to a cold parent
-
-Expected to be rare. If it matters, one option is to skip the model's rating when a task's gates are all deterministic, so the parent is not woken only to give one. Raised in [Agents](agent-tiers.md#report).
-
 ### Agents rating users
 
 Later, possibly through exit reports or by mining transcripts. Raised in [Blind testing](blind-testing.md#grading).
