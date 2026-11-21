@@ -180,7 +180,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("key", 3) if arg(1) == "rm" => arity.set_key(arg(2), String::new())?,
         ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
         ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,
-        ("login", 1) => println!("Signed in. ChatGPT account {}.", arity.sign_in_chatgpt()?),
+        ("login", 1) => println!("Signed in to ChatGPT as {}.", arity.sign_in_chatgpt()?),
         _ => println!("{USAGE}"),
     }
     Ok(())

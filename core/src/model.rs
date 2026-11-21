@@ -1,6 +1,6 @@
 //! Model access. Two wire formats cover the spike:
 //! - OpenAI chat completions: any provider in config.json (MLX, Nous Portal, any API key).
-//! - OpenAI Responses on the ChatGPT backend: the ChatGPT subscription.
+//! - OpenAI Responses with a ChatGPT sign-in: the ChatGPT subscription.
 
 use std::io::{BufRead, BufReader};
 
@@ -11,7 +11,8 @@ use crate::codex_auth;
 use crate::journal::Entry;
 use crate::tools::ToolSpec;
 
-const CODEX_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+/// The public Responses API, which a ChatGPT sign-in may use on the plan's usage.
+const CODEX_URL: &str = "https://api.openai.com/v1/responses";
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {

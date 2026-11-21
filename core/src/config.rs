@@ -9,7 +9,7 @@
 //! ```
 //! A provider is any OpenAI-compatible chat endpoint. `key: true` means it needs
 //! an API key, kept in keys.json, never here. `models` is offered when the
-//! endpoint has no `/models` list. `mlx` and `nous` are there unless overridden.
+//! endpoint has no `/models` list. `mlx`, `nous` and `opencode` are there unless overridden.
 
 use std::path::Path;
 
@@ -43,6 +43,8 @@ fn default_providers() -> Value {
         // API key from portal.nousresearch.com; see plans/v0.0.1.md.
         "nous": { "url": "https://inference-api.nousresearch.com/v1", "key": true,
                   "models": ["Hermes-4-70B", "Hermes-4-405B", "Hermes-4.3-36B"] },
+        // OpenCode Zen, now "Console": API key from opencode.ai; every text model also speaks chat completions.
+        "opencode": { "url": "https://opencode.ai/inference/openai/v1", "key": true },
     })
 }
 
@@ -111,7 +113,7 @@ mod tests {
             "providers": { "mlx": { "url": "http://h:1/v1/" }, "groq": { "url": "https://g/v1", "key": true } },
         }))?;
         let names: Vec<&str> = c.providers.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["groq", "mlx", "nous"]);
+        assert_eq!(names, ["groq", "mlx", "nous", "opencode"]);
         assert_eq!(c.providers[1].url, "http://h:1/v1");
         assert!(c.providers[0].needs_key && !c.providers[1].needs_key);
         assert!(parse(&json!({ "providers": { "a:b": { "url": "x" } } })).is_err());

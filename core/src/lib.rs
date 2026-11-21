@@ -379,13 +379,13 @@ impl Arity {
 
     // ChatGPT
 
-    /// Opens the browser and waits for the ChatGPT sign-in. Returns the account id.
+    /// Opens the browser and waits for the ChatGPT sign-in. Returns the account's email.
     pub fn sign_in_chatgpt(&self) -> Result<String> {
         Ok(codex_auth::login(&self.dir.join("codex-auth.json"))?)
     }
 
     pub fn chatgpt_signed_in(&self) -> bool {
-        self.dir.join("codex-auth.json").exists()
+        codex_auth::signed_in(&self.dir.join("codex-auth.json"))
     }
 }
 
