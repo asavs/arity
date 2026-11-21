@@ -13,13 +13,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use crate::board::{LEASE_SECS, now};
-use crate::journal::{Journal, insert};
+use crate::journal::{Journal, chain, insert};
 use crate::{agent, config};
 
 /// What one call did, for logging.
 pub enum Did {
     Nothing,
-    Reported { task: i64, to: Option<String> },
+    /// A result was passed on. `rater` is the conversation woken to rate it, if any.
+    Reported { task: i64, rater: Option<String> },
     Ran { task: i64, trial: i64 },
     Failed { task: i64, trial: i64, error: String },
 }
@@ -115,40 +116,75 @@ fn claim(c: &Connection, data_dir: &Path) -> Result<Option<(i64, i64, String, St
     Ok(Some((trial, task, conv, model)))
 }
 
-/// Hand a finished result to whoever wrote the task. A conversation gets a
-/// report entry and is woken to read and rate it; a person sees it on the board.
+/// Pass on a finished result. It already waits in the task's own thread for a
+/// rating. The chat the task was filed in gets a note of it, as plain
+/// information. Only an agent that delegated on its own is woken, to rate it,
+/// and only if the model it would rate with is not the one that did the run.
 fn deliver_report(db: &Journal, data_dir: &Path) -> Result<Option<Did>> {
     let found = db.immediate(|c| {
-        let row: Option<(i64, i64, String, String, String)> = c
+        let row: Option<(i64, i64, String, String, Option<String>, String, String)> = c
             .query_row(
-                "SELECT tr.id, t.id, t.title, t.created_by, ifnull(tr.result, '')
+                "SELECT tr.id, t.id, t.title, t.created_by, t.origin, ifnull(tr.result, ''), tr.model
                  FROM trials tr JOIN tasks t ON t.id = tr.task
                  WHERE tr.ended IS NOT NULL AND tr.reported = 0 ORDER BY tr.id LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
             .optional()?;
-        let Some((trial, task, title, created_by, result)) = row else { return Ok(None) };
+        let Some((trial, task, title, created_by, origin, result, model)) = row else { return Ok(None) };
         c.execute("UPDATE trials SET reported = 1 WHERE id = ?1", params![trial])?;
-        // A conversation gets the report; a person rates it on the board.
-        let writer = created_by.strip_prefix("conversations/").map(String::from);
-        if let Some(writer) = &writer {
-            let text = format!(
-                "Report on task {task}, \"{title}\":\n\n{result}\n\n\
-                 Rate it with the rate tool: task {task}, a score from 1 to 5, and a short note."
-            );
-            insert(c, writer, "report", &json!({ "text": text, "task": task, "trial": trial }), None)?;
+        let author = created_by.strip_prefix("conversations/");
+        let rater = match author {
+            Some(conv) => chain(c, conv)?.iter().rev().find_map(|e| e.model.clone()).filter(|m| *m != model),
+            None => None,
+        };
+        let to = author.map(String::from).or(origin);
+        if let Some(conv) = &to {
+            let ask = match rater {
+                Some(_) => format!("\n\nRate it with the rate tool: task {task}, a score from 1 to 5, and a short note."),
+                None => String::new(),
+            };
+            let text = format!("Task {task}, \"{title}\", is finished. The result:\n\n{result}{ask}");
+            insert(c, conv, "report", &json!({ "text": text, "task": task, "trial": trial }), None)?;
         }
-        Ok(Some((task, writer)))
+        Ok(Some((task, to.zip(rater))))
     })?;
-    let Some((task, writer)) = found else { return Ok(None) };
-    // Wake the writer with the model it last used. Without one, the report waits
-    // for the next message in that conversation.
-    if let Some(conv) = &writer {
-        let model = db.chain(conv)?.iter().rev().find_map(|e| e.model.clone());
-        if let Some(model) = model {
-            agent::run(db, data_dir, conv, &model, &mut |_| {})?;
-        }
+    let Some((task, rater)) = found else { return Ok(None) };
+    if let Some((conv, model)) = &rater {
+        agent::run(db, data_dir, conv, model, &mut |_| {})?;
     }
-    Ok(Some(Did::Reported { task, to: writer }))
+    Ok(Some(Did::Reported { task, rater: rater.map(|(conv, _)| conv) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{self, TaskFields};
+
+    #[test]
+    fn the_users_result_waits_for_the_user_and_wakes_no_model() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-deliver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Journal::open(&dir.join("arity.sqlite"))?;
+        let c = db.conn();
+        // A chat on some model files a task for an agent, and a run of it finishes.
+        db.append("chat", "assistant", &json!({ "text": "on it" }), Some("codex:x"))?;
+        let f = TaskFields { title: "write a poem".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(c, &f, Some("chat"))?;
+        c.execute(
+            "INSERT INTO trials (task, conversation, model, ended, result) VALUES (?1, 'task-1', 'mlx:m', datetime('now'), 'roses')",
+            params![task],
+        )?;
+        board::set_state(c, task, board::TaskState::InGates)?;
+        // Waking the chat would call its model, which does not exist, and fail.
+        assert!(matches!(deliver_report(&db, &dir)?, Some(Did::Reported { rater: None, .. })));
+        let chat = db.chain("chat")?;
+        let note = chat.last().unwrap();
+        assert_eq!(note.kind, "report");
+        assert!(note.body["text"].as_str().unwrap().contains("roses") && !note.body["text"].as_str().unwrap().contains("Rate"));
+        assert_eq!(board::task(c, task)?.run_state, Some(board::RunState::NeedsRating));
+        assert!(deliver_report(&db, &dir)?.is_none(), "delivered once");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }

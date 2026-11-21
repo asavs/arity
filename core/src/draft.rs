@@ -48,15 +48,12 @@ pub fn propose(c: &Connection, conv: &str, args: &Value) -> Result<TaskFields> {
     Ok(fields)
 }
 
-/// Put the open card on the board, written by this conversation, so reports come back here.
+/// Put the open card on the board, as a task filed in this conversation.
 pub fn add(c: &Connection, conv: &str) -> Result<i64> {
     let fields = current(&journal::chain(c, conv)?).ok_or_else(|| anyhow!("{conv} has no task card open"))?;
-    let id = board::add_task(c, &fields, &board::conversation_page(conv))?;
+    let id = board::add_task(c, &fields, Some(conv))?;
     let text = if fields.assignee == AGENT {
-        format!(
-            "I added the task card to the board as task {id}, for an agent. One will be picked to do it, \
-             and its report will come back here for you to rate."
-        )
+        format!("I added the task card to the board as task {id}, for an agent. One will be picked to do it, and I will rate its result.")
     } else {
         format!("I added the task card to the board as task {id}, assigned to {}.", fields.assignee)
     };
@@ -138,7 +135,7 @@ mod tests {
         let id = add(c, "chat")?;
         assert!(current(&db.chain("chat")?).is_none(), "closed once added");
         let t = board::task(c, id)?;
-        assert_eq!((t.created_by.as_str(), t.fields.tags.clone()), ("conversations/chat", vec!["docs".to_string()]));
+        assert_eq!((t.created_by, t.origin.as_deref(), t.fields.tags.clone()), (board::me(), Some("chat"), vec!["docs".to_string()]));
         assert_eq!(t.state, board::TaskState::Ready);
         let _ = std::fs::remove_file(&path);
         Ok(())

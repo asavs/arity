@@ -1,6 +1,9 @@
 import ArityCore
 import SwiftUI
 
+/// The core's thread, not Foundation's.
+typealias Thread = ArityCore.Thread
+
 @main
 struct ArityApp: App {
     @State private var store = Store()
@@ -14,103 +17,61 @@ struct ArityApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Conversation") { store.newConversation() }
+                Button("New Chat") { store.newChat() }
                     .keyboardShortcut("n")
-                Button("New Task") { store.newTask() }
-                    .keyboardShortcut("t")
             }
         }
     }
 }
 
+/// One list of threads on the left, the selected thread on the right.
 struct ContentView: View {
     @Environment(Store.self) private var store
-    @State private var showBoard = true
+    @State private var showScores = false
 
     var body: some View {
-        @Bindable var store = store
         NavigationSplitView {
             Sidebar()
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 250)
         } detail: {
             if store.selection != nil {
-                ChatView()
+                ThreadView()
             } else {
-                ContentUnavailableView("No conversation", systemImage: "bubble.left.and.bubble.right",
-                                       description: Text("Pick one on the left, or press ⌘N."))
+                ContentUnavailableView("Nothing open", systemImage: "bubble.left.and.bubble.right",
+                                       description: Text("Pick a thread on the left, or press ⌘N."))
             }
-        }
-        .inspector(isPresented: $showBoard) {
-            BoardView()
-                .inspectorColumnWidth(min: 200, ideal: 260)
         }
         .toolbar {
             ToolbarItem {
-                Button("New Conversation", systemImage: "square.and.pencil") { store.newConversation() }
+                Button("Scores", systemImage: "chart.bar") { showScores.toggle() }
+                    .help("Average rating per model")
+                    .popover(isPresented: $showScores, arrowEdge: .bottom) { Scores() }
             }
             ToolbarItem {
-                Button("New Task", systemImage: "plus.rectangle.on.rectangle") { store.newTask() }
-                    .help("Draft a task with the selected model (⌘T)")
-            }
-            ToolbarItem {
-                Button("Board", systemImage: "checklist") { showBoard.toggle() }
+                Button("New Chat", systemImage: "square.and.pencil") { store.newChat() }
+                    .help("New chat (⌘N)")
             }
         }
     }
 }
 
-struct Sidebar: View {
+/// Rated runs per model. Unrated runs are left out, so they cannot be traced to a model.
+private struct Scores: View {
     @Environment(Store.self) private var store
 
     var body: some View {
-        @Bindable var store = store
-        List(selection: $store.selection) {
-            // A new conversation has no entries yet, so the journal doesn't list it.
-            if let s = store.selection, !store.conversations.contains(where: { $0.name == s }) {
-                Label(s, systemImage: "plus.bubble").tag(s)
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+            if store.scores.isEmpty {
+                Text("No rated runs yet").foregroundStyle(.secondary)
             }
-            let runConversations = Dictionary(store.runs.values.map { ($0.conversation, $0) }, uniquingKeysWith: { a, _ in a })
-            Section("Conversations") {
-                ForEach(store.conversations.filter { runConversations[$0.name] == nil }, id: \.name) { c in
-                    row(c, title: c.name)
-                }
-            }
-            let runs = store.conversations.filter { runConversations[$0.name] != nil }
-            if !runs.isEmpty {
-                Section("Runs") {
-                    ForEach(runs, id: \.name) { c in
-                        row(c, title: runConversations[c.name]?.title ?? c.name)
-                    }
+            ForEach(store.scores, id: \.model) { s in
+                GridRow {
+                    Text(shortName(s.model))
+                    Text(s.average, format: .number.precision(.fractionLength(1))).monospacedDigit().bold()
+                    Text("\(s.rated) rated").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            if !store.signedInToChatGPT {
-                Button("Sign in with ChatGPT") { store.signInToChatGPT() }
-                    .padding(10)
-            }
-        }
+        .padding(14)
     }
-}
-
-extension Sidebar {
-    func row(_ c: Conversation, title: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title).lineLimit(1)
-                if store.running.contains(c.name) { ProgressView().controlSize(.mini) }
-            }
-            Text(relative(c.updated)).font(.caption).foregroundStyle(.secondary)
-        }
-        .tag(c.name)
-    }
-}
-
-/// The journal stores UTC as "YYYY-MM-DD HH:MM:SS".
-private func relative(_ utc: String) -> String {
-    let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    f.timeZone = TimeZone(identifier: "UTC")
-    guard let date = f.date(from: utc) else { return utc }
-    return date.formatted(.relative(presentation: .named))
 }

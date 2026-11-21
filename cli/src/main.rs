@@ -1,16 +1,16 @@
 //! `arity`, the command-line front end. Everything it does goes through
 //! `arity_core::Arity`, the same object the Mac app uses.
 
-use arity_core::{Arity, BoardTask, Clearance, Message, MessageKind, Priority, RunState, TaskFields, TaskState};
+use arity_core::{Arity, Clearance, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
-  arity ls                                   conversations, newest first
-  arity log    <conv>                        read a conversation
+  arity ls                                   every thread: chats and tasks, by what needs you
+  arity board                                the same list, tasks only
+  arity log    <thread>                      read a thread
   arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used
   arity resume <conv> [model]                carry on a conversation that stopped
   arity fork   <entry> <new-conv>            branch a conversation at an entry
-  arity board                                the shared task board
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
   arity done   <task>                        mark a task done
@@ -49,9 +49,25 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         arity.last_model(conv.into())?.ok_or_else(|| format!("{conv} has no model yet; name one").into())
     };
     match (arg(0).as_str(), args.len()) {
-        ("ls", 1) => {
-            for c in arity.conversations()? {
-                println!("{:<24} {}  (head #{})", c.name, c.updated, c.head);
+        ("ls" | "board", 1) => {
+            let me = arity.me();
+            let mut group = None;
+            for t in arity.threads()?.iter().filter(|t| arg(0) == "ls" || t.task.is_some()) {
+                if group != Some(t.group) {
+                    group = Some(t.group);
+                    println!("{}", match t.group {
+                        ThreadGroup::NeedsYou => "Needs you",
+                        ThreadGroup::Running => "Running",
+                        ThreadGroup::Open => "Open",
+                        ThreadGroup::Chat => "Chats",
+                        ThreadGroup::Done => "Done",
+                    });
+                }
+                println!("{}", thread_line(t, &me));
+                let waiting = t.task.as_ref().filter(|k| arg(0) == "board" && k.run_state == Some(RunState::NeedsRating));
+                if let Some(r) = waiting.and_then(|k| k.result.as_ref()) {
+                    println!("{:>10}{}", "", r.replace('\n', "\n          "));
+                }
             }
         }
         ("log", 2) => arity.messages(arg(1))?.iter().for_each(print),
@@ -67,14 +83,6 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             arity.fork(arg(1).parse()?, arg(2))?;
             println!("{} now branches from entry #{}", arg(2), arg(1));
         }
-        ("board", 1) => {
-            for t in arity.tasks()? {
-                println!("{}", board_line(&t, &arity.me()));
-                if let Some(r) = t.result.as_ref().filter(|_| t.run_state == Some(RunState::NeedsRating)) {
-                    println!("{:>8}{}", "", r.replace('\n', "\n        "));
-                }
-            }
-        }
         ("task", n) if n >= 2 => {
             let (words, fields) = parse_fields(&args[1..])?;
             let mut f = TaskFields { title: words.join(" "), ..Default::default() };
@@ -89,7 +97,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if !words.is_empty() {
                 return Err(format!("unexpected {:?}; use --title to rename", words.join(" ")).into());
             }
-            let mut f = arity.tasks()?.into_iter().find(|t| t.id == id).ok_or(format!("no task {id}"))?.fields;
+            let mut f = arity.threads()?.into_iter().filter_map(|t| t.task).find(|t| t.id == id).ok_or(format!("no task {id}"))?.fields;
             f.merge(&fields)?;
             arity.update_task(id, f)?;
             println!("updated task {id}");
@@ -98,6 +106,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("draft", n) if n >= 2 => {
             let conv = arg(1);
             let rest = &args[2..];
+            let card = || arity.threads().map(|ts| ts.into_iter().find(|t| t.name == conv).and_then(|t| t.card));
             if rest.iter().any(|a| a == "--new") {
                 arity.open_draft(conv.clone())?;
             } else if rest.iter().any(|a| a == "--add") {
@@ -113,11 +122,11 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 if !words.is_empty() {
                     return Err(format!("unexpected {:?}; use --title to rename", words.join(" ")).into());
                 }
-                let mut f = arity.draft(conv.clone())?.ok_or(format!("{conv} has no task card open; --new opens one"))?;
+                let mut f = card()?.ok_or(format!("{conv} has no task card open; --new opens one"))?;
                 f.merge(&fields)?;
                 arity.edit_draft(conv.clone(), f)?;
             }
-            match arity.draft(conv.clone())? {
+            match card()? {
                 Some(f) => println!("{}", f.describe()),
                 None => println!("{conv} has no task card open"),
             }
@@ -207,8 +216,13 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
     Ok((words, fields))
 }
 
-/// `  3 ready     for agent   write a poem  · high · due 2026-12-01 · blocked by 2 · #fun`
-fn board_line(t: &BoardTask, me: &str) -> String {
+/// `  task-3    3 ready     for agent   write a poem  · high · due 2026-12-01 · blocked by 2 · #fun`
+/// `  chat-1                              how do I ...  · card open`
+fn thread_line(thread: &Thread, me: &str) -> String {
+    let Some(t) = &thread.task else {
+        let card = if thread.card.is_some() { "  · card open" } else { "" };
+        return format!("  {:<12} {:<24} {}{card}", thread.name, "", thread.title);
+    };
     let f = &t.fields;
     let state = match t.state {
         TaskState::Open => "open",
@@ -240,6 +254,9 @@ fn board_line(t: &BoardTask, me: &str) -> String {
         extra.push(format!("blocked by {}", ids.join(",")));
     }
     extra.extend(f.tags.iter().map(|t| format!("#{t}")));
+    if let Some(origin) = &t.origin {
+        extra.push(format!("from {origin}"));
+    }
     let extra = if extra.is_empty() { String::new() } else { format!("  · {}", extra.join(" · ")) };
-    format!("{:>3} {:<9} {:<10} {}{extra}", t.id, state, who, f.title)
+    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}", thread.name, t.id, state, who, f.title)
 }

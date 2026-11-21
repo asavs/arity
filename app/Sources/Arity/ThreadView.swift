@@ -1,7 +1,11 @@
 import ArityCore
 import SwiftUI
 
-struct ChatView: View {
+/// The selected thread: what was said in it, and below that whatever it needs
+/// next. For a chat that is the composer, with a task card when one is being
+/// drafted. For a task it is the task: its card, how its run is going, or the
+/// stars to rate the result.
+struct ThreadView: View {
     @Environment(Store.self) private var store
     @State private var message = ""
     @FocusState private var composing: Bool
@@ -40,14 +44,16 @@ struct ChatView: View {
             }
 
             Divider()
-            if let card = store.draft {
+            if let task = store.thread?.task {
+                TaskDock(task: task).id(task.id)
+            } else if let card = store.draft {
                 cardComposer(card)
             } else {
                 composer(prompt: "Message", lines: 1...8).padding(10)
             }
         }
-        .navigationTitle(store.selection ?? "")
-        .navigationSubtitle(shortName(store.model))
+        .navigationTitle(store.thread?.title ?? "New chat")
+        .navigationSubtitle(store.thread?.task.map { details($0, me: store.me) } ?? shortName(store.model))
         .onAppear { composing = true }
     }
 
@@ -60,6 +66,15 @@ struct ChatView: View {
             }
             .labelsHidden()
             .fixedSize()
+
+            if store.draft == nil {
+                Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("t")
+                    .disabled(busy)
+                    .help("Draft a task in this chat (⌘T)")
+            }
 
             TextField(prompt, text: $message, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -86,7 +101,7 @@ struct ChatView: View {
             HStack {
                 Button("Dismiss") { store.dismissCard() }
                 Spacer()
-                Text(card.assignee == "agent" ? "An agent is picked blind and reports back here"
+                Text(card.assignee == "agent" ? "An agent is picked blind; you rate its result"
                                               : "Goes on your own list")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Add to Board") { store.addCard() }
@@ -107,6 +122,105 @@ struct ChatView: View {
         guard !text.isEmpty, !busy else { return }
         message = ""
         store.send(text)
+    }
+}
+
+/// What sits under a task's thread instead of a composer.
+private struct TaskDock: View {
+    @Environment(Store.self) private var store
+    let task: BoardTask
+    @State private var edited: TaskFields?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch task.runState {
+            case nil: card
+            case .running?: Label("An agent is on it", systemImage: "sparkles").foregroundStyle(.secondary)
+            case .failing?:
+                Label(task.error ?? "The last attempt failed", systemImage: "exclamationmark.arrow.circlepath")
+                    .foregroundStyle(.orange).textSelection(.enabled)
+            case .needsRating?: RateControl(task: task)
+            case .rated?: rating
+            }
+            if let origin = task.origin {
+                Button("Filed in \(origin)") { store.selection = origin }
+                    .buttonStyle(.link).font(.caption)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+    }
+
+    /// Not started, or the user's own: the card, editable. For: An agent hands it off.
+    @ViewBuilder private var card: some View {
+        let mine = task.fields.assignee != "agent"
+        TaskCard(fields: Binding { edited ?? task.fields } set: { edited = $0 }, editing: task.id)
+        HStack {
+            if mine || task.state == .done {
+                Button(task.state == .done ? "Reopen" : "Mark Done") { store.setDone(task, task.state != .done) }
+            }
+            Spacer()
+            Button("Save") {
+                if let edited { store.updateTask(task.id, edited) }
+                edited = nil
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .buttonStyle(.borderedProminent)
+            .disabled(edited == nil || edited == task.fields)
+        }
+    }
+
+    /// A finished run: its stars, who did it, and the note.
+    private var rating: some View {
+        let score = Int(task.score ?? 0)
+        return HStack(spacing: 8) {
+            Text(String(repeating: "★", count: score) + String(repeating: "☆", count: 5 - score))
+                .foregroundStyle(.yellow)
+            Text("Done by \(shortName(task.model))").bold()
+            if let note = task.note, !note.isEmpty { Text("“\(note)”").foregroundStyle(.secondary) }
+        }
+        .font(.callout)
+    }
+}
+
+/// Pick 1–5, say why, rate. The model is revealed once the rating is in.
+/// Rating is never required: Skip closes the task without one, and it can still be rated later.
+private struct RateControl: View {
+    @Environment(Store.self) private var store
+    let task: BoardTask
+    @State private var score: Int64 = 0
+    @State private var note = ""
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 2) {
+                ForEach(1...5, id: \.self) { n in
+                    Button { score = Int64(n) } label: {
+                        Image(systemName: Int64(n) <= score ? "star.fill" : "star").foregroundStyle(.yellow)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(n) of 5")
+                }
+            }
+            .font(.title3)
+            TextField("How did it do?", text: $note, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...4)
+                .onSubmit(rate)
+            if task.state != .done {
+                Button("Skip") { store.setDone(task, true) }
+                    .buttonStyle(.link)
+                    .help("Close the task without rating it")
+            }
+            Button("Rate", action: rate)
+                .buttonStyle(.borderedProminent)
+                .disabled(score == 0)
+        }
+    }
+
+    private func rate() {
+        guard score > 0, let run = task.run else { return }
+        store.rate(run: run, score: score, note: note)
     }
 }
 
@@ -148,7 +262,7 @@ struct MessageRow: View {
                 .foregroundStyle(.secondary)
         case .report:
             VStack(alignment: .leading, spacing: 4) {
-                Label("Report", systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.secondary)
+                Label("Task result", systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.secondary)
                 Text(message.text).textSelection(.enabled)
             }
             .padding(10)

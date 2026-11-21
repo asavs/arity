@@ -18,8 +18,8 @@ and other agents, and you read and change it only through your tools.
 When there is a task, you have two ways to get it done:
 - Do it yourself: put the finished work itself in your reply. If the task is on the board, call complete_task \
 in that same reply, after the work, never before it.
-- Hand it to an agent: set its assignee to \"agent\". One is picked to do it, and its report comes back to \
-you here. Rate the report honestly with the rate tool before you answer.
+- Hand it to an agent: set its assignee to \"agent\". One is picked to do it, and the user rates its result. \
+A note of the result may show up here later; do not wait for it.
 
 When the user wants a task written, draft it with propose_task: that fills in the task card they see under \
 this conversation. Write the brief to whoever will do it: they see only the title and \
@@ -76,13 +76,14 @@ pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn F
                     ),
                     _ => system.clone(),
                 };
-                let reply = model.complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(worker))?;
+                let can_rate = !board::unrated_for(db.conn(), conv, spec)?.is_empty();
+                let reply = model.complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(worker, can_rate))?;
                 db.append(conv, "assistant", &reply.to_json(), Some(spec))?;
             }
             Step::RunTool(call) => {
-                db.run_tool(conv, &call)?;
+                db.run_tool(conv, spec, &call)?;
             }
-            Step::Done => match rating_nudge(db, conv, &chain)? {
+            Step::Done => match rating_nudge(db, conv, spec, &chain)? {
                 Some(text) => {
                     db.append(conv, "notice", &json!({ "text": text }), None)?;
                 }
@@ -96,11 +97,13 @@ pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn F
     bail!("stopped after {MAX_STEPS} steps")
 }
 
-/// The rating gate: a conversation may not finish while a result it asked for
-/// sits unrated. After a few reminders it is let through, so a model that will
-/// not rate cannot loop forever; the run stays unrated for the user to rate.
-fn rating_nudge(db: &Journal, conv: &str, chain: &[Entry]) -> Result<Option<String>> {
-    let unrated = board::unrated_for(db.conn(), conv)?;
+/// The rating gate, for an agent that delegated on its own: its conversation
+/// may not finish while a result it asked for sits unrated. After a few
+/// reminders it is let through, so a model that will not rate cannot loop
+/// forever; the run stays unrated for the user to rate. The user's own tasks
+/// never come through here: the user rates when they like.
+fn rating_nudge(db: &Journal, conv: &str, model: &str, chain: &[Entry]) -> Result<Option<String>> {
+    let unrated = board::unrated_for(db.conn(), conv, model)?;
     if unrated.is_empty() {
         return Ok(None);
     }
@@ -125,23 +128,30 @@ mod tests {
         let path = std::env::temp_dir().join(format!("arity-gate-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let db = Journal::open(&path)?;
-        db.append("sec", "user", &json!({"text": "delegate"}), None)?;
-        let f = board::TaskFields { title: "t".into(), assignee: board::AGENT.into(), ..Default::default() };
-        let task = board::add_task(db.conn(), &f, &board::conversation_page("sec"))?;
-        db.conn().execute(
-            "INSERT INTO trials (task, conversation, model, ended, reported) VALUES (?1, 'task-1', 'm', datetime('now'), 1)",
-            rusqlite::params![task],
-        )?;
-        db.append("sec", "report", &json!({"text": "result"}), None)?;
+        let c = db.conn();
+        let agent = |title: &str| board::TaskFields { title: title.into(), assignee: board::AGENT.into(), ..Default::default() };
+        let run = |task: i64, model: &str| {
+            c.execute(
+                "INSERT INTO trials (task, conversation, model, ended, reported) VALUES (?1, 'task-' || ?1, ?2, datetime('now'), 1)",
+                rusqlite::params![task, model],
+            )
+        };
+        // An agent's run, task-1, delegates a task of its own; another model does it.
+        run(board::add_task(c, &agent("parent"), None)?, "a")?;
+        run(board::add_task(c, &agent("child"), Some("task-1"))?, "b")?;
+        db.append("task-1", "report", &json!({"text": "result"}), None)?;
         for _ in 0..MAX_NUDGES {
-            let nudge = rating_nudge(&db, "sec", &db.chain("sec")?)?;
-            assert!(nudge.is_some_and(|n| n.contains("task 1")));
-            db.append("sec", "notice", &json!({"text": "rate"}), None)?;
+            let nudge = rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?;
+            assert!(nudge.is_some_and(|n| n.contains("task 2")));
+            db.append("task-1", "notice", &json!({"text": "rate"}), None)?;
         }
-        assert!(rating_nudge(&db, "sec", &db.chain("sec")?)?.is_none(), "let through after {MAX_NUDGES}");
-        board::rate(db.conn(), 1, 4, "fine", "sec")?;
-        db.append("sec", "report", &json!({"text": "another"}), None)?;
-        assert!(rating_nudge(&db, "sec", &db.chain("sec")?)?.is_none(), "nothing unrated");
+        assert!(rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?.is_none(), "let through after {MAX_NUDGES}");
+        board::rate(c, 2, 4, "fine", "conversations/task-1", Some("a"))?;
+        db.append("task-1", "report", &json!({"text": "another"}), None)?;
+        assert!(rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?.is_none(), "nothing unrated");
+        // The user's own task, filed in a chat, is never the chat's to rate.
+        run(board::add_task(c, &agent("mine"), Some("chat"))?, "b")?;
+        assert!(rating_nudge(&db, "chat", "a", &db.chain("chat")?)?.is_none());
         let _ = std::fs::remove_file(&path);
         Ok(())
     }

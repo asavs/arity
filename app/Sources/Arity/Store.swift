@@ -9,22 +9,25 @@ import Observation
 final class Store {
     let core = Arity(dataDir: nil)
 
-    var conversations: [Conversation] = []
+    /// Chats and tasks in one list, in the order the sidebar shows them.
+    var threads: [Thread] = []
+    /// The selected thread's name.
     var selection: String? { didSet { if selection != oldValue { loadSelection() } } }
     var messages: [Message] = []
-    /// The task card open in the selected conversation, as last edited here or in the core.
+    /// The task card open in the selected chat, as last edited here or in the core.
     var draft: TaskFields?
-    var tasks: [BoardTask] = []
-    var runs: [Int64: Run] = [:]
     var scores: [Score] = []
     var models: [String] = []
     var model = ""
-    /// Conversations with a model run in flight.
+    /// Chats with a model turn in flight.
     var running: Set<String> = []
     var error: String?
     var signedInToChatGPT = false
     /// The user's page, `people/<login>`: the assignee for "Me".
     let me: String
+
+    var thread: Thread? { threads.first { $0.name == selection } }
+    var tasks: [BoardTask] { threads.compactMap(\.task) }
 
     private var revision = ""
     /// Card edits not yet written: the conversation and its fields. Written after
@@ -51,13 +54,11 @@ final class Store {
     func refresh(force: Bool = false) {
         guard let rev = attempt({ try core.revision() }), force || rev != revision else { return }
         revision = rev
-        conversations = attempt { try core.conversations() } ?? []
-        tasks = attempt { try core.tasks() } ?? []
-        runs = Dictionary(uniqueKeysWithValues: (attempt { try core.runs() } ?? []).map { ($0.id, $0) })
+        threads = attempt { try core.threads() } ?? []
         scores = attempt { try core.scores() } ?? []
         if let selection {
             messages = attempt { try core.messages(conversation: selection) } ?? []
-            if pendingCard?.conv != selection { draft = attempt { try core.draft(conversation: selection) } ?? nil }
+            if pendingCard?.conv != selection { draft = thread?.card }
         }
     }
 
@@ -66,16 +67,16 @@ final class Store {
         flushCard()
         guard let selection else { messages = []; draft = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
-        draft = attempt { try core.draft(conversation: selection) } ?? nil
+        draft = thread?.card
         if let last = attempt({ try core.lastModel(conversation: selection) }), let last {
             model = last
             if !models.contains(last) { models.append(last) }
         }
     }
 
-    /// A conversation exists once it has an entry, so a new one is only a name until the first send.
-    func newConversation() {
-        let taken = Set(conversations.map(\.name))
+    /// A chat exists once something is said in it, so a new one is only a name until the first send.
+    func newChat() {
+        let taken = Set(threads.map(\.name))
         selection = (1...).lazy.map { "chat-\($0)" }.first { !taken.contains($0) }
     }
 
@@ -93,7 +94,7 @@ final class Store {
 
     func fork(at entry: Int64) {
         guard let conv = selection else { return }
-        let taken = Set(conversations.map(\.name))
+        let taken = Set(threads.map(\.name))
         let name = (1...).lazy.map { "\(conv)-fork\($0)" }.first { !taken.contains($0) }!
         if attempt({ try core.fork(entry: entry, newConversation: name) }) != nil {
             refresh(force: true)
@@ -103,10 +104,9 @@ final class Store {
 
     // Task cards
 
-    /// A new conversation with the selected model and an empty card. The
-    /// model's first job there is to help fill it in.
-    func newTask() {
-        newConversation()
+    /// Attach an empty task card to the selected chat. The model's next job
+    /// there is to help fill it in.
+    func attachCard() {
         guard let conv = selection else { return }
         _ = attempt { try core.openDraft(conversation: conv) }
         refresh(force: true)
@@ -147,7 +147,7 @@ final class Store {
         refresh(force: true)
     }
 
-    // The board
+    // Tasks
 
     func updateTask(_ id: Int64, _ fields: TaskFields) {
         _ = attempt { try core.updateTask(id: id, fields: fields) }

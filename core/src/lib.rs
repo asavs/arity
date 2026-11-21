@@ -3,7 +3,11 @@
 //! methods from Swift through bindings UniFFI generates.
 //!
 //! Everything lives in one data folder (`~/Library/Application Support/Arity`,
-//! or `$ARITY_HOME`), so both front ends see the same conversations and board.
+//! or `$ARITY_HOME`), so both front ends see the same threads.
+//!
+//! A thread is a conversation that may have a task attached. A plain chat is a
+//! thread with no task; a run is the thread of a task an agent is doing; a task
+//! nobody has started is a thread with nothing said in it yet.
 
 mod agent;
 mod board;
@@ -44,7 +48,7 @@ pub enum MessageKind {
     Assistant,
     ToolCall,
     ToolResult,
-    /// A finished task's result, delivered to the conversation that asked for it.
+    /// A finished task's result, noted in the conversation it was filed in.
     Report,
     /// Arity speaking, for example a reminder to rate.
     Notice,
@@ -52,28 +56,54 @@ pub enum MessageKind {
     TaskCard,
 }
 
+/// One row of the one list both front ends show.
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct Conversation {
+pub struct Thread {
+    /// The conversation's name. A task nobody has started is `task-<id>`,
+    /// which is also what its first run's conversation will be called.
     pub name: String,
-    pub head: i64,
-    /// When the last entry was written, UTC, "YYYY-MM-DD HH:MM:SS".
+    /// The task's title, or how the chat began.
+    pub title: String,
+    pub group: ThreadGroup,
+    /// When something last happened in it, UTC, "YYYY-MM-DD HH:MM:SS".
     pub updated: String,
+    pub task: Option<BoardTask>,
+    /// The task card being drafted in it, if one is open.
+    pub card: Option<TaskFields>,
+}
+
+/// Where a thread sits in the list, most pressing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
+pub enum ThreadGroup {
+    /// A result to rate, or a task card left open.
+    NeedsYou,
+    /// An agent is on it.
+    Running,
+    /// A task not started or not finished: the user's own, or waiting for an agent.
+    Open,
+    /// A chat with no task.
+    Chat,
+    Done,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct BoardTask {
     pub id: i64,
     pub fields: TaskFields,
-    /// The page that wrote it: `people/<login>` or `conversations/<name>`.
+    /// Whose it is: `people/<login>`, or `conversations/<name>` when an agent delegated it from its run.
     pub created_by: String,
+    /// The conversation it was filed in, if any.
+    pub origin: Option<String>,
     pub state: TaskState,
     /// The latest run, for tasks given to an agent, and how it is going.
     pub run: Option<i64>,
     pub run_state: Option<RunState>,
-    pub conversation: Option<String>,
     pub result: Option<String>,
     pub error: Option<String>,
     pub score: Option<i64>,
+    pub note: Option<String>,
+    /// Which model did the run. Hidden (None) until it is rated.
+    pub model: Option<String>,
 }
 
 /// One attempt at a task by a blindly picked model.
@@ -148,15 +178,37 @@ impl Arity {
         Ok(config::load(&self.dir)?.workers)
     }
 
-    // Conversations
+    // Threads
 
-    pub fn conversations(&self) -> Result<Vec<Conversation>> {
-        Ok(self
-            .journal()?
-            .conversations()?
-            .into_iter()
-            .map(|(name, head, updated)| Conversation { name, head, updated })
-            .collect())
+    /// Every thread, grouped by what needs attention: tasks in board order, chats newest first.
+    pub fn threads(&self) -> Result<Vec<Thread>> {
+        let db = self.journal()?;
+        let mut conversations = db.conversations()?;
+        let mut out = Vec::new();
+        for t in board::tasks(db.conn())? {
+            let name = t.conversation.clone().unwrap_or_else(|| format!("task-{}", t.id));
+            let updated = conversations.iter().find(|c| c.0 == name).map_or(&t.created, |c| &c.1).clone();
+            let group = match (t.state, t.run_state) {
+                (TaskState::Done, _) => ThreadGroup::Done,
+                (_, Some(RunState::NeedsRating)) => ThreadGroup::NeedsYou,
+                (_, Some(RunState::Running | RunState::Failing)) => ThreadGroup::Running,
+                _ => ThreadGroup::Open,
+            };
+            out.push(Thread { name, title: t.fields.title.clone(), group, updated, task: Some(t.into()), card: None });
+        }
+        // Whatever is left is a chat. Earlier runs of a task that was run again are not listed.
+        let runs = board::run_conversations(db.conn())?;
+        conversations.retain(|c| !runs.contains(&c.0) && !out.iter().any(|t| t.name == c.0));
+        for (name, updated) in conversations {
+            let chain = db.chain(&name)?;
+            let card = draft::current(&chain);
+            let said = chain.iter().find(|e| e.kind == "user").and_then(|e| e.body["text"].as_str());
+            let title = said.and_then(|s| s.lines().next()).map_or(name.clone(), |l| l.chars().take(60).collect());
+            let group = if card.is_some() { ThreadGroup::NeedsYou } else { ThreadGroup::Chat };
+            out.push(Thread { name, title, group, updated, task: None, card });
+        }
+        out.sort_by_key(|t| t.group);
+        Ok(out)
     }
 
     pub fn messages(&self, conversation: String) -> Result<Vec<Message>> {
@@ -205,11 +257,7 @@ impl Arity {
         Ok(self.journal()?.fork(entry, &new_conversation)?)
     }
 
-    // The board
-
-    pub fn tasks(&self) -> Result<Vec<BoardTask>> {
-        Ok(board::tasks(self.journal()?.conn())?.into_iter().map(BoardTask::from).collect())
-    }
+    // Tasks
 
     /// The user's own page, `people/<login>`: the assignee for "Me".
     pub fn me(&self) -> String {
@@ -218,7 +266,7 @@ impl Arity {
 
     /// A task written by the user. With assignee `agent`, a blindly picked model does it.
     pub fn add_task(&self, fields: TaskFields) -> Result<i64> {
-        Ok(board::add_task(self.journal()?.conn(), &fields, &board::me())?)
+        Ok(board::add_task(self.journal()?.conn(), &fields, None)?)
     }
 
     /// Replace a task's fields. Changing the assignee to `agent` hands it off.
@@ -231,11 +279,6 @@ impl Arity {
     }
 
     // Task cards: drafts bound to a conversation
-
-    /// The task card open in a conversation, if any.
-    pub fn draft(&self, conversation: String) -> Result<Option<TaskFields>> {
-        Ok(draft::current(&self.journal()?.chain(&conversation)?))
-    }
 
     /// Open an empty card. Creates the conversation if it is new.
     pub fn open_draft(&self, conversation: String) -> Result<()> {
@@ -269,8 +312,8 @@ impl Arity {
             Did::Nothing => None,
             Did::Ran { task, trial } => Some(format!("task {task}: run {trial} finished")),
             Did::Failed { task, trial, error } => Some(format!("task {task}: run {trial} failed, will retry: {error}")),
-            Did::Reported { task, to: Some(conv) } => Some(format!("task {task}: reported to {conv}")),
-            Did::Reported { task, to: None } => Some(format!("task {task}: waiting for your rating on the board")),
+            Did::Reported { task, rater: Some(conv) } => Some(format!("task {task}: reported to {conv} to rate")),
+            Did::Reported { task, rater: None } => Some(format!("task {task}: waiting for your rating")),
         })
     }
 
@@ -293,7 +336,7 @@ impl Arity {
 
     /// The user rates a run. Replaces any earlier rating of it.
     pub fn rate(&self, run: i64, score: i64, note: String) -> Result<()> {
-        Ok(board::rate(self.journal()?.conn(), run, score, &note, "user")?)
+        Ok(board::rate(self.journal()?.conn(), run, score, &note, &board::me(), None)?)
     }
 
     pub fn scores(&self) -> Result<Vec<Score>> {
@@ -345,13 +388,15 @@ impl From<board::TaskRow> for BoardTask {
             id: t.id,
             fields: t.fields,
             created_by: t.created_by,
+            origin: t.origin,
             state: t.state,
             run: t.trial,
             run_state: t.run_state,
-            conversation: t.conversation,
             result: t.result,
             error: t.error,
+            model: t.score.and(t.model),
             score: t.score,
+            note: t.note,
         }
     }
 }

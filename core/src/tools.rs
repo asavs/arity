@@ -19,8 +19,8 @@ fn field_schema() -> Value {
     json!({
         "title": {"type": "string", "description": "Short, starts with a verb."},
         "brief": {"type": "string", "description": "Everything whoever does it needs to know to do it well."},
-        "assignee": {"type": "string", "description": "\"agent\" hands it to an agent: one is picked to do it, and its \
-            report comes back to you to rate. \"user\" puts it on the user's own list."},
+        "assignee": {"type": "string", "description": "\"agent\" hands it to an agent: one is picked to do it, and the \
+            user rates its result. \"user\" puts it on the user's own list."},
         "clearance": {"type": "string", "enum": ["any", "local"], "description": "\"local\" keeps it to models running on \
             the user's computer, for private work."},
         "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
@@ -35,8 +35,9 @@ fn with_id(mut props: Value) -> Value {
     props
 }
 
-/// Workers doing a task may read the board but not change it.
-pub fn specs(worker: bool) -> Vec<ToolSpec> {
+/// Workers doing a task may read the board but not change it. `rate` is
+/// offered only to a conversation with results of its own waiting to be rated.
+pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "propose_task",
@@ -48,7 +49,7 @@ pub fn specs(worker: bool) -> Vec<ToolSpec> {
         ToolSpec {
             name: "add_task",
             description: "Put a task straight on the shared board, without the card. Use this only when the user asks \
-                          you to add it directly. With assignee \"agent\", an agent does it and reports back to you.",
+                          you to add it directly. With assignee \"agent\", an agent does it and the user rates the result.",
             parameters: json!({"type": "object", "properties": field_schema(), "required": ["title"]}),
         },
         ToolSpec {
@@ -79,17 +80,17 @@ pub fn specs(worker: bool) -> Vec<ToolSpec> {
             }, "required": ["task", "score", "note"]}),
         },
     ];
-    all.into_iter().filter(|t| !worker || t.name == "list_tasks").collect()
+    all.into_iter().filter(|t| if t.name == "rate" { can_rate } else { !worker || t.name == "list_tasks" }).collect()
 }
 
-const HANDED_OFF: &str = "An agent will do it, and its report will arrive in a later message. \
+const HANDED_OFF: &str = "An agent will do it and the user will rate its result. \
                           Do not wait or check on it: finish your reply now.";
 
-/// `conv` is the conversation calling the tool.
-pub fn execute(db: &Connection, conv: &str, name: &str, arguments: &str) -> String {
+/// `conv` is the conversation calling the tool, and `model` the model it is running on.
+pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
     let result = (|| -> anyhow::Result<String> {
-        if name != "list_tasks" && board::trial_of_conversation(db, conv)?.is_some() {
+        if !matches!(name, "list_tasks" | "rate") && board::trial_of_conversation(db, conv)?.is_some() {
             anyhow::bail!("you are doing a task and can only read the board");
         }
         match name {
@@ -104,7 +105,7 @@ pub fn execute(db: &Connection, conv: &str, name: &str, arguments: &str) -> Stri
             "add_task" => {
                 let mut f = TaskFields::default();
                 f.merge(&args)?;
-                let id = board::add_task(db, &f, &board::conversation_page(conv))?;
+                let id = board::add_task(db, &f, Some(conv))?;
                 Ok(if f.assignee == AGENT { format!("added task {id}. {HANDED_OFF}") } else { format!("added task {id}") })
             }
             "update_task" => {
@@ -129,11 +130,11 @@ pub fn execute(db: &Connection, conv: &str, name: &str, arguments: &str) -> Stri
                 let task = args["task"].as_i64().ok_or_else(|| anyhow::anyhow!("missing task"))?;
                 let score = args["score"].as_i64().ok_or_else(|| anyhow::anyhow!("missing score"))?;
                 let note = args["note"].as_str().unwrap_or_default();
-                let (_, trial) = board::unrated_for(db, conv)?
+                let (_, trial) = board::unrated_for(db, conv, model)?
                     .into_iter()
                     .find(|(t, _)| *t == task)
                     .ok_or_else(|| anyhow::anyhow!("task {task} has no result of yours waiting for a rating"))?;
-                board::rate(db, trial, score, note, &board::conversation_page(conv))?;
+                board::rate(db, trial, score, note, &board::conversation_page(conv), Some(model))?;
                 Ok(format!("rated task {task}: {score}/5"))
             }
             other => anyhow::bail!("unknown tool {other}"),

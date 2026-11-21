@@ -5,9 +5,13 @@
 //! Ready is decided by blockers and recomputed after every write. A task whose
 //! assignee is `agent` wakes the dispatcher once it is ready: it claims the
 //! task by creating a trial, which picks a model blind and runs a worker in its
-//! own conversation. The finished result goes back to whoever wrote the task
-//! and waits in gates until it is rated; the rating is the only gate for now.
-//! The model stays hidden until then.
+//! own conversation. The finished result waits in gates until whoever wrote the
+//! task rates it; the rating is the only gate for now. The model stays hidden
+//! until then.
+//!
+//! A task filed in a conversation the user is talking in is the user's, and
+//! `origin` remembers the conversation. Only a task an agent files from its own
+//! run is written by a conversation, and only those are rated by a model.
 
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -31,6 +35,12 @@ pub fn me() -> String {
 
 pub fn conversation_page(conv: &str) -> String {
     format!("conversations/{conv}")
+}
+
+/// Who a task filed in this conversation belongs to: the agent whose run the
+/// conversation is, or else the user, who is the one talking in it.
+pub fn author(conn: &Connection, conv: &str) -> Result<String> {
+    Ok(if trial_of_conversation(conn, conv)?.is_some() { conversation_page(conv) } else { me() })
 }
 
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -67,20 +77,28 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              trial    INTEGER PRIMARY KEY REFERENCES trials(id),
              score    INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
              note     TEXT NOT NULL,
-             rated_by TEXT NOT NULL,
+             rated_by TEXT NOT NULL,              -- people/<login>, or conversations/<name>
+             rater_model TEXT,                    -- the model that rated; NULL for a person
              rated_at TEXT NOT NULL DEFAULT (datetime('now'))
          );",
     )?;
-    let cols: Vec<String> = tx
-        .prepare("SELECT name FROM pragma_table_info('tasks')")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let columns = |table: &str| -> Result<Vec<String>> {
+        let mut stmt = tx.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let names = stmt.query_map([table], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(names)
+    };
+    let cols = columns("tasks")?;
     if cols.is_empty() {
         create_tasks(&tx, "tasks")?;
     } else if !cols.iter().any(|c| c == "assignee") {
         migrate_v0(&tx, &cols)?;
         let broken: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
         anyhow::ensure!(broken == 0, "migrating tasks would break {broken} links; nothing was changed");
+    } else if !cols.iter().any(|c| c == "origin") {
+        tx.execute_batch("ALTER TABLE tasks ADD COLUMN origin TEXT")?;
+    }
+    if !columns("ratings")?.iter().any(|c| c == "rater_model") {
+        migrate_authorship(&tx)?;
     }
     tx.commit()?;
     Ok(())
@@ -93,7 +111,8 @@ fn create_tasks(c: &Connection, name: &str) -> Result<()> {
              title      TEXT NOT NULL,
              brief      TEXT,
              assignee   TEXT NOT NULL,            -- people/<login>, or agent
-             created_by TEXT NOT NULL,            -- people/<login>, or conversations/<name>
+             created_by TEXT NOT NULL,            -- people/<login>, or conversations/<name> for an agent's run
+             origin     TEXT,                     -- the conversation it was filed in, if any
              state      TEXT NOT NULL DEFAULT 'open'
                         CHECK (state IN ('open', 'ready', 'assigned', 'in_gates', 'done')),
              clearance  TEXT NOT NULL DEFAULT 'any' CHECK (clearance IN ('any', 'local')),
@@ -133,6 +152,36 @@ fn migrate_v0(c: &Connection, cols: &[String]) -> Result<()> {
     )?;
     c.execute_batch("DROP TABLE tasks; ALTER TABLE tasks_new RENAME TO tasks;")?;
     refresh_ready(c)?;
+    Ok(())
+}
+
+/// Tasks used to be written by the conversation they were filed in, which then
+/// rated the result with whatever model it last used. Now a task filed in a
+/// chat is the user's and the chat is only its origin; every rating records the
+/// rater's model; and a rating a model gave its own run is void, so the result
+/// waits for the user again.
+fn migrate_authorship(c: &Connection) -> Result<()> {
+    c.execute_batch("ALTER TABLE ratings ADD COLUMN rater_model TEXT")?;
+    c.execute(
+        "UPDATE tasks SET origin = substr(created_by, 15), created_by = ?1
+         WHERE created_by LIKE 'conversations/%' AND substr(created_by, 15) NOT IN (SELECT conversation FROM trials)",
+        params![me()],
+    )?;
+    // The rater's model is on the assistant entry that called `rate` for the task.
+    c.execute_batch(
+        "UPDATE ratings SET rater_model = (
+             SELECT e.model FROM entries e, json_each(e.body, '$.tool_calls') call
+             WHERE e.kind = 'assistant' AND json_extract(call.value, '$.name') = 'rate'
+               AND json_valid(json_extract(call.value, '$.arguments'))
+               AND json_extract(json_extract(call.value, '$.arguments'), '$.task')
+                   = (SELECT task FROM trials WHERE id = ratings.trial)
+             ORDER BY e.id DESC LIMIT 1)
+         WHERE rated_by != 'user';
+         UPDATE tasks SET state = 'in_gates' WHERE state = 'done' AND id IN (
+             SELECT tr.task FROM ratings r JOIN trials tr ON tr.id = r.trial WHERE r.rater_model = tr.model);
+         DELETE FROM ratings WHERE rater_model = (SELECT model FROM trials WHERE id = ratings.trial);",
+    )?;
+    c.execute("UPDATE ratings SET rated_by = ?1 WHERE rated_by = 'user'", params![me()])?;
     Ok(())
 }
 
@@ -407,13 +456,18 @@ pub struct TaskRow {
     pub id: i64,
     pub fields: TaskFields,
     pub created_by: String,
+    pub origin: Option<String>,
     pub state: TaskState,
+    pub created: String,
     pub trial: Option<i64>,
     pub run_state: Option<RunState>,
     pub conversation: Option<String>,
     pub result: Option<String>,
     pub error: Option<String>,
     pub score: Option<i64>,
+    pub note: Option<String>,
+    /// Which model did the latest run. Front ends see it only once it is rated.
+    pub model: Option<String>,
 }
 
 /// Every task, the ones still to do first, then by priority, due date and age.
@@ -422,7 +476,8 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.clearance,
                 t.priority, t.due, t.tags,
-                tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score
+                tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
+                t.origin, t.created, r.note, tr.model
          FROM tasks t
          LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id)
          LEFT JOIN ratings r ON r.trial = tr.id
@@ -454,13 +509,17 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 tags: serde_json::from_str(&tags).unwrap_or_default(),
             },
             created_by: r.get(4)?,
+            origin: r.get(16)?,
             state: TaskState::parse(&r.get::<_, String>(5)?),
+            created: r.get(17)?,
             trial,
             run_state,
             conversation: r.get(11)?,
             result: r.get(13)?,
             error,
             score,
+            note: r.get(18)?,
+            model: r.get(19)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -513,12 +572,17 @@ fn write_links(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
     Ok(())
 }
 
-/// `created_by` is a page id: `people/<login>` or `conversations/<name>`.
-pub fn add_task(conn: &Connection, f: &TaskFields, created_by: &str) -> Result<i64> {
+/// A task filed in the conversation `origin`, or by the user directly when
+/// there is none. Who it belongs to follows from that; see `author`.
+pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Result<i64> {
     check(conn, None, f)?;
+    let created_by = match origin {
+        Some(conv) => author(conn, conv)?,
+        None => me(),
+    };
     conn.execute(
-        "INSERT INTO tasks (title, brief, assignee, created_by, clearance, priority, due, tags)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO tasks (title, brief, assignee, created_by, clearance, priority, due, tags, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             f.title.trim(),
             Some(f.brief.trim()).filter(|b| !b.is_empty()),
@@ -528,6 +592,7 @@ pub fn add_task(conn: &Connection, f: &TaskFields, created_by: &str) -> Result<i
             f.priority.rank(),
             f.due,
             serde_json::to_string(&f.tags)?,
+            origin,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -588,42 +653,55 @@ pub fn trial_of_conversation(conn: &Connection, conv: &str) -> Result<Option<i64
         .optional()?)
 }
 
+pub fn run_conversations(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT conversation FROM trials")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn is_rated(conn: &Connection, trial: i64) -> Result<bool> {
     Ok(conn.query_row("SELECT count(*) FROM ratings WHERE trial = ?1", params![trial], |r| r.get::<_, i64>(0))? > 0)
 }
 
 /// Rate a finished run. The rating is the task's one gate, so it is done after.
-pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &str) -> Result<()> {
+/// `rater_model` is the model rating, or None for a person. A model never
+/// rates a run it did itself.
+pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &str, rater_model: Option<&str>) -> Result<()> {
     if !(1..=5).contains(&score) {
         bail!("score must be 1 to 5");
     }
-    let found: Option<(i64, Option<String>)> = conn
-        .query_row("SELECT task, ended FROM trials WHERE id = ?1", params![trial], |r| Ok((r.get(0)?, r.get(1)?)))
+    let found: Option<(i64, Option<String>, String)> = conn
+        .query_row("SELECT task, ended, model FROM trials WHERE id = ?1", params![trial], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .optional()?;
     let task = match found {
         None => bail!("no run {trial}"),
-        Some((_, None)) => bail!("run {trial} has not finished"),
-        Some((task, Some(_))) => task,
+        Some((_, None, _)) => bail!("run {trial} has not finished"),
+        Some((_, _, model)) if rater_model == Some(&model) => bail!("run {trial} is not yours to rate"),
+        Some((task, ..)) => task,
     };
     conn.execute(
-        "INSERT INTO ratings (trial, score, note, rated_by) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO ratings (trial, score, note, rated_by, rater_model) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(trial) DO UPDATE SET score = excluded.score, note = excluded.note,
-             rated_by = excluded.rated_by, rated_at = datetime('now')",
-        params![trial, score, note, rated_by],
+             rated_by = excluded.rated_by, rater_model = excluded.rater_model, rated_at = datetime('now')",
+        params![trial, score, note, rated_by, rater_model],
     )?;
     conn.execute("UPDATE tasks SET state = 'done', edits = edits + 1 WHERE id = ?1 AND state = 'in_gates'", params![task])?;
     refresh_ready(conn)
 }
 
-/// Finished, reported runs of tasks this conversation wrote that nobody has rated.
-pub fn unrated_for(conn: &Connection, conv: &str) -> Result<Vec<(i64, i64)>> {
+/// Finished, reported runs of tasks this conversation wrote that nobody has
+/// rated and that `model`, the one it is running on, may rate: not its own.
+/// The rest are left for the user. Each is (task, run).
+pub fn unrated_for(conn: &Connection, conv: &str, model: &str) -> Result<Vec<(i64, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT tr.task, tr.id FROM trials tr JOIN tasks t ON t.id = tr.task
-         WHERE t.created_by = ?1 AND tr.ended IS NOT NULL AND tr.reported = 1
+         WHERE t.created_by = ?1 AND tr.ended IS NOT NULL AND tr.reported = 1 AND tr.model != ?2
            AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.trial = tr.id)
          ORDER BY tr.id",
     )?;
-    let rows = stmt.query_map(params![conversation_page(conv)], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![conversation_page(conv), model], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -699,8 +777,8 @@ mod tests {
         let path = temp("ready");
         let db = crate::journal::Journal::open(&path)?;
         let c = db.conn();
-        let a = add_task(c, &fields("a"), &me())?;
-        let b = add_task(c, &TaskFields { blocked_by: vec![a], ..fields("b") }, &me())?;
+        let a = add_task(c, &fields("a"), None)?;
+        let b = add_task(c, &TaskFields { blocked_by: vec![a], ..fields("b") }, None)?;
         assert_eq!(task(c, a)?.state, TaskState::Ready);
         assert_eq!(task(c, b)?.state, TaskState::Open, "a is not done yet");
         set_done(c, a, true)?;
@@ -715,7 +793,7 @@ mod tests {
         update_task(c, b, &TaskFields { blocked_by: vec![a], ..fields("b") })?;
         assert!(update_task(c, a, &TaskFields { blocked_by: vec![b], ..fields("a") }).is_err());
         assert!(update_task(c, a, &TaskFields { blocked_by: vec![a], ..fields("a") }).is_err());
-        assert!(add_task(c, &TaskFields { blocked_by: vec![99], ..fields("c") }, &me()).is_err());
+        assert!(add_task(c, &TaskFields { blocked_by: vec![99], ..fields("c") }, None).is_err());
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
@@ -754,16 +832,144 @@ mod tests {
         let get = |id: i64| ts.iter().find(|t| t.id == id).unwrap();
         assert_eq!((get(1).state, get(1).fields.assignee.as_str(), get(1).created_by.as_str()), (TaskState::Done, &*me, &*me));
         assert_eq!((get(2).state, get(2).fields.assignee.as_str()), (TaskState::Ready, &*me));
-        assert_eq!((get(3).state, get(3).created_by.as_str()), (TaskState::Ready, "conversations/hello"));
+        assert_eq!((get(3).state, &*get(3).created_by, get(3).origin.as_deref()), (TaskState::Ready, &*me, Some("hello")));
         assert_eq!((get(4).state, get(4).fields.assignee.as_str()), (TaskState::Done, AGENT));
         assert_eq!((get(4).fields.brief.as_str(), get(4).run_state, get(4).score), ("the readme", Some(RunState::Rated), Some(4)));
         assert_eq!((get(5).state, get(5).run_state), (TaskState::Assigned, Some(RunState::Running)));
         assert_eq!(get(3).fields.priority, Priority::Normal);
-        // The rating gate still finds the conversation's runs, and opening again changes nothing.
-        assert!(unrated_for(c, "hello")?.is_empty());
+        // Opening again changes nothing.
         drop(db);
         let db = crate::journal::Journal::open(&path)?;
         assert_eq!(tasks(db.conn())?.len(), 5);
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// A run of `task` by `model` that has finished and been reported.
+    fn finished_run(c: &Connection, task: i64, model: &str) -> Result<i64> {
+        c.execute(
+            "INSERT INTO trials (task, conversation, model, ended, result, reported)
+             VALUES (?1, 'task-' || ?1, ?2, datetime('now'), 'the result', 1)",
+            params![task, model],
+        )?;
+        set_state(c, task, TaskState::InGates)?;
+        Ok(c.last_insert_rowid())
+    }
+
+    fn for_agent(title: &str) -> TaskFields {
+        TaskFields { assignee: AGENT.into(), ..fields(title) }
+    }
+
+    #[test]
+    fn a_task_filed_in_a_chat_is_the_users() -> Result<()> {
+        let path = temp("author");
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        // The model in a chat adds a task for an agent: the user's, from that chat.
+        let out = crate::tools::execute(c, "chat", "codex:x", "add_task", r#"{"title": "write a poem", "assignee": "agent"}"#);
+        assert!(out.starts_with("added task 1"), "{out}");
+        let t = task(c, 1)?;
+        assert_eq!((&*t.created_by, t.origin.as_deref()), (&*me(), Some("chat")));
+        // So no model is asked to rate it, whichever one the chat is on.
+        let run = finished_run(c, 1, "mlx:m")?;
+        assert!(unrated_for(c, "chat", "codex:x")?.is_empty());
+        rate(c, run, 5, "lovely", &me(), None)?;
+        assert_eq!(task(c, 1)?.state, TaskState::Done);
+        // Written directly, there is no origin. Filed from an agent's own run, it is that run's.
+        assert_eq!(task(c, add_task(c, &fields("direct"), None)?)?.origin, None);
+        let delegated = add_task(c, &for_agent("delegated"), Some("task-1"))?;
+        assert_eq!(task(c, delegated)?.created_by, "conversations/task-1");
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn a_model_never_rates_its_own_run() -> Result<()> {
+        let path = temp("own-run");
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let parent = add_task(c, &for_agent("parent"), None)?;
+        finished_run(c, parent, "mlx:a")?;
+        // The parent's run delegates; the same model happens to do the child.
+        let child = add_task(c, &for_agent("child"), Some("task-1"))?;
+        let run = finished_run(c, child, "mlx:a")?;
+        assert!(unrated_for(c, "task-1", "mlx:a")?.is_empty(), "not offered its own run");
+        assert!(rate(c, run, 5, "great", "conversations/task-1", Some("mlx:a")).is_err());
+        let out = crate::tools::execute(c, "task-1", "mlx:a", "rate", &format!(r#"{{"task": {child}, "score": 5, "note": "great"}}"#));
+        assert!(out.starts_with("error"), "{out}");
+        assert_eq!(task(c, child)?.run_state, Some(RunState::NeedsRating), "still waiting, for the user");
+        // Another model may, and is recorded as the rater.
+        assert_eq!(unrated_for(c, "task-1", "mlx:b")?, vec![(child, run)]);
+        let out = crate::tools::execute(c, "task-1", "mlx:b", "rate", &format!(r#"{{"task": {child}, "score": 3, "note": "ok"}}"#));
+        assert_eq!(out, format!("rated task {child}: 3/5"));
+        let rater: Option<String> = c.query_row("SELECT rater_model FROM ratings WHERE trial = ?1", params![run], |r| r.get(0))?;
+        assert_eq!(rater.as_deref(), Some("mlx:b"));
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_authorship_in_place() -> Result<()> {
+        let path = temp("authorship");
+        {
+            // The board as it was: tasks written by the chat they were filed in,
+            // one of them rated there by the model that had also done the run.
+            let c = Connection::open(&path)?;
+            c.execute_batch(
+                "CREATE TABLE entries (id INTEGER PRIMARY KEY, parent INTEGER, kind TEXT NOT NULL, body TEXT NOT NULL,
+                     model TEXT, created TEXT NOT NULL DEFAULT (datetime('now')));
+                 CREATE TABLE conversations (name TEXT PRIMARY KEY, head INTEGER NOT NULL);
+                 CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, brief TEXT, assignee TEXT NOT NULL,
+                     created_by TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', clearance TEXT NOT NULL DEFAULT 'any',
+                     priority INTEGER NOT NULL DEFAULT 1, due TEXT, tags TEXT NOT NULL DEFAULT '[]',
+                     created TEXT NOT NULL DEFAULT (datetime('now')), edits INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE trials (id INTEGER PRIMARY KEY, task INTEGER NOT NULL REFERENCES tasks(id),
+                     conversation TEXT NOT NULL, harness TEXT NOT NULL DEFAULT 'arity', model TEXT NOT NULL,
+                     started TEXT NOT NULL DEFAULT (datetime('now')), ended TEXT, result TEXT, error TEXT,
+                     lease_until INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE ratings (trial INTEGER PRIMARY KEY REFERENCES trials(id), score INTEGER NOT NULL,
+                     note TEXT NOT NULL, rated_by TEXT NOT NULL, rated_at TEXT NOT NULL DEFAULT (datetime('now')));
+                 INSERT INTO tasks (id, title, assignee, created_by, state) VALUES
+                     (1, 'write a poem', 'agent', 'conversations/hello', 'done'),
+                     (2, 'summarise', 'agent', 'conversations/hello', 'done'),
+                     (3, 'translate', 'agent', 'people/x', 'done'),
+                     (4, 'child', 'agent', 'conversations/task-3', 'ready');
+                 INSERT INTO trials (id, task, conversation, model, ended, result, reported) VALUES
+                     (1, 1, 'task-1', 'mlx:qwen', datetime('now'), 'a poem', 1),
+                     (2, 2, 'task-2', 'mlx:gemma', datetime('now'), 'short', 1),
+                     (3, 3, 'task-3', 'mlx:qwen', datetime('now'), 'hola', 1);
+                 INSERT INTO ratings (trial, score, note, rated_by) VALUES
+                     (1, 5, 'beautiful', 'conversations/hello'),
+                     (2, 4, 'fine', 'conversations/hello'),
+                     (3, 2, 'stiff', 'user');",
+            )?;
+            let call = |task: i64| json!({"text": "", "tool_calls": [{"id": "c", "name": "rate",
+                "arguments": json!({"task": task, "score": 5, "note": "n"}).to_string()}]})
+            .to_string();
+            c.execute("INSERT INTO entries (id, kind, body, model) VALUES (1, 'assistant', ?1, 'mlx:qwen')", params![call(1)])?;
+            c.execute("INSERT INTO entries (id, parent, kind, body, model) VALUES (2, 1, 'assistant', ?1, 'mlx:qwen')", params![call(2)])?;
+            c.execute("INSERT INTO conversations VALUES ('hello', 2)", [])?;
+        }
+        for _ in 0..2 {
+            // Twice: opening again changes nothing.
+            let db = crate::journal::Journal::open(&path)?;
+            let c = db.conn();
+            let ts = tasks(c)?;
+            let get = |id: i64| ts.iter().find(|t| t.id == id).unwrap();
+            // Filed in a chat: the user's now, with the chat kept as the origin.
+            assert_eq!((&*get(1).created_by, get(1).origin.as_deref()), (&*me(), Some("hello")));
+            // Qwen rated its own poem: void, and waiting for the user.
+            assert_eq!((get(1).state, get(1).run_state, get(1).score), (TaskState::InGates, Some(RunState::NeedsRating), None));
+            // Qwen rated Gemma's run: kept, with the rater's model recorded.
+            assert_eq!((get(2).state, get(2).score), (TaskState::Done, Some(4)));
+            let raters: Vec<(i64, String, Option<String>)> = c
+                .prepare("SELECT trial, rated_by, rater_model FROM ratings ORDER BY trial")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(raters, vec![(2, "conversations/hello".into(), Some("mlx:qwen".into())), (3, me(), None)]);
+            // A task an agent's run delegated is still that run's.
+            assert_eq!((&*get(4).created_by, get(4).origin.as_deref()), ("conversations/task-3", None));
+        }
         let _ = std::fs::remove_file(&path);
         Ok(())
     }

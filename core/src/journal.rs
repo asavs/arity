@@ -61,9 +61,9 @@ impl Journal {
     /// Run a tool and record its result in one transaction. If the process dies
     /// before commit, neither the tool's effect on the board nor the entry exists,
     /// so a resume runs it again exactly once.
-    pub fn run_tool(&self, conv: &str, call: &ToolCall) -> Result<String> {
+    pub fn run_tool(&self, conv: &str, model: &str, call: &ToolCall) -> Result<String> {
         let tx = self.conn.unchecked_transaction()?;
-        let output = tools::execute(&tx, conv, &call.name, &call.arguments);
+        let output = tools::execute(&tx, conv, model, &call.name, &call.arguments);
         let body = serde_json::json!({ "call_id": call.id, "name": call.name, "output": output });
         insert(&tx, conv, "tool", &body, None)?;
         tx.commit()?;
@@ -90,12 +90,12 @@ impl Journal {
         Ok(())
     }
 
-    /// Every conversation with its head entry and when that entry was written, newest first.
-    pub fn conversations(&self) -> Result<Vec<(String, i64, String)>> {
+    /// Every conversation and when its last entry was written, newest first.
+    pub fn conversations(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT c.name, c.head, e.created FROM conversations c JOIN entries e ON e.id = c.head ORDER BY c.head DESC",
+            "SELECT c.name, e.created FROM conversations c JOIN entries e ON e.id = c.head ORDER BY c.head DESC",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
