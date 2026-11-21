@@ -61,8 +61,10 @@ pub fn specs(worker: bool, can_rate: bool) -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "list_tasks",
-            description: "List every task on the shared board with its id, state and fields.",
-            parameters: json!({"type": "object", "properties": {}}),
+            description: "List the tasks on the shared board that are not done, with their ids, states and fields.",
+            parameters: json!({"type": "object", "properties": {
+                "include_done": {"type": "boolean", "description": "Also list finished tasks."}
+            }}),
         },
         ToolSpec {
             name: "complete_task",
@@ -118,8 +120,13 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 Ok(if handed_off { format!("updated task {id}. {HANDED_OFF}") } else { format!("updated task {id}") })
             }
             "list_tasks" => {
-                let rows: Vec<String> = board::tasks(db)?.iter().map(line).collect();
-                Ok(if rows.is_empty() { "the board is empty".into() } else { rows.join("\n") })
+                let all = args["include_done"] == true;
+                let rows: Vec<String> = board::tasks(db)?.iter().filter(|t| all || t.state != TaskState::Done).map(line).collect();
+                Ok(match (rows.is_empty(), all) {
+                    (true, true) => "the board is empty".into(),
+                    (true, false) => "no open tasks; include_done lists finished ones".into(),
+                    _ => rows.join("\n"),
+                })
             }
             "complete_task" => {
                 let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;

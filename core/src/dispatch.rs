@@ -4,7 +4,13 @@
 //!
 //! Claims are leases on the trial row, taken in a write transaction, so two
 //! dispatchers never run the same task, and a run whose dispatcher died is
-//! picked up again from the journal once its lease runs out.
+//! picked up again from the journal once its lease runs out, or as soon as its
+//! conversation's turn lease lapses, which takes seconds rather than minutes.
+//!
+//! A run whose model cannot be reached (signed out, key gone, server down) is
+//! abandoned: it ends without a result, is never reported or scored, and the
+//! task is picked again among models that can be reached. Failures are told
+//! only through `reveal`, since they name the model or its provider.
 
 use std::path::Path;
 
@@ -14,7 +20,13 @@ use serde_json::json;
 
 use crate::board::{LEASE_SECS, now};
 use crate::journal::{Journal, chain, insert};
+use crate::leaderboard::Candidate;
 use crate::{agent, config};
+
+/// What is said about a failing run before it is rated. Nothing in it hints at the model.
+pub const FAILING: &str = "The last attempt failed; it will be tried again";
+const RETRYING: &str = "failed; retrying in a minute";
+const ABANDONED: &str = "could not reach its model; the task will be picked again";
 
 /// What one call did, for logging.
 pub enum Did {
@@ -25,11 +37,40 @@ pub enum Did {
     Failed { task: i64, trial: i64, error: String },
 }
 
+impl Did {
+    /// A line describing it, as `arity work` prints it. None for nothing done.
+    pub fn describe(&self) -> Option<String> {
+        Some(match self {
+            Did::Nothing => return None,
+            Did::Ran { task, trial } => format!("task {task}: run {trial} finished"),
+            Did::Failed { task, trial, error } => format!("task {task}: run {trial} {error}"),
+            Did::Reported { task, rater: Some(conv) } => format!("task {task}: reported to {conv} to rate"),
+            Did::Reported { task, rater: None } => format!("task {task}: waiting for your rating"),
+        })
+    }
+}
+
 pub fn work_once(db: &Journal, data_dir: &Path) -> Result<Did> {
+    work_once_with(db, data_dir, &|| crate::candidates(data_dir))
+}
+
+/// `reachable` lists the models that can be reached now; it is asked only when
+/// there is work, since it may check local servers.
+pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Result<Vec<Candidate>>) -> Result<Did> {
     if let Some(did) = deliver_report(db, data_dir)? {
         return Ok(did);
     }
-    let Some((trial, task, conv, model)) = db.immediate(|c| claim(c, data_dir))? else {
+    let waiting: bool = db.conn().query_row(
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE assignee = 'agent' AND state = 'ready')
+             OR EXISTS (SELECT 1 FROM trials WHERE ended IS NULL)",
+        [],
+        |r| r.get(0),
+    )?;
+    if !waiting {
+        return Ok(Did::Nothing);
+    }
+    let reach: Vec<String> = reachable()?.into_iter().map(|c| c.model).collect();
+    let Some((trial, task, conv, model)) = db.immediate(|c| claim(c, data_dir, &reach))? else {
         return Ok(Did::Nothing);
     };
     // Renew the lease after every step, so a long run is not taken over.
@@ -59,24 +100,42 @@ pub fn work_once(db: &Journal, data_dir: &Path) -> Result<Did> {
             Ok(Did::Ran { task, trial })
         }
         Err(e) => {
+            let detail = format!("{e:#}");
+            if !reach.contains(&model) {
+                // Its model is out of reach: end this run unscored and let the task be picked again.
+                db.immediate(|c| {
+                    c.execute(
+                        "UPDATE trials SET ended = datetime('now'), error = ?2, abandoned = 1, reported = 1 WHERE id = ?1",
+                        params![trial, detail],
+                    )?;
+                    c.execute("UPDATE tasks SET state = 'open', edits = edits + 1 WHERE id = ?1", params![task])?;
+                    crate::board::refresh_ready(c)
+                })?;
+                return Ok(Did::Failed { task, trial, error: ABANDONED.into() });
+            }
             // Leave the run open and retry it in a minute; the journal knows where it stopped.
-            let error = format!("{e:#}");
             db.conn().execute(
                 "UPDATE trials SET error = ?2, lease_until = ?3 WHERE id = ?1",
-                params![trial, error, now() + 60],
+                params![trial, detail, now() + 60],
             )?;
-            Ok(Did::Failed { task, trial, error })
+            Ok(Did::Failed { task, trial, error: RETRYING.into() })
         }
     }
 }
 
-/// Take over an abandoned run, or start a run for the most pressing ready task.
-fn claim(c: &Connection, data_dir: &Path) -> Result<Option<(i64, i64, String, String)>> {
+/// Take over a run whose dispatcher died, or start a run for the most pressing ready task.
+/// A run is taken over once its lease runs out, or sooner when it has not been
+/// renewed for a little while and no turn is running in its conversation: the
+/// conversation's own lease lapses within seconds of its process dying.
+fn claim(c: &Connection, data_dir: &Path, reachable: &[String]) -> Result<Option<(i64, i64, String, String)>> {
     let stale: Option<(i64, i64, String, String)> = c
         .query_row(
-            "SELECT id, task, conversation, model FROM trials
-             WHERE ended IS NULL AND lease_until < ?1 ORDER BY id LIMIT 1",
-            params![now()],
+            "SELECT id, task, conversation, model FROM trials tr
+             WHERE ended IS NULL AND (lease_until < ?1 OR (
+                 lease_until < ?1 + ?2 - ?3
+                 AND NOT EXISTS (SELECT 1 FROM turns WHERE conversation = tr.conversation AND lease_until >= ?1)))
+             ORDER BY id LIMIT 1",
+            params![now(), LEASE_SECS, crate::turn::LEASE_SECS],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
@@ -85,8 +144,9 @@ fn claim(c: &Connection, data_dir: &Path) -> Result<Option<(i64, i64, String, St
         return Ok(stale);
     }
     // Ready tasks for an agent, most pressing first. A task whose clearance no
-    // configured worker meets is skipped rather than blocking the rest.
-    let workers = config::load(data_dir)?.workers;
+    // reachable worker meets is skipped rather than blocking the rest.
+    let mut workers = config::load(data_dir)?.workers;
+    workers.retain(|m| reachable.contains(m));
     let mut stmt = c.prepare(
         "SELECT id, title, brief, clearance FROM tasks
          WHERE assignee = 'agent' AND state = 'ready'
@@ -187,6 +247,72 @@ mod tests {
         assert!(note.body["text"].as_str().unwrap().contains("roses") && !note.body["text"].as_str().unwrap().contains("Rate"));
         assert_eq!(board::task(c, task)?.run_state, Some(board::RunState::NeedsRating));
         assert!(deliver_report(&db, &dir)?.is_none(), "delivered once");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A run whose model is out of reach ends, unscored, and the task is picked
+    /// again; nothing said about it before a rating names the model.
+    #[test]
+    fn an_unreachable_model_gives_the_task_back_without_naming_it() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-unreachable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Journal::open(&dir.join("arity.sqlite"))?;
+        let c = db.conn();
+        std::fs::write(dir.join("config.json"), json!({ "workers": ["codex:gone", "lab:here"] }).to_string())?;
+        let f = TaskFields { title: "write a poem".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(c, &f, None)?;
+        // It was picked while ChatGPT was signed in; the sign-in is gone now, and its dispatcher died.
+        c.execute(
+            "INSERT INTO trials (task, conversation, model, lease_until) VALUES (?1, 'task-1', 'codex:gone', 0)",
+            params![task],
+        )?;
+        insert(c, "task-1", "user", &json!({ "text": "write a poem" }), None)?;
+        board::set_state(c, task, board::TaskState::Assigned)?;
+        let nothing = || Ok(vec![]);
+        let did = work_once_with(&db, &dir, &nothing)?;
+        let said = did.describe().unwrap();
+        let Did::Failed { error, trial, .. } = did else { panic!("expected a failure") };
+        assert_eq!(error, ABANDONED);
+        let stored = crate::BoardTask::from(board::task(c, task)?);
+        for said in [said, stored.error.unwrap_or_default()] {
+            assert!(!said.contains("codex") && !said.contains("ChatGPT") && !said.contains("signed"), "{said}");
+        }
+        let t = board::task(c, task)?;
+        assert_eq!((t.state, t.run_state, t.trial), (board::TaskState::Ready, None, None), "back to be picked again");
+        assert!(board::reveal(c, trial)?.starts_with("codex:gone (failed: "), "the detail is kept for reveal");
+        assert!(board::runs(c)?.is_empty() && board::scores(c)?.is_empty(), "not a run, not scored");
+        assert!(board::rate(c, trial, 5, "", &board::me(), None).is_err());
+        // Nothing reachable: the task waits instead of retrying the same model.
+        assert!(matches!(work_once_with(&db, &dir, &nothing)?, Did::Nothing));
+        let tried: i64 = c.query_row("SELECT count(*) FROM trials", [], |r| r.get(0))?;
+        assert_eq!(tried, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A run whose dispatcher died is taken over once its conversation's turn
+    /// lease has lapsed, not ten minutes later.
+    #[test]
+    fn a_dead_dispatchers_run_is_taken_over_quickly() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-deadrun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Journal::open(&dir.join("arity.sqlite"))?;
+        let c = db.conn();
+        std::fs::write(dir.join("config.json"), json!({ "workers": [] }).to_string())?;
+        let f = TaskFields { title: "t".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(c, &f, None)?;
+        // Last renewed 30 s ago, lease still has minutes to run.
+        c.execute(
+            "INSERT INTO trials (task, conversation, model, lease_until) VALUES (?1, 'task-1', 'lab:m', ?2)",
+            params![task, now() + LEASE_SECS - 30],
+        )?;
+        // While a turn runs in its conversation it is alive.
+        c.execute("INSERT INTO turns (conversation, owner, lease_until) VALUES ('task-1', 'x', ?1)", params![now() + 10])?;
+        assert!(claim(c, &dir, &[])?.is_none());
+        // Its process died: the turn lease lapsed.
+        c.execute("UPDATE turns SET lease_until = ?1", params![now() - 1])?;
+        assert_eq!(claim(c, &dir, &[])?.map(|r| r.0), Some(1));
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

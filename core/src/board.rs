@@ -71,7 +71,8 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              result       TEXT,
              error        TEXT,
              lease_until  INTEGER NOT NULL DEFAULT 0,
-             reported     INTEGER NOT NULL DEFAULT 0
+             reported     INTEGER NOT NULL DEFAULT 0,
+             abandoned    INTEGER NOT NULL DEFAULT 0  -- its model could not be reached; another run is picked
          );
          CREATE TABLE IF NOT EXISTS ratings (
              trial    INTEGER PRIMARY KEY REFERENCES trials(id),
@@ -96,6 +97,9 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
         anyhow::ensure!(broken == 0, "migrating tasks would break {broken} links; nothing was changed");
     } else if !cols.iter().any(|c| c == "origin") {
         tx.execute_batch("ALTER TABLE tasks ADD COLUMN origin TEXT")?;
+    }
+    if !columns("trials")?.iter().any(|c| c == "abandoned") {
+        tx.execute_batch("ALTER TABLE trials ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0")?;
     }
     if !columns("ratings")?.iter().any(|c| c == "rater_model") {
         migrate_authorship(&tx)?;
@@ -349,7 +353,7 @@ impl TaskFields {
                         Value::String(s) => s.split(',').map(String::from).collect(),
                         _ => bail!("tags must be a list of strings"),
                     };
-                    self.tags = self.tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+                    self.tags = clean_tags(&self.tags);
                 }
                 "id" => {}
                 other => bail!("unknown field {other}"),
@@ -397,13 +401,41 @@ fn normalize_assignee(a: &str) -> Result<String> {
     })
 }
 
+/// A real calendar date as YYYY-MM-DD: 2026-02-31 is not one.
 fn is_date(d: &str) -> bool {
     let b = d.as_bytes();
-    b.len() == 10
+    let shaped = b.len() == 10
         && b[4] == b'-'
         && b[7] == b'-'
-        && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+        && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    if !shaped {
+        return false;
+    }
+    let (y, m, day): (u32, u32, u32) = (d[..4].parse().unwrap(), d[5..7].parse().unwrap(), d[8..].parse().unwrap());
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
 }
+
+/// Tags trimmed, without empties or repeats (ignoring case), in their first order.
+fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut seen: Vec<String> = vec![];
+    for t in tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        if !seen.iter().any(|s| s.eq_ignore_ascii_case(&t)) {
+            seen.push(t);
+        }
+    }
+    seen
+}
+
+/// The longest title a task may have; the rest belongs in the brief.
+pub const MAX_TITLE: usize = 200;
 
 // Tasks
 
@@ -479,7 +511,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
                 t.origin, t.created, r.note, tr.model
          FROM tasks t
-         LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id)
+         LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id AND abandoned = 0)
          LEFT JOIN ratings r ON r.trial = tr.id
          ORDER BY t.state = 'done', t.priority DESC, t.due IS NULL, t.due, t.id",
     )?;
@@ -539,6 +571,12 @@ fn check(conn: &Connection, id: Option<i64>, f: &TaskFields) -> Result<()> {
     if f.title.trim().is_empty() {
         bail!("a task needs a title");
     }
+    if f.title.trim().chars().count() > MAX_TITLE {
+        bail!("a title is at most {MAX_TITLE} characters; put the rest in the brief");
+    }
+    if let Some(d) = f.due.as_deref().filter(|d| !is_date(d)) {
+        bail!("due must be a date as YYYY-MM-DD, not {d:?}");
+    }
     normalize_assignee(&f.assignee)?;
     for &b in &f.blocked_by {
         if Some(b) == id {
@@ -591,7 +629,7 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
             f.clearance.name(),
             f.priority.rank(),
             f.due,
-            serde_json::to_string(&f.tags)?,
+            serde_json::to_string(&clean_tags(&f.tags))?,
             origin,
         ],
     )?;
@@ -622,7 +660,7 @@ pub fn update_task(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
             f.clearance.name(),
             f.priority.rank(),
             f.due,
-            serde_json::to_string(&f.tags)?,
+            serde_json::to_string(&clean_tags(&f.tags))?,
         ],
     )?;
     write_links(conn, id, f)?;
@@ -666,12 +704,13 @@ pub fn is_rated(conn: &Connection, trial: i64) -> Result<bool> {
 /// Rate a finished run. The rating is the task's one gate, so it is done after.
 /// `rater_model` is the model rating, or None for a person. A model never
 /// rates a run it did itself.
-pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &str, rater_model: Option<&str>) -> Result<()> {
+/// Returns the score it replaced, if the run was already rated.
+pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &str, rater_model: Option<&str>) -> Result<Option<i64>> {
     if !(1..=5).contains(&score) {
         bail!("score must be 1 to 5");
     }
     let found: Option<(i64, Option<String>, String)> = conn
-        .query_row("SELECT task, ended, model FROM trials WHERE id = ?1", params![trial], |r| {
+        .query_row("SELECT task, CASE WHEN abandoned = 0 THEN ended END, model FROM trials WHERE id = ?1", params![trial], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .optional()?;
@@ -681,6 +720,7 @@ pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &st
         Some((_, _, model)) if rater_model == Some(&model) => bail!("run {trial} is not yours to rate"),
         Some((task, ..)) => task,
     };
+    let before: Option<i64> = conn.query_row("SELECT score FROM ratings WHERE trial = ?1", params![trial], |r| r.get(0)).optional()?;
     conn.execute(
         "INSERT INTO ratings (trial, score, note, rated_by, rater_model) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(trial) DO UPDATE SET score = excluded.score, note = excluded.note,
@@ -688,7 +728,8 @@ pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &st
         params![trial, score, note, rated_by, rater_model],
     )?;
     conn.execute("UPDATE tasks SET state = 'done', edits = edits + 1 WHERE id = ?1 AND state = 'in_gates'", params![task])?;
-    refresh_ready(conn)
+    refresh_ready(conn)?;
+    Ok(before)
 }
 
 /// Finished, reported runs of tasks this conversation wrote that nobody has
@@ -697,7 +738,7 @@ pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &st
 pub fn unrated_for(conn: &Connection, conv: &str, model: &str) -> Result<Vec<(i64, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT tr.task, tr.id FROM trials tr JOIN tasks t ON t.id = tr.task
-         WHERE t.created_by = ?1 AND tr.ended IS NOT NULL AND tr.reported = 1 AND tr.model != ?2
+         WHERE t.created_by = ?1 AND tr.ended IS NOT NULL AND tr.reported = 1 AND tr.abandoned = 0 AND tr.model != ?2
            AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.trial = tr.id)
          ORDER BY tr.id",
     )?;
@@ -722,6 +763,7 @@ pub fn runs(conn: &Connection) -> Result<Vec<RunRow>> {
     let mut stmt = conn.prepare(
         "SELECT tr.id, tr.task, t.title, tr.conversation, tr.model, tr.started, tr.ended, r.score, r.note
          FROM trials tr JOIN tasks t ON t.id = tr.task LEFT JOIN ratings r ON r.trial = tr.id
+         WHERE tr.abandoned = 0
          ORDER BY tr.id DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -752,10 +794,17 @@ pub fn scores(conn: &Connection) -> Result<Vec<(String, i64, f64)>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Which model did a run, and why it failed if it did. Failures name the
+/// model or its provider, so they are only told here.
 pub fn reveal(conn: &Connection, trial: i64) -> Result<String> {
-    conn.query_row("SELECT model FROM trials WHERE id = ?1", params![trial], |r| r.get(0))
+    let (model, error): (String, Option<String>) = conn
+        .query_row("SELECT model, error FROM trials WHERE id = ?1", params![trial], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?
-        .ok_or_else(|| anyhow!("no run {trial}"))
+        .ok_or_else(|| anyhow!("no run {trial}"))?;
+    Ok(match error {
+        Some(e) => format!("{model} (failed: {e})"),
+        None => model,
+    })
 }
 
 #[cfg(test)]
@@ -770,6 +819,27 @@ mod tests {
 
     fn fields(title: &str) -> TaskFields {
         TaskFields { title: title.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn task_fields_are_checked() -> Result<()> {
+        let db = crate::journal::Journal::open(&temp("checks"))?;
+        let c = db.conn();
+        let mut f = fields("t");
+        assert!(f.merge(&json!({ "due": "2026-02-31" })).is_err(), "no 31 February");
+        assert!(f.merge(&json!({ "due": "2026-13-01" })).is_err());
+        f.merge(&json!({ "due": "2028-02-29" }))?;
+        assert!(f.merge(&json!({ "due": "2027-02-29" })).is_err(), "2027 is not a leap year");
+        // The core checks fields however they arrive, not only through merge.
+        assert!(add_task(c, &TaskFields { due: Some("2026-04-31".into()), ..fields("t") }, None).is_err());
+        f.merge(&json!({ "tags": ["fun", "Fun", " fun ", "work"] }))?;
+        assert_eq!(f.tags, ["fun", "work"]);
+        let long = "x".repeat(MAX_TITLE + 1);
+        assert!(add_task(c, &fields(&long), None).unwrap_err().to_string().contains("at most"));
+        add_task(c, &fields(&"x".repeat(MAX_TITLE)), None)?;
+        let id = add_task(c, &TaskFields { tags: vec!["a".into(), "A".into()], ..fields("t") }, None)?;
+        assert_eq!(task(c, id)?.fields.tags, ["a"]);
+        Ok(())
     }
 
     #[test]

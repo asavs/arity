@@ -52,6 +52,16 @@ fn main() {
     }
 }
 
+/// The longest title a listing prints; the full one is in `log` and the app.
+const LISTED_TITLE: usize = 80;
+
+fn clip(s: &str) -> String {
+    match s.char_indices().nth(LISTED_TITLE) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
 fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let arity = Arity::new(None);
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
@@ -83,7 +93,13 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        ("log", 2) => arity.messages(arg(1))?.iter().for_each(print),
+        ("log", 2) => {
+            let messages = arity.messages(arg(1))?;
+            if messages.is_empty() && !arity.threads()?.iter().any(|t| t.name == arg(1)) {
+                return Err(format!("no thread {}; `arity ls` lists them", arg(1)).into());
+            }
+            messages.iter().for_each(print)
+        }
         ("chat", n) if n >= 4 => {
             let model = match choice(&arg(2)) {
                 Some(c) => {
@@ -132,7 +148,10 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             arity.update_task(id, f)?;
             println!("updated task {id}");
         }
-        ("done", 2) => arity.set_task_done(arg(1).parse()?, true)?,
+        ("done", 2) => {
+            arity.set_task_done(arg(1).parse()?, true)?;
+            println!("task {} is done", arg(1));
+        }
         ("draft", n) if n >= 2 => {
             let conv = arg(1);
             let rest = &args[2..];
@@ -175,12 +194,13 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             for r in arity.runs()? {
                 let score = r.score.map(|s| format!("{s}/5")).unwrap_or_else(|| if r.ended.is_some() { "unrated".into() } else { "running".into() });
                 let model = r.model.as_deref().unwrap_or("(hidden)");
-                println!("run {:<3} task {:<3} {:<8} {:<40} {}", r.id, r.task, score, r.title, model);
+                println!("run {:<3} task {:<3} {:<8} {:<40} {}", r.id, r.task, score, clip(&r.title), model);
             }
         }
         ("rate", n) if n >= 4 => {
-            arity.rate(arg(1).parse()?, arg(2).parse()?, args[3..].join(" "))?;
-            println!("rated run {}; it was {}", arg(1), arity.reveal(arg(1).parse()?)?);
+            let before = arity.rate(arg(1).parse()?, arg(2).parse()?, args[3..].join(" "))?;
+            let changed = before.filter(|b| b.to_string() != arg(2)).map(|b| format!(", changed from {b} to {}", arg(2))).unwrap_or_default();
+            println!("rated run {}{changed}; it was {}", arg(1), arity.reveal(arg(1).parse()?)?);
         }
         ("scores", 1) => {
             for s in arity.scores()? {
@@ -189,7 +209,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         ("leaderboard", 1) => {
             // Each figure: the one the pick uses, then where it came from.
-            println!("{:<44} {:<26} {:<26} {}", "model", "quality (0-100)", "first token", "speed");
+            println!("{:<44} {:<30} {:<26} {}", "model", "quality (0-100)", "first token", "speed");
             for s in arity.leaderboard()? {
                 let fig = |get: fn(&Figures) -> Option<f64>, n: i64, unit: &str, digits: usize| -> String {
                     let Some(used) = get(&s.combined) else { return "-".into() };
@@ -199,15 +219,21 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     format!("{used:.digits$}{unit} ({})", from.join(" + "))
                 };
                 let reach = if s.reachable { "" } else { "  (not reachable)" };
+                let quality = match (s.public.quality, s.shift) {
+                    (Some(_), Some(shift)) => format!("{:.0} (public {shift:+.1} from {} rated)", s.combined.quality.unwrap_or_default(), s.rated),
+                    (Some(q), None) => format!("{q:.0} (public)"),
+                    (None, Some(shift)) => format!("{shift:+.1} from {} rated", s.rated),
+                    (None, None) => "-".into(),
+                };
                 println!(
-                    "{:<44} {:<26} {:<26} {}{reach}",
+                    "{:<44} {:<30} {:<26} {}{reach}",
                     s.model,
-                    fig(|f| f.quality, s.rated, "", 0),
+                    quality,
                     fig(|f| f.ttft_ms, s.timed, " ms", 0),
                     fig(|f| f.tokens_per_sec, s.timed, " tok/s", 0),
                 );
             }
-            println!("\npublic figures and their sources: core/data/leaderboard.json; own n = rated runs or timed replies");
+            println!("\npublic figures and their sources: core/data/leaderboard.json; ratings shift quality by up to 10 points a star from the average rating; own n = timed replies");
         }
         ("reveal", 2) => println!("{}", arity.reveal(arg(1).parse()?)?),
         ("models", 1 | 2) => arity.models(arg(1) == "--refresh")?.iter().for_each(|m| println!("{m}")),
@@ -253,7 +279,11 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
         ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,
         ("login", 1) => println!("Signed in to ChatGPT as {}.", arity.sign_in_chatgpt()?),
-        _ => println!("{USAGE}"),
+        ("" | "help" | "--help" | "-h", _) => println!("{USAGE}"),
+        (cmd, _) => {
+            eprintln!("{USAGE}");
+            return Err(format!("`{cmd}` needs other arguments; see above").into());
+        }
     }
     Ok(())
 }
@@ -399,7 +429,7 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
 fn thread_line(thread: &Thread, me: &str) -> String {
     let Some(t) = &thread.task else {
         let card = if thread.card.is_some() { "  · card open" } else { "" };
-        return format!("  {:<12} {:<24} {}{card}", thread.name, "", thread.title);
+        return format!("  {:<12} {:<24} {}{card}", thread.name, "", clip(&thread.title));
     };
     let f = &t.fields;
     let state = match t.state {
@@ -436,5 +466,5 @@ fn thread_line(thread: &Thread, me: &str) -> String {
         extra.push(format!("from {origin}"));
     }
     let extra = if extra.is_empty() { String::new() } else { format!("  · {}", extra.join(" · ")) };
-    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}", thread.name, t.id, state, who, f.title)
+    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}", thread.name, t.id, state, who, clip(&f.title))
 }

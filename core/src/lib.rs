@@ -227,7 +227,7 @@ impl Arity {
     /// Fails, saying what is missing, when the choice has no candidates. Blocks
     /// briefly: it checks that local servers are up.
     pub fn pick(&self, choice: Choice) -> Result<Pick> {
-        let candidates = self.candidates()?;
+        let candidates = candidates(&self.dir)?;
         let board = self.standings(&candidates)?;
         Ok(leaderboard::choose(choice, &candidates, &board)?)
     }
@@ -235,7 +235,7 @@ impl Arity {
     /// Every model the user can reach or that anything is known about: public
     /// figures, Arity's own, and what the pick makes of them together.
     pub fn leaderboard(&self) -> Result<Vec<Standing>> {
-        let candidates = self.candidates()?;
+        let candidates = candidates(&self.dir)?;
         self.standings(&candidates)
     }
 
@@ -391,7 +391,11 @@ impl Arity {
         if hidden(&db, &conversation)? {
             return Ok(None);
         }
-        Ok(db.chain(&conversation)?.into_iter().rev().find_map(|e| e.model))
+        // Before its first reply lands, the turn running in it knows the model.
+        match db.chain(&conversation)?.into_iter().rev().find_map(|e| e.model) {
+            Some(m) => Ok(Some(m)),
+            None => Ok(turn::model(db.conn(), &conversation)?),
+        }
     }
 
     /// Changes whenever anything is written, by this process or another.
@@ -479,14 +483,7 @@ impl Arity {
     /// Do one piece of dispatcher work: deliver a report, or run a waiting task.
     /// Returns a line describing it, or None when there was nothing to do. Blocks.
     pub fn work_once(&self) -> Result<Option<String>> {
-        use dispatch::Did;
-        Ok(match dispatch::work_once(&self.journal()?, &self.dir)? {
-            Did::Nothing => None,
-            Did::Ran { task, trial } => Some(format!("task {task}: run {trial} finished")),
-            Did::Failed { task, trial, error } => Some(format!("task {task}: run {trial} failed, will retry: {error}")),
-            Did::Reported { task, rater: Some(conv) } => Some(format!("task {task}: reported to {conv} to rate")),
-            Did::Reported { task, rater: None } => Some(format!("task {task}: waiting for your rating")),
-        })
+        Ok(dispatch::work_once(&self.journal()?, &self.dir)?.describe())
     }
 
     pub fn runs(&self) -> Result<Vec<Run>> {
@@ -507,7 +504,8 @@ impl Arity {
     }
 
     /// The user rates a run. Replaces any earlier rating of it.
-    pub fn rate(&self, run: i64, score: i64, note: String) -> Result<()> {
+    /// Returns the score it replaced, if the run was already rated.
+    pub fn rate(&self, run: i64, score: i64, note: String) -> Result<Option<i64>> {
         Ok(board::rate(self.journal()?.conn(), run, score, &note, &board::me(), None)?)
     }
 
@@ -568,48 +566,6 @@ impl Arity {
         Ok(agent::run(&db, &self.dir, conv, model, &mut masked)?)
     }
 
-    /// The models the user can reach now, and how: everything the usable providers
-    /// offer, less local servers that are not running and providers whose key was
-    /// refused when last checked.
-    fn candidates(&self) -> Result<Vec<leaderboard::Candidate>> {
-        use leaderboard::{Candidate, Reach};
-        let providers = config::load(&self.dir)?.providers;
-        let rejected = catalog::rejected(&self.dir);
-        let mut up: std::collections::HashMap<String, bool> = Default::default();
-        let quota_left = |provider: &str| match usage::read(&self.dir, provider) {
-            Usage::Limits { limits, .. } => limits.iter().all(|l| l.remaining > 0),
-            _ => true, // not reported: assume there is some
-        };
-        let mut out = vec![];
-        for model in catalog::models(&self.dir, false)? {
-            let Some((name, id)) = model.split_once(':') else { continue };
-            let reach = if name == "codex" {
-                Reach::Subscription { quota_left: true }
-            } else {
-                let Some(p) = providers.iter().find(|p| p.name == name) else { continue };
-                if rejected.contains(&p.name) {
-                    continue;
-                }
-                if p.local() {
-                    let alive = *up.entry(p.name.clone()).or_insert_with(|| {
-                        let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(800)).build();
-                        client.is_ok_and(|c| c.get(format!("{}/models", p.url)).send().is_ok())
-                    });
-                    if !alive {
-                        continue;
-                    }
-                    Reach::Local
-                } else if p.subscription || p.free_suffix.as_deref().is_some_and(|s| id.ends_with(s)) {
-                    Reach::Subscription { quota_left: quota_left(&p.name) }
-                } else {
-                    Reach::Pay
-                }
-            };
-            out.push(Candidate { model, reach });
-        }
-        Ok(out)
-    }
-
     fn standings(&self, candidates: &[leaderboard::Candidate]) -> Result<Vec<Standing>> {
         let own = leaderboard::own(self.journal()?.conn())?;
         let names: Vec<String> = candidates.iter().map(|c| c.model.clone()).collect();
@@ -632,12 +588,55 @@ impl From<board::TaskRow> for BoardTask {
             run: t.trial,
             run_state: t.run_state,
             result: t.result,
-            error: t.error,
+            // The detail names the model or its provider; `reveal` tells it.
+            error: t.error.map(|_| dispatch::FAILING.to_string()),
             model: t.score.and(t.model),
             score: t.score,
             note: t.note,
         }
     }
+}
+
+/// The models the user can reach now, and how: everything the usable providers
+/// offer, less local servers that are not running and providers whose key was
+/// refused when last checked.
+pub(crate) fn candidates(dir: &std::path::Path) -> anyhow::Result<Vec<leaderboard::Candidate>> {
+    use leaderboard::{Candidate, Reach};
+    let providers = config::load(&dir)?.providers;
+    let rejected = catalog::rejected(&dir);
+    let mut up: std::collections::HashMap<String, bool> = Default::default();
+    let quota_left = |provider: &str| match usage::read(&dir, provider) {
+        Usage::Limits { limits, .. } => limits.iter().all(|l| l.remaining > 0),
+        _ => true, // not reported: assume there is some
+    };
+    let mut out = vec![];
+    for model in catalog::models(&dir, false)? {
+        let Some((name, id)) = model.split_once(':') else { continue };
+        let reach = if name == "codex" {
+            Reach::Subscription { quota_left: true }
+        } else {
+            let Some(p) = providers.iter().find(|p| p.name == name) else { continue };
+            if rejected.contains(&p.name) {
+                continue;
+            }
+            if p.local() {
+                let alive = *up.entry(p.name.clone()).or_insert_with(|| {
+                    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(800)).build();
+                    client.is_ok_and(|c| c.get(format!("{}/models", p.url)).send().is_ok())
+                });
+                if !alive {
+                    continue;
+                }
+                Reach::Local
+            } else if p.subscription || p.free_suffix.as_deref().is_some_and(|s| id.ends_with(s)) {
+                Reach::Subscription { quota_left: quota_left(&p.name) }
+            } else {
+                Reach::Pay
+            }
+        };
+        out.push(Candidate { model, reach });
+    }
+    Ok(out)
 }
 
 /// An unrated run's thread, where the model stays hidden.

@@ -9,12 +9,18 @@
 //! - **Arity's own:** the average rating of a model's rated runs, and the time to
 //!   first token and output speed of each streamed chat reply (`speeds` table).
 //!
-//! **How they combine.** Each figure is a weighted average: the public figure
-//! counts as `PUBLIC_WEIGHT` observations and each of Arity's own counts as one,
-//! so public figures are where a model starts and Arity's measurements take over
-//! as they pile up. Quality is on a 0-100 scale: the public figure is the
-//! Artificial Analysis Intelligence Index, and a 1-5 rating maps to 0-100.
-//! A figure with only one source is that source's.
+//! **How they combine.** Speeds are weighted averages: the public figure counts
+//! as `PUBLIC_WEIGHT` observations and each measured reply as one, so public
+//! figures are where a model starts and measurements take over as they pile up.
+//!
+//! Quality is the public index (Artificial Analysis, 0-100). Ratings do not
+//! stand in for it, since stars on easy tasks would beat every benchmark;
+//! they shift it: `POINTS_PER_STAR` for each star a model's average rating is
+//! above or below the average across all rated runs, scaled by n / (n +
+//! `PUBLIC_WEIGHT`) for n rated runs. A model with no public figure starts at
+//! the average public figure of the models it is being picked among, so a few
+//! ratings move it a little and many move it more. A model with neither has
+//! no quality and ranks last.
 
 use std::collections::HashMap;
 
@@ -33,6 +39,8 @@ pub const TABLES: &str = "
 
 /// A public figure counts as this many of Arity's own observations.
 pub const PUBLIC_WEIGHT: f64 = 5.0;
+/// How far one star above the average rating moves quality, at full weight.
+pub const POINTS_PER_STAR: f64 = 10.0;
 /// The length of a typical reply, for turning speeds into one waiting time.
 const REPLY_TOKENS: f64 = 300.0;
 /// Stand-ins when only one of a model's two speed figures is known.
@@ -60,9 +68,14 @@ pub struct Standing {
     pub public: Figures,
     /// Where each public figure came from: "quality: …".
     pub sources: Vec<String>,
+    /// Measured speeds. Its quality is always None: ratings shift quality instead, see `shift`.
     pub own: Figures,
-    /// Rated runs behind `own.quality`, and timed replies behind the speeds.
+    /// Average rating of its rated runs, 1-5, and how many there are.
+    pub rating: Option<f64>,
     pub rated: i64,
+    /// How far its ratings move its quality, in index points, already scaled by how many there are.
+    pub shift: Option<f64>,
+    /// Timed replies behind the measured speeds.
     pub timed: i64,
     /// What the pick uses.
     pub combined: Figures,
@@ -202,9 +215,10 @@ pub fn blend(public: Option<f64>, own: Option<f64>, n: i64) -> Option<f64> {
     }
 }
 
-/// A 1-5 rating on the 0-100 quality scale.
-fn rating_to_quality(r: f64) -> f64 {
-    (r - 1.0) * 25.0
+/// The average rating over every rated run, the zero point for shifts.
+fn mean_rating(own: &HashMap<String, Own>) -> Option<f64> {
+    let (sum, n) = own.values().filter_map(|o| Some((o.rating? * o.rated as f64, o.rated))).fold((0.0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    (n > 0).then(|| sum / n as f64)
 }
 
 /// Every model that is reachable or that anything is known about.
@@ -213,35 +227,42 @@ pub fn standings(public: &[Public], own: &HashMap<String, Own>, reachable: &[Str
     let mut known: Vec<&String> = own.keys().filter(|m| !reachable.contains(m)).collect();
     known.sort();
     names.extend(known.into_iter().cloned());
+    let mean = mean_rating(own);
     let mut out: Vec<Standing> = names
         .iter()
         .map(|m| {
             let p = public.iter().find(|p| p.matches(m));
             let o = own.get(m).cloned().unwrap_or_default();
-            standing(m, p, &o, reachable.contains(m))
+            standing(m, p, &o, mean, reachable.contains(m))
         })
         .collect();
     // Public entries no model here matches, so the whole seed can be inspected.
     for p in public {
         if !names.iter().any(|m| p.matches(m)) {
-            out.push(standing(&p.model, Some(p), &Own::default(), false));
+            out.push(standing(&p.model, Some(p), &Own::default(), mean, false));
         }
     }
     out
 }
 
-fn standing(model: &str, p: Option<&Public>, o: &Own, reachable: bool) -> Standing {
+fn standing(model: &str, p: Option<&Public>, o: &Own, mean: Option<f64>, reachable: bool) -> Standing {
     let public = p.map(|p| p.figures.clone()).unwrap_or_default();
-    let own = Figures { quality: o.rating.map(rating_to_quality), ttft_ms: o.ttft_ms, tokens_per_sec: o.tps };
+    let own = Figures { quality: None, ttft_ms: o.ttft_ms, tokens_per_sec: o.tps };
+    let shift = match (o.rating, mean) {
+        (Some(r), Some(mean)) if o.rated > 0 => Some(POINTS_PER_STAR * (r - mean) * o.rated as f64 / (o.rated as f64 + PUBLIC_WEIGHT)),
+        _ => None,
+    };
     let combined = Figures {
-        quality: blend(public.quality, own.quality, o.rated),
+        quality: public.quality.map(|q| q + shift.unwrap_or(0.0)),
         ttft_ms: blend(public.ttft_ms, own.ttft_ms, o.timed),
         tokens_per_sec: blend(public.tokens_per_sec, own.tokens_per_sec, o.tps_timed),
     };
     Standing {
         model: model.into(),
         sources: p.map(|p| p.sources.clone()).unwrap_or_default(),
+        rating: o.rating,
         rated: o.rated,
+        shift,
         timed: o.timed,
         public,
         own,
@@ -286,12 +307,17 @@ pub fn choose(choice: Choice, candidates: &[Candidate], board: &[Standing]) -> R
         });
     }
     let none = Figures::default();
-    let figures = |m: &str| board.iter().find(|s| s.model == m).map_or(&none, |s| &s.combined);
+    let standing = |m: &str| board.iter().find(|s| s.model == m);
+    let figures = |m: &str| standing(m).map_or(&none, |s| &s.combined);
+    // A rated model with no public figure starts from the average of the pool's public figures.
+    let public: Vec<f64> = pool.iter().filter_map(|c| standing(&c.model)?.public.quality).collect();
+    let prior = if public.is_empty() { 0.0 } else { public.iter().sum::<f64>() / public.len() as f64 };
+    let quality = |m: &str| figures(m).quality.or_else(|| standing(m)?.shift.map(|s| prior + s));
     // Lower sorts first. f64s become ordered keys; a missing figure goes after every known one.
     let key = |c: &&Candidate| {
         let f = figures(&c.model);
         let w = wait(f).unwrap_or(f64::INFINITY);
-        let q = f.quality.map_or(f64::INFINITY, |q| -q);
+        let q = quality(&c.model).map_or(f64::INFINITY, |q| -q);
         match choice {
             Choice::Fast => (w, 0.0),
             _ => (q, w),
@@ -301,6 +327,7 @@ pub fn choose(choice: Choice, candidates: &[Candidate], board: &[Standing]) -> R
     ranked.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap().then(a.model.cmp(&b.model)));
     let best = ranked[0];
     let f = figures(&best.model);
+    let q = quality(&best.model);
     let n = pool.len();
     let of = match choice {
         Choice::Private => plural(n, "local model"),
@@ -309,12 +336,12 @@ pub fn choose(choice: Choice, candidates: &[Candidate], board: &[Standing]) -> R
     };
     let reason = if n == 1 {
         format!("the only {}", of.trim_start_matches("1 "))
-    } else if wait(f).is_none() && f.quality.is_none() {
+    } else if wait(f).is_none() && q.is_none() {
         format!("first of {of}; none has figures yet")
     } else {
         match choice {
             Choice::Fast => format!("fastest of {of}"),
-            _ if f.quality.is_none() => format!("fastest of {of}; none has a quality figure yet"),
+            _ if q.is_none() => format!("fastest of {of}; none has a quality figure yet"),
             Choice::Smart => format!("smartest of {of}"),
             _ => format!("best of {of}"),
         }
@@ -398,20 +425,38 @@ mod tests {
     #[test]
     fn own_data_overtakes_public_data() -> Result<()> {
         let all = candidates();
-        // One good rating of the weaker local model is not enough against the public figures...
-        let rated = |n: i64| Own { rating: Some(4.0), rated: n, ..Default::default() };
-        let mut own = HashMap::from([("mlx:org/local-fast".to_string(), rated(1))]);
+        let rated = |stars: f64, n: i64| Own { rating: Some(stars), rated: n, ..Default::default() };
+        // One great run against one poor one does not overturn the public figures (25 vs 10)...
+        let mut own = HashMap::from([("mlx:org/local-fast".to_string(), rated(5.0, 1)), ("mlx:org/local-good".to_string(), rated(2.0, 1))]);
         assert_eq!(pick(Choice::Private, &all, &own)?.model, "mlx:org/local-good");
-        // ...but a run of them is. 4/5 is 75; ten of those against public 10 weighted 5: (50 + 750) / 15.
-        own.insert("mlx:org/local-fast".into(), rated(10));
+        // ...but ten of each do. The average is 3.5 stars: +1.5 and -1.5 at 10/15 weight, so 20 against 15.
+        own.insert("mlx:org/local-fast".into(), rated(5.0, 10));
+        own.insert("mlx:org/local-good".into(), rated(2.0, 10));
         assert_eq!(pick(Choice::Private, &all, &own)?.model, "mlx:org/local-fast");
         let b = board(&own);
         let s = b.iter().find(|s| s.model == "mlx:org/local-fast").unwrap();
-        assert_eq!((s.public.quality, s.own.quality, s.rated), (Some(10.0), Some(75.0), 10));
-        assert!((s.combined.quality.unwrap() - 800.0 / 15.0).abs() < 1e-9);
+        assert_eq!((s.public.quality, s.rating, s.rated), (Some(10.0), Some(5.0), 10));
+        assert!((s.combined.quality.unwrap() - 20.0).abs() < 1e-9);
         // Measured speeds do the same for fast: the quick public model turns out slow here.
         own.insert("groq:quick".into(), Own { ttft_ms: Some(9000.0), timed: 20, tps: Some(20.0), tps_timed: 20, ..Default::default() });
         assert_ne!(pick(Choice::Fast, &all, &own)?.model, "groq:quick");
+        Ok(())
+    }
+
+    /// Ratings move a model relative to the others, so stars cannot outgrow the benchmark scale.
+    #[test]
+    fn one_rating_cannot_lift_a_model_without_figures_over_the_rest() -> Result<()> {
+        let all = candidates();
+        let rated = |stars: f64, n: i64| Own { rating: Some(stars), rated: n, ..Default::default() };
+        // The model with no public figure gets one 5-star run; the best local model one 3-star run.
+        let own = HashMap::from([("mlx:org/unknown".to_string(), rated(5.0, 1)), ("mlx:org/local-good".to_string(), rated(3.0, 1))]);
+        assert_eq!(pick(Choice::Private, &all, &own)?.model, "mlx:org/local-good");
+        // Every run rated 5 lifts nobody: the average is the zero point.
+        let all_five: HashMap<String, Own> = ["mlx:org/unknown", "mlx:org/local-good", "openai:big"].iter().map(|m| (m.to_string(), rated(5.0, 30))).collect();
+        let b = board(&all_five);
+        let big = b.iter().find(|s| s.model == "openai:big").unwrap();
+        assert_eq!(big.combined.quality, Some(60.0));
+        assert_eq!(pick(Choice::Smart, &all, &all_five)?.model, "openai:big");
         Ok(())
     }
 

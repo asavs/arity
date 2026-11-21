@@ -238,6 +238,13 @@ pub fn partial(c: &Connection, conv: &str) -> Result<Option<(String, Option<Stri
     .optional()?)
 }
 
+/// The model of the turn running in `conv`, if one is.
+pub fn model(c: &Connection, conv: &str) -> Result<Option<String>> {
+    Ok(c.query_row("SELECT model FROM turns WHERE conversation = ?1 AND lease_until >= ?2", params![conv, now()], |r| r.get(0))
+        .optional()?
+        .flatten())
+}
+
 /// Messages waiting for the running turn, oldest first.
 pub fn queued(c: &Connection, conv: &str) -> Result<Vec<(i64, String)>> {
     let mut stmt = c.prepare("SELECT id, text FROM queued WHERE conversation = ?1 ORDER BY id")?;
