@@ -83,6 +83,16 @@ impl Model {
     }
 }
 
+/// Entries the model reads as the user speaking: the user's own messages, reports,
+/// Arity's notices, and the person's changes to a task card. A model's own card
+/// proposals have no text; its tool call already records them.
+fn user_text(e: &Entry) -> Option<&str> {
+    match e.kind.as_str() {
+        "user" | "report" | "notice" | "draft" => e.body["text"].as_str(),
+        _ => None,
+    }
+}
+
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -93,8 +103,11 @@ fn client() -> reqwest::blocking::Client {
 fn chat(base: &str, model: &str, key: Option<&str>, system: &str, chain: &[Entry], tools: &[ToolSpec]) -> Result<Reply> {
     let mut messages = vec![json!({"role": "system", "content": system})];
     for e in chain {
+        if let Some(text) = user_text(e) {
+            messages.push(json!({"role": "user", "content": text}));
+            continue;
+        }
         messages.push(match e.kind.as_str() {
-            "user" => json!({"role": "user", "content": e.body["text"]}),
             "assistant" => {
                 let calls = tool_calls_of(&e.body);
                 let mut m = json!({"role": "assistant", "content": e.body["text"]});
@@ -106,7 +119,8 @@ fn chat(base: &str, model: &str, key: Option<&str>, system: &str, chain: &[Entry
                 }
                 m
             }
-            _ => json!({"role": "tool", "tool_call_id": e.body["call_id"], "content": e.body["output"]}),
+            "tool" => json!({"role": "tool", "tool_call_id": e.body["call_id"], "content": e.body["output"]}),
+            _ => continue,
         });
     }
     let body = json!({
@@ -151,8 +165,11 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
     let (token, account) = codex_auth::access(auth)?;
     let mut input = Vec::new();
     for e in chain {
+        if let Some(text) = user_text(e) {
+            input.push(json!({"role": "user", "content": [{"type": "input_text", "text": text}]}));
+            continue;
+        }
         match e.kind.as_str() {
-            "user" => input.push(json!({"role": "user", "content": [{"type": "input_text", "text": e.body["text"]}]})),
             "assistant" => {
                 if let Some(text) = e.body["text"].as_str().filter(|t| !t.is_empty()) {
                     input.push(json!({"role": "assistant", "content": [{"type": "output_text", "text": text}]}));
@@ -161,7 +178,8 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
                     input.push(json!({"type": "function_call", "call_id": c.id, "name": c.name, "arguments": c.arguments}));
                 }
             }
-            _ => input.push(json!({"type": "function_call_output", "call_id": e.body["call_id"], "output": e.body["output"]})),
+            "tool" => input.push(json!({"type": "function_call_output", "call_id": e.body["call_id"], "output": e.body["output"]})),
+            _ => {}
         }
     }
     let body = json!({

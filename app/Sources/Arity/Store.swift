@@ -12,21 +12,33 @@ final class Store {
     var conversations: [Conversation] = []
     var selection: String? { didSet { if selection != oldValue { loadSelection() } } }
     var messages: [Message] = []
+    /// The task card open in the selected conversation, as last edited here or in the core.
+    var draft: TaskFields?
     var tasks: [BoardTask] = []
+    var runs: [Int64: Run] = [:]
+    var scores: [Score] = []
     var models: [String] = []
     var model = ""
     /// Conversations with a model run in flight.
     var running: Set<String> = []
     var error: String?
     var signedInToChatGPT = false
+    /// The user's page, `people/<login>`: the assignee for "Me".
+    let me: String
 
     private var revision = ""
+    /// Card edits not yet written: the conversation and its fields. Written after
+    /// a pause in typing, and always before a send, an add or a switch.
+    private var pendingCard: (conv: String, fields: TaskFields)?
+    private var pendingCardSave: Task<Void, Never>?
 
     init() {
+        me = core.me()
         models = core.suggestedModels()
         model = models.first ?? ""
         signedInToChatGPT = core.chatgptSignedIn()
         refresh()
+        startDispatcher()
         Task { [weak self] in
             while let self {
                 try? await Task.sleep(for: .milliseconds(400))
@@ -41,13 +53,20 @@ final class Store {
         revision = rev
         conversations = attempt { try core.conversations() } ?? []
         tasks = attempt { try core.tasks() } ?? []
-        if let selection { messages = attempt { try core.messages(conversation: selection) } ?? [] }
+        runs = Dictionary(uniqueKeysWithValues: (attempt { try core.runs() } ?? []).map { ($0.id, $0) })
+        scores = attempt { try core.scores() } ?? []
+        if let selection {
+            messages = attempt { try core.messages(conversation: selection) } ?? []
+            if pendingCard?.conv != selection { draft = attempt { try core.draft(conversation: selection) } ?? nil }
+        }
     }
 
     private func loadSelection() {
         error = nil
-        guard let selection else { messages = []; return }
+        flushCard()
+        guard let selection else { messages = []; draft = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
+        draft = attempt { try core.draft(conversation: selection) } ?? nil
         if let last = attempt({ try core.lastModel(conversation: selection) }), let last {
             model = last
             if !models.contains(last) { models.append(last) }
@@ -62,6 +81,7 @@ final class Store {
 
     func send(_ text: String) {
         guard let conv = selection else { return }
+        flushCard()
         run(conv) { core, model in try core.send(conversation: conv, model: model, text: text) }
     }
 
@@ -78,6 +98,81 @@ final class Store {
         if attempt({ try core.fork(entry: entry, newConversation: name) }) != nil {
             refresh(force: true)
             selection = name
+        }
+    }
+
+    // Task cards
+
+    /// A new conversation with the selected model and an empty card. The
+    /// model's first job there is to help fill it in.
+    func newTask() {
+        newConversation()
+        guard let conv = selection else { return }
+        _ = attempt { try core.openDraft(conversation: conv) }
+        refresh(force: true)
+    }
+
+    /// The person edited the card. Shown at once, written after a short pause.
+    func editCard(_ fields: TaskFields) {
+        guard let conv = selection, fields != draft else { return }
+        draft = fields
+        pendingCard = (conv, fields)
+        pendingCardSave?.cancel()
+        pendingCardSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self?.flushCard()
+        }
+    }
+
+    private func flushCard() {
+        pendingCardSave?.cancel()
+        guard let (conv, fields) = pendingCard else { return }
+        pendingCard = nil
+        _ = attempt { try core.editDraft(conversation: conv, fields: fields) }
+    }
+
+    func addCard() {
+        guard let conv = selection else { return }
+        flushCard()
+        _ = attempt { try core.addDraft(conversation: conv) }
+        refresh(force: true)
+    }
+
+    func dismissCard() {
+        guard let conv = selection else { return }
+        pendingCardSave?.cancel()
+        pendingCard = nil
+        _ = attempt { try core.dismissDraft(conversation: conv) }
+        refresh(force: true)
+    }
+
+    // The board
+
+    func updateTask(_ id: Int64, _ fields: TaskFields) {
+        _ = attempt { try core.updateTask(id: id, fields: fields) }
+        refresh(force: true)
+    }
+
+    func setDone(_ task: BoardTask, _ done: Bool) {
+        _ = attempt { try core.setTaskDone(id: task.id, done: done) }
+        refresh(force: true)
+    }
+
+    func rate(run: Int64, score: Int64, note: String) {
+        _ = attempt { try core.rate(run: run, score: score, note: note) }
+        refresh(force: true)
+    }
+
+    /// While the app is open it runs tasks meant for agents and delivers their
+    /// results. `arity work` can run alongside; leases keep them from doubling up.
+    private func startDispatcher() {
+        let core = self.core
+        Task.detached(priority: .utility) {
+            while true {
+                let did = (try? core.workOnce()) ?? nil
+                if did == nil { try? await Task.sleep(for: .seconds(1)) }
+            }
         }
     }
 

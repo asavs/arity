@@ -19,6 +19,7 @@ name = "arity-cli"
 version = "0.1.0"
 dependencies = [
  "arity-core",
+ "serde_json",
 ]
 
 [[package]]

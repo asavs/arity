@@ -5,7 +5,7 @@
 //! new name whose head is an older entry". Nothing is ever rewritten.
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::model::ToolCall;
@@ -14,7 +14,7 @@ use crate::tools;
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: i64,
-    pub kind: String, // "user" | "assistant" | "tool"
+    pub kind: String, // "user" | "assistant" | "tool" | "report" | "notice" | "draft"
     pub body: Value,
     pub model: Option<String>,
 }
@@ -44,13 +44,9 @@ impl Journal {
              CREATE TABLE IF NOT EXISTS conversations (
                  name TEXT PRIMARY KEY,
                  head INTEGER NOT NULL REFERENCES entries(id)
-             );
-             CREATE TABLE IF NOT EXISTS tasks (
-                 id    INTEGER PRIMARY KEY,
-                 title TEXT NOT NULL,
-                 done  INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        crate::board::migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -67,7 +63,7 @@ impl Journal {
     /// so a resume runs it again exactly once.
     pub fn run_tool(&self, conv: &str, call: &ToolCall) -> Result<String> {
         let tx = self.conn.unchecked_transaction()?;
-        let output = tools::execute(&tx, &call.name, &call.arguments);
+        let output = tools::execute(&tx, conv, &call.name, &call.arguments);
         let body = serde_json::json!({ "call_id": call.id, "name": call.name, "output": output });
         insert(&tx, conv, "tool", &body, None)?;
         tx.commit()?;
@@ -76,24 +72,7 @@ impl Journal {
 
     /// The conversation's entries, oldest first, following parent links from the head.
     pub fn chain(&self, conv: &str) -> Result<Vec<Entry>> {
-        let mut stmt = self.conn.prepare(
-            "WITH RECURSIVE c(id) AS (
-                 SELECT head FROM conversations WHERE name = ?1
-                 UNION ALL
-                 SELECT e.parent FROM entries e JOIN c ON e.id = c.id WHERE e.parent IS NOT NULL
-             )
-             SELECT e.id, e.kind, e.body, e.model FROM entries e JOIN c ON e.id = c.id ORDER BY e.id",
-        )?;
-        let rows = stmt.query_map(params![conv], |r| {
-            let body: String = r.get(2)?;
-            Ok(Entry {
-                id: r.get(0)?,
-                kind: r.get(1)?,
-                body: serde_json::from_str(&body).unwrap_or(Value::Null),
-                model: r.get(3)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        chain(&self.conn, conv)
     }
 
     /// A new conversation that shares history up to and including `entry`.
@@ -124,20 +103,59 @@ impl Journal {
     pub fn revision(&self) -> Result<String> {
         Ok(self.conn.query_row(
             "SELECT (SELECT ifnull(max(id), 0) FROM entries) || '.' || (SELECT count(*) FROM conversations)
-                 || '.' || (SELECT count(*) + ifnull(sum(done), 0) FROM tasks)",
+                 || '.' || (SELECT count(*) + ifnull(sum(edits), 0) FROM tasks)
+                 || '.' || (SELECT count(*) FROM task_blockers)
+                 || '.' || (SELECT count(*) + count(ended) + count(error) FROM trials)
+                 || '.' || (SELECT count(*) FROM ratings)",
             [],
             |r| r.get(0),
         )?)
     }
 
-    pub fn tasks(&self) -> Result<Vec<(i64, String, bool)>> {
-        let mut stmt = self.conn.prepare("SELECT id, title, done FROM tasks ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Run `f` in a write transaction taken up front, so two processes cannot
+    /// both read "unclaimed" and then both claim.
+    pub fn immediate<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(&self.conn) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 }
 
-fn insert(tx: &Transaction, conv: &str, kind: &str, body: &Value, model: Option<&str>) -> Result<i64> {
+/// The conversation's entries, oldest first, on any connection (or inside a transaction).
+pub fn chain(conn: &Connection, conv: &str) -> Result<Vec<Entry>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE c(id) AS (
+             SELECT head FROM conversations WHERE name = ?1
+             UNION ALL
+             SELECT e.parent FROM entries e JOIN c ON e.id = c.id WHERE e.parent IS NOT NULL
+         )
+         SELECT e.id, e.kind, e.body, e.model FROM entries e JOIN c ON e.id = c.id ORDER BY e.id",
+    )?;
+    let rows = stmt.query_map(params![conv], |r| {
+        let body: String = r.get(2)?;
+        Ok(Entry {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            body: serde_json::from_str(&body).unwrap_or(Value::Null),
+            model: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn insert(tx: &Connection, conv: &str, kind: &str, body: &Value, model: Option<&str>) -> Result<i64> {
     let head: Option<i64> = tx
         .query_row("SELECT head FROM conversations WHERE name = ?1", params![conv], |r| r.get(0))
         .optional()?;
