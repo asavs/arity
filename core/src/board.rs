@@ -124,8 +124,6 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     if !columns("trials")?.iter().any(|c| c == "waiting") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0")?;
     }
-    // Earlier names for steer.
-    tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE report_when IN ('now', 'next_step')")?;
     if !columns("trials")?.iter().any(|c| c == "outcome") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN outcome TEXT NOT NULL DEFAULT 'done'")?;
     }
@@ -137,6 +135,8 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
             tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE when_done = 'interrupt'")?;
         }
     }
+    // Earlier names for steer.
+    tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE report_when IN ('now', 'next_step')")?;
     if !columns("tasks")?.iter().any(|c| c == "dir") {
         tx.execute_batch("ALTER TABLE tasks ADD COLUMN dir TEXT")?;
     }
@@ -1299,6 +1299,35 @@ mod tests {
             let depth: i64 = c.query_row("SELECT depth FROM tasks WHERE id = 7", [], |r| r.get(0))?;
             assert_eq!(depth, 1);
         }
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// A board from before `report_when`, with choice and the older
+    /// `when_done` already there, as a real one was on 2026-11-21. It opens,
+    /// gains the column, and an interrupting task reports by steer.
+    #[test]
+    fn migrates_when_done_to_report_when_in_place() -> Result<()> {
+        let path = temp("report-when");
+        {
+            let c = Connection::open(&path)?;
+            c.execute_batch(
+                "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, brief TEXT, assignee TEXT NOT NULL,
+                     created_by TEXT NOT NULL, origin TEXT, state TEXT NOT NULL DEFAULT 'open',
+                     choice TEXT NOT NULL DEFAULT 'smart', depth INTEGER NOT NULL DEFAULT 1,
+                     when_done TEXT NOT NULL DEFAULT 'inbox', priority INTEGER NOT NULL DEFAULT 1, due TEXT,
+                     tags TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL DEFAULT (datetime('now')),
+                     edits INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO tasks (id, title, assignee, created_by, when_done) VALUES (1, 'quiet', 'agent', 'people/me', 'inbox');
+                 INSERT INTO tasks (id, title, assignee, created_by, when_done) VALUES (2, 'loud', 'agent', 'people/me', 'interrupt');",
+            )?;
+        }
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let when = |id: i64| -> String { c.query_row("SELECT report_when FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
+        assert_eq!(when(1), "after_turn");
+        assert_eq!(when(2), "steer");
+        assert_eq!(tasks(c)?.len(), 2);
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
