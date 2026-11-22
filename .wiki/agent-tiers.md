@@ -29,19 +29,22 @@ Everything between the user and agents, and between agents, is one of two calls.
 
 ### Message
 
-A message can go in either direction, including from a child to its parent. How it is delivered depends on the recipient's state:
+A message can go in either direction, including from a child to its parent. The user is one more participant: the user's messages, an agent's messages and reports all go through the same call.
 
-| Recipient state | Delivery | Instantiated first |
+**The sender picks a timing; the recipient's state decides what happens.** Each timing is one of the loop's boundaries:
+
+| Timing | Recipient is running a turn | Recipient is idle |
 |---|---|---|
-| Live (running now) | **Steer**: interrupts immediately. **Inbox**: read at the end of the current turn. The sender chooses; for a report, the recipient chose when it handed out the work | No. A live agent keeps its model |
-| Cold (cache expired) | The agent is woken, then receives the message | Yes, see [Instantiate](instantiate.md) |
-| Not created | The agent is created, then receives the message | Yes |
+| **Now** | The reply being written is cut off, its text kept, and the turn takes the message in and goes on | Woken |
+| **Next step** | Joins when the current step ends: after the reply, and after its tool calls have their results | Woken |
+| **After turn** | Joins when the turn would end; the turn answers it instead of ending | Woken |
+| **Inbox** | Joins at the next step as context, asking for no answer: it never keeps a turn going | Left for its next turn; nothing wakes |
 
-Spawn, wake, steer and inbox are the four outcomes of delivering a message, not four separate features.
+A recipient that does not exist yet is created, and a cold one is instantiated again, before it receives the message: see [Instantiate](instantiate.md). A live agent keeps its model.
 
-The user's messages follow the same rule: the user also chooses steer or inbox.
+Stop is not a timing: it ends the turn, and the reply so far is kept.
 
-Steer when the recipient is about to waste work. Use the inbox for everything else.
+Pick the latest timing that does not waste work: now when the recipient is about to go wrong, next step when it should change course, after turn for anything it should answer, inbox for anything it only needs to know. Work to be done is a task on the [board](work.md), not a message.
 
 ### Report
 
@@ -49,12 +52,12 @@ A report goes one way: up, to whoever asked for the work. That is the parent age
 
 Reports are graded. See [Blind testing](blind-testing.md#grading).
 
-An agent that hands work on chooses how each report reaches it: interrupt, or inbox. It may keep working meanwhile or stop to wait. A waiting agent is woken by an interrupting report at once, and otherwise when all the work it handed out has reported. Either way it is delivered like any message: a cold recipient is woken to read it.
+A report is delivered like a message, with the timing the recipient asked for when it handed out the work: after turn unless it said next step or now. The agent may keep working meanwhile or stop to wait. A waiting agent is woken at once by a next-step or now report, and otherwise when all the work it handed out has reported. A note of a result for a conversation that is not waiting on it, such as the chat a task was filed in, goes to its inbox.
 
 ## Agent lifecycle
 
 1. **Not created** to **Live**: [instantiated](instantiate.md), as a fresh agent or a fork.
-2. **Live** to **Live**: receives steer or inbox messages. No instantiation, so no model router.
+2. **Live** to **Live**: receives messages at any timing. No instantiation, so no model router.
 3. **Live** to **Cold**: its cache expires.
 4. **Cold** to **Live**: [instantiated](instantiate.md) again. Any tier can be woken, including subagents. Whether it keeps its previous model is [undecided](open-questions.md#model-on-wake).
 5. **Live** to **Finished**: the task is done and it hands in its report with an explicit finish. Stopping without it hands nothing in.

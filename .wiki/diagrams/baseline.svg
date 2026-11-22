@@ -24,7 +24,7 @@
 <path class="arr" d="M135 228 L135 248" marker-end="url(#a)"/>
 <text class="ts" x="203" y="188" text-anchor="start">no</text>
 <path class="arr" d="M195 200 L212 200 L212 343 L186 343" marker-end="url(#a)"/>
-<g class="c-coral"><rect x="52" y="252" width="130" height="50" rx="8"/><text class="th" x="117.0" y="268.0" text-anchor="middle">Steer or inbox</text><text class="ts" x="117.0" y="287.0" text-anchor="middle">No router</text></g>
+<g class="c-coral"><rect x="52" y="252" width="130" height="50" rx="8"/><text class="th" x="117.0" y="268.0" text-anchor="middle">Message timing</text><text class="ts" x="117.0" y="287.0" text-anchor="middle">No router</text></g>
 <g class="c-teal"><rect x="52" y="318" width="130" height="50" rx="8"/><text class="th" x="117.0" y="334.0" text-anchor="middle">Instantiate</text><text class="ts" x="117.0" y="353.0" text-anchor="middle">Spawn or wake</text></g>
 <rect class="frame" x="480" y="130" width="160" height="252" rx="12" stroke-dasharray="4 4"/>
 <text class="ts" x="492" y="148" text-anchor="start">Every report</text>

@@ -11,7 +11,7 @@ It is built as a Rust core that owns one durable journal, with a command-line to
 - **The column** is the chain of command: user, secretary, project agent, subagent.
 - **Between neighbours**, messages go both ways (grey) and reports go up only (amber).
 - **The rails** are the user's direct line: the left rail messages any agent, the right rail carries that agent's report straight back.
-- **Every message** (left box) is delivered according to the recipient's state. A live agent gets it by steer or inbox. A cold or not-yet-created agent is instantiated first.
+- **Every message** (left box) is delivered according to the recipient's state. The sender picks a timing (now, next step, after turn, or inbox); a live agent takes it in at that point. A cold or not-yet-created agent is instantiated first.
 - **Every report** (right box) is graded by whoever receives it. Grades become scores on the leaderboard, which instantiation reads when it picks the next model.
 
 ## Pages

@@ -135,7 +135,7 @@ def baseline():
         line([(135, 228), (135, 248)]),
         txt(203, 188, "no"),
         line([(195, 200), (212, 200), (212, 343), (186, 343)]),
-        box("coral", 52, 252, 130, 50, "Steer or inbox", "No router"),
+        box("coral", 52, 252, 130, 50, "Message timing", "No router"),
         # what happens inside this box is its own diagram: instantiate()
         box("teal", 52, 318, 130, 50, "Instantiate", "Spawn or wake"),
     ]
