@@ -80,7 +80,8 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              lease_until  INTEGER NOT NULL DEFAULT 0,
              reported     INTEGER NOT NULL DEFAULT 0,
              abandoned    INTEGER NOT NULL DEFAULT 0, -- its model could not be reached; another run is picked
-             waiting      INTEGER NOT NULL DEFAULT 0  -- its turn ended with sub-tasks out; woken when they report
+             waiting      INTEGER NOT NULL DEFAULT 0, -- its turn ended with sub-tasks out; woken when they report
+             outcome      TEXT NOT NULL DEFAULT 'done' -- what finish said: done, blocked or needs_review
          );
          CREATE TABLE IF NOT EXISTS ratings (
              trial    INTEGER PRIMARY KEY REFERENCES trials(id),
@@ -118,6 +119,9 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     }
     if !columns("trials")?.iter().any(|c| c == "waiting") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0")?;
+    }
+    if !columns("trials")?.iter().any(|c| c == "outcome") {
+        tx.execute_batch("ALTER TABLE trials ADD COLUMN outcome TEXT NOT NULL DEFAULT 'done'")?;
     }
     let task_cols = columns("tasks")?;
     if !task_cols.iter().any(|c| c == "report_when") {
@@ -834,6 +838,64 @@ pub fn children_out(conn: &Connection, conv: &str) -> Result<Vec<i64>> {
     )?;
     let rows = stmt.query_map(params![conversation_page(conv)], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Wake `conv` if it is a run waiting for its sub-tasks: `claim` takes it up
+/// like a run whose lease ran out.
+pub fn wake(conn: &Connection, conv: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE trials SET waiting = 0, lease_until = 0 WHERE conversation = ?1 AND waiting = 1 AND ended IS NULL",
+        params![conv],
+    )?;
+    Ok(())
+}
+
+/// Whoever handed a run its task, as a run would address them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parent {
+    /// Another agent's run, still going: its conversation.
+    Run(String),
+    /// The user, who filed it in this chat.
+    Chat(String),
+    /// The user, who filed it outside any chat; or a run that has finished.
+    Unreachable,
+}
+
+/// Who handed the run in `conv` its task.
+pub fn parent(conn: &Connection, conv: &str) -> Result<Parent> {
+    let (created_by, origin): (String, Option<String>) = conn.query_row(
+        "SELECT t.created_by, t.origin FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
+        params![conv],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(match (created_by.strip_prefix("conversations/"), origin) {
+        (Some(run), _) => {
+            let live: bool = conn.query_row(
+                "SELECT count(*) > 0 FROM trials WHERE conversation = ?1 AND ended IS NULL",
+                params![run],
+                |r| r.get(0),
+            )?;
+            if live { Parent::Run(run.to_string()) } else { Parent::Unreachable }
+        }
+        (None, Some(chat)) => Parent::Chat(chat),
+        (None, None) => Parent::Unreachable,
+    })
+}
+
+/// The conversation of the run doing `task`, which `conv` handed out, if it is going.
+pub fn child_run(conn: &Connection, conv: &str, task: i64) -> Result<Option<String>> {
+    let created_by: Option<String> =
+        conn.query_row("SELECT created_by FROM tasks WHERE id = ?1", params![task], |r| r.get(0)).optional()?;
+    if created_by.as_deref() != Some(conversation_page(conv).as_str()) {
+        bail!("task {task} is not one you handed out");
+    }
+    Ok(conn
+        .query_row(
+            "SELECT conversation FROM trials WHERE task = ?1 AND ended IS NULL AND abandoned = 0 ORDER BY id DESC LIMIT 1",
+            params![task],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// A run's own todos that are not done, as (id, title).

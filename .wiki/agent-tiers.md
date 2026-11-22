@@ -29,7 +29,7 @@ Everything between the user and agents, and between agents, is one of two calls.
 
 ### Message
 
-A message can go in either direction, including from a child to its parent. The user is one more participant: the user's messages, an agent's messages and reports all go through the same call.
+A message can go in either direction, including from a child to its parent: a child tells its parent when the parent is about to waste work, without ending its own task. The user is one more participant: the user's messages, an agent's messages and reports all go through the same call.
 
 **The sender picks a timing; the recipient's state decides what happens.** Each timing is one of the loop's boundaries:
 
@@ -60,7 +60,7 @@ A report is delivered like a message, with the timing the recipient asked for wh
 2. **Live** to **Live**: receives messages at any timing. No instantiation, so no model router.
 3. **Live** to **Cold**: its cache expires.
 4. **Cold** to **Live**: [instantiated](instantiate.md) again. Any tier can be woken, including subagents. Whether it keeps its previous model is [undecided](open-questions.md#model-on-wake).
-5. **Live** to **Finished**: the task is done and it hands in its report with an explicit finish. Stopping without it hands nothing in.
+5. **Live** to **Finished**: it hands in its report with an explicit finish, saying whether the task is done, blocked (it cannot go on, and says what it needs) or needs review. Stopping without it hands nothing in.
 
 ## What an agent is made of
 

@@ -685,7 +685,7 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
     let text = |key: &str| e.body[key].as_str().unwrap_or_default().to_string();
     match e.kind.as_str() {
         "user" => vec![msg(0, MessageKind::User, text("text"))],
-        "report" => vec![msg(0, MessageKind::Report, text("text"))],
+        "report" | "message" => vec![msg(0, MessageKind::Report, text("text"))],
         "notice" => vec![msg(0, MessageKind::Notice, text("text"))],
         "draft" => draft::summary(&e.body).map(|t| msg(0, MessageKind::TaskCard, t)).into_iter().collect(),
         "assistant" => {

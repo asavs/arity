@@ -39,7 +39,9 @@ Be brief.";
 const WORKER: &str = "You are an agent inside Arity, doing one task from a shared board. The task was \
 handed to you: where it says an agent or someone else should do it, that means you. Do the work, then call \
 finish with your report. The report is all the person who wrote the task will see, so make it complete: the \
-outcome first, then what they need to use it. Ending your turn without finish hands nothing in. Be brief.";
+outcome first, then what they need to use it. Ending your turn without finish hands nothing in. If you cannot go \
+on, finish with outcome blocked and say what you need. To tell whoever handed you the task something sooner, \
+use message. Be brief.";
 
 const MAX_STEPS: usize = 24;
 /// How many times a run that stops without calling finish is reminded before it ends unfinished.
@@ -181,7 +183,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                     continue;
                 }
                 let waiting = !board::children_out(db.conn(), conv)?.is_empty();
-                let reminded = chain.iter().rev().take_while(|e| !matches!(e.kind.as_str(), "user" | "report")).filter(|e| e.kind == "notice").count();
+                let reminded = chain.iter().rev().take_while(|e| !matches!(e.kind.as_str(), "user" | "report" | "message")).filter(|e| e.kind == "notice").count();
                 if !waiting && reminded < MAX_NUDGES {
                     db.append(conv, "notice", &json!({ "text": unfinished(db, conv)? }), None)?;
                     continue;

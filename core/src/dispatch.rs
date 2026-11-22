@@ -115,7 +115,15 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
         Ok(outcome) => {
             // Finished with a report; or stopped by someone, when the last reply is all there is.
             let result = match outcome {
-                agent::Outcome::Finished(report) => report,
+                // The outcome heads the result, so every place that shows it says so.
+                agent::Outcome::Finished(report) => {
+                    let said: String = db.conn().query_row("SELECT outcome FROM trials WHERE id = ?1", params![trial], |r| r.get(0))?;
+                    match said.as_str() {
+                        "blocked" => format!("Blocked: {report}"),
+                        "needs_review" => format!("Needs review: {report}"),
+                        _ => report,
+                    }
+                }
                 _ => db
                     .chain(&conv)?
                     .iter()
@@ -254,8 +262,8 @@ fn deliver_report(db: &Journal) -> Result<Option<Did>> {
         let how = Delivery::parse(&report_when).unwrap_or(Delivery::AfterTurn);
         turn::deliver(c, parent, "report", &body(said(&ask)), how)?;
         // A waiting run asked to hear at once is woken; otherwise when nothing is left out.
-        if let (Some((parent_trial, _, true)), true) = (run, how != Delivery::AfterTurn) {
-            c.execute("UPDATE trials SET waiting = 0, lease_until = 0 WHERE id = ?1", params![parent_trial])?;
+        if run.is_some() && how != Delivery::AfterTurn {
+            crate::board::wake(c, parent)?;
         }
         Ok(Some(Did::Reported { task, rater: rates.then(|| parent.to_string()) }))
     })

@@ -90,12 +90,12 @@ impl Model {
     }
 }
 
-/// Entries the model reads as the user speaking: the user's own messages, reports,
+/// Entries the model reads as the user speaking: the user's own messages, reports, other agents' messages,
 /// Arity's notices, and the person's changes to a task card. A model's own card
 /// proposals have no text; its tool call already records them.
 fn user_text(e: &Entry) -> Option<&str> {
     match e.kind.as_str() {
-        "user" | "report" | "notice" | "draft" => e.body["text"].as_str(),
+        "user" | "report" | "message" | "notice" | "draft" => e.body["text"].as_str(),
         _ => None,
     }
 }

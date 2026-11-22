@@ -69,7 +69,7 @@ fn offered(caller: Caller, name: &str, can_rate: bool) -> bool {
         (_, "list_tasks" | "add_task") => true,
         (Caller::Chat, "finish") => false,
         (Caller::Chat, _) => true,
-        (_, "finish") => true,
+        (_, "finish" | "message") => true,
         (Caller::RunAtFloor, "complete_task") => true,
         _ => false,
     }
@@ -140,8 +140,26 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                           start with the outcome, then what they need to use it. If you could not do it, say what \
                           you found and what stopped you.",
             parameters: json!({"type": "object", "properties": {
-                "report": {"type": "string", "description": "The result of the task, in full."}
+                "report": {"type": "string", "description": "The result of the task, in full."},
+                "outcome": {"type": "string", "enum": ["done", "blocked", "needs_review"], "description": "\"done\" \
+                    (the default) when the task is done; \"blocked\" when you cannot go on, saying in the report what \
+                    you need; \"needs_review\" when it is done but someone should check it before it is used."}
             }, "required": ["report"]}),
+        },
+        ToolSpec {
+            name: "message",
+            description: "Tell someone something before you finish, without ending your task: whoever handed you \
+                          the task, or the agent doing a task you handed out. Use it when they are about to waste \
+                          work, or need to know now; the rest goes in your report.",
+            parameters: json!({"type": "object", "properties": {
+                "to": {"type": ["string", "integer"], "description": "\"parent\" for whoever handed you this task, \
+                    or the id of a task you handed out."},
+                "text": {"type": "string"},
+                "when": {"type": "string", "enum": ["now", "next_step", "after_turn", "inbox"], "description": "When it \
+                    reaches them if they are working: \"now\" cuts off what they are writing, \"next_step\" when \
+                    they finish their current step, \"after_turn\" (the default) when they would stop, \"inbox\" \
+                    for something they only need to know, read when they are next ready and never waking them."}
+            }, "required": ["to", "text"]}),
         },
     ];
     all.into_iter()
@@ -280,10 +298,65 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 board::rate(db, trial, score, note, &board::conversation_page(conv), Some(model))?;
                 Ok(format!("rated task {task}: {score}/5"))
             }
+            "message" => {
+                let text = args["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    anyhow::bail!("message needs its text");
+                }
+                let how = match args["when"].as_str() {
+                    None => turn::Delivery::AfterTurn,
+                    Some(w) => turn::Delivery::parse(w)
+                        .ok_or_else(|| anyhow::anyhow!("when is one of now, next_step, after_turn and inbox"))?,
+                };
+                let (mine, title): (i64, String) = db.query_row(
+                    "SELECT t.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
+                    [conv],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let child = match &args["to"] {
+                    Value::String(s) if s == "parent" => None,
+                    Value::Number(n) => n.as_i64(),
+                    Value::String(s) => s.trim().trim_start_matches("task").trim().parse().ok(),
+                    _ => None,
+                };
+                let (to, how, said, sent) = match child {
+                    Some(task) => {
+                        let Some(run) = board::child_run(db, conv, task)? else {
+                            anyhow::bail!("nobody is working on task {task} now");
+                        };
+                        (run, how, format!("Message from whoever handed you this task (task {mine}):\n\n{text}"), format!("task {task}"))
+                    }
+                    None if args["to"] != "parent" => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
+                    None => match board::parent(db, conv)? {
+                        board::Parent::Run(run) => {
+                            (run, how, format!("Message from task {mine}, \"{title}\":\n\n{text}"), "whoever handed you this task".into())
+                        }
+                        // The user reads it in the chat; the chat's model is not asked to answer it.
+                        board::Parent::Chat(chat) => (
+                            chat,
+                            turn::Delivery::Inbox,
+                            format!("Message from task {mine}, \"{title}\":\n\n{text}"),
+                            "the user, in the chat they filed it in".into(),
+                        ),
+                        board::Parent::Unreachable => anyhow::bail!(
+                            "whoever handed you this task cannot be reached now; say it in your report when you finish"
+                        ),
+                    },
+                };
+                turn::deliver(db, &to, "message", &json!({ "text": said, "from_task": mine }), how)?;
+                if how != turn::Delivery::Inbox {
+                    board::wake(db, &to)?;
+                }
+                Ok(format!("sent to {sent}"))
+            }
             "finish" => {
                 let report = args["report"].as_str().unwrap_or_default().trim();
                 if report.is_empty() {
                     anyhow::bail!("finish needs your report: the result of the task, in full");
+                }
+                let outcome = args["outcome"].as_str().unwrap_or("done");
+                if !matches!(outcome, "done" | "blocked" | "needs_review") {
+                    anyhow::bail!("outcome is one of done, blocked and needs_review");
                 }
                 let todos = board::open_todos(db, conv)?;
                 // Refusals since the last report it was given; a wake starts the count again.
@@ -293,7 +366,8 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                     .take_while(|e| e.kind != "report")
                     .filter(|e| e.kind == "tool" && e.body["name"] == "finish")
                     .count();
-                if refused < MAX_REFUSALS {
+                // Blocked: it cannot go on, so what is open is not a reason to keep it.
+                if refused < MAX_REFUSALS && outcome != "blocked" {
                     let ids = |v: &[i64]| v.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
                     let mut open = Vec::new();
                     if !todos.is_empty() {
@@ -323,6 +397,7 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 for (id, _) in &todos {
                     board::set_done(db, *id, true)?;
                 }
+                db.execute("UPDATE trials SET outcome = ?2 WHERE conversation = ?1 AND ended IS NULL", rusqlite::params![conv, outcome])?;
                 Ok(FINISHED.into())
             }
             other => anyhow::bail!("unknown tool {other}"),
@@ -396,14 +471,14 @@ mod tests {
         // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
         assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
         run(1)?;
-        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish"]);
+        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish", "message"]);
         assert!(add_props("task-1")["properties"]["assignee"].is_object(), "above the floor it may delegate");
         let said = call("task-1", "add_task", json!({ "title": "sub" }));
         assert!(said.starts_with("added task 2") && said.contains("comes back here"), "{said}");
         assert_eq!(board::task(c, 2)?.created_by, "conversations/task-1");
         // Task 2's run is at the floor: add_task has no assignee or choice, and complete_task is offered.
         run(2)?;
-        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task", "finish"]);
+        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task", "finish", "message"]);
         let props = add_props("task-2");
         assert!(props["properties"]["assignee"].is_null() && props["properties"]["choice"].is_null(), "{props}");
         // Even asked for an agent, what it writes is its own todo: no pick, no run, nothing woken.
@@ -425,6 +500,50 @@ mod tests {
         c.execute("UPDATE tasks SET choice = 'private' WHERE id = 1", [])?;
         assert!(call("task-1", "add_task", json!({ "title": "another", "assignee": "agent", "choice": "smart" })).starts_with("added task 4"));
         assert_eq!(board::task(c, 4)?.fields.choice, board::Choice::Private);
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// A run messages whoever handed it its task, or the run of a task it
+    /// handed out, at a timing; a waiting run is woken unless it is inbox. The
+    /// user is reached in the chat the task was filed in, as a note. Blocked
+    /// finishes even with work open.
+    #[test]
+    fn runs_message_up_and_down_and_can_finish_blocked() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-message-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
+        // The user files task 1 in a chat; its run hands task 2 to an agent, and task 2's run starts.
+        call("chat", "add_task", json!({ "title": "top", "assignee": "agent" }));
+        c.execute("INSERT INTO trials (task, conversation, model, waiting) VALUES (1, 'task-1', 'a', 1)", [])?;
+        assert!(call("task-1", "message", json!({ "to": 2, "text": "hi" })).contains("not one you handed out"));
+        call("task-1", "add_task", json!({ "title": "sub" }));
+        assert!(call("task-1", "message", json!({ "to": 2, "text": "hi" })).contains("nobody is working on task 2"));
+        c.execute("INSERT INTO trials (task, conversation, model) VALUES (2, 'task-2', 'b')", [])?;
+        // Down: the parent tells its child something.
+        assert_eq!(call("task-1", "message", json!({ "to": "task 2", "text": "use metric" })), "sent to task 2");
+        let got = db.chain("task-2")?.last().unwrap().clone();
+        assert_eq!(got.kind, "message");
+        assert!(got.body["text"].as_str().unwrap().contains("use metric"));
+        // Up, inbox: the waiting parent has it, and is not woken.
+        assert!(call("task-2", "message", json!({ "to": "parent", "text": "fyi", "when": "inbox" })).starts_with("sent"));
+        let waiting = |conv: &str| -> bool { c.query_row("SELECT waiting FROM trials WHERE conversation = ?1", [conv], |r| r.get(0)).unwrap() };
+        assert!(waiting("task-1"));
+        // Up, next step: it is woken.
+        call("task-2", "message", json!({ "to": "parent", "text": "the repo does not exist", "when": "next_step" }));
+        assert!(!waiting("task-1"));
+        assert_eq!(db.chain("task-1")?.iter().filter(|e| e.kind == "message").count(), 2);
+        // Task 1's parent is the user, reached in the chat as a note.
+        assert!(call("task-1", "message", json!({ "to": "parent", "text": "halfway" })).contains("the user"));
+        assert!(db.chain("chat")?.last().unwrap().body["text"].as_str().unwrap().contains("halfway"));
+        assert!(call("task-1", "message", json!({ "to": "parent", "text": "x", "when": "soon" })).contains("when is one of"));
+        // Blocked: let through though task 2 is still out; done is refused for it.
+        assert!(call("task-1", "finish", json!({ "report": "r" })).contains("task 2 has not reported"));
+        assert_eq!(call("task-1", "finish", json!({ "report": "need a key", "outcome": "blocked" })), FINISHED);
+        let outcome: String = c.query_row("SELECT outcome FROM trials WHERE conversation = 'task-1'", [], |r| r.get(0))?;
+        assert_eq!(outcome, "blocked");
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
