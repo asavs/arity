@@ -75,7 +75,11 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              reported     INTEGER NOT NULL DEFAULT 0,
              abandoned    INTEGER NOT NULL DEFAULT 0, -- its model could not be reached; another run is picked
              waiting      INTEGER NOT NULL DEFAULT 0, -- its turn ended with sub-tasks out; woken when they report
-             outcome      TEXT NOT NULL DEFAULT 'done' -- what finish said: done, blocked or needs_review
+             outcome      TEXT NOT NULL DEFAULT 'done', -- what finish said: done, blocked or needs_review; failed
+             paused       INTEGER NOT NULL DEFAULT 0, -- stopped by the user: never claimed or woken until continued
+             retries      INTEGER NOT NULL DEFAULT 0, -- failed attempts in a row; sets the backoff
+             retry_at     INTEGER NOT NULL DEFAULT 0, -- not claimed before this unix time
+             restarts     INTEGER NOT NULL DEFAULT 0  -- taken over from a dead process with no progress since
          );
          CREATE TABLE IF NOT EXISTS ratings (
              trial    INTEGER PRIMARY KEY REFERENCES trials(id),
@@ -120,6 +124,12 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     }
     if !columns("trials")?.iter().any(|c| c == "outcome") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN outcome TEXT NOT NULL DEFAULT 'done'")?;
+    }
+    let trial_cols = columns("trials")?;
+    for col in ["paused", "retries", "retry_at", "restarts"] {
+        if !trial_cols.iter().any(|c| c == col) {
+            tx.execute_batch(&format!("ALTER TABLE trials ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"))?;
+        }
     }
     let task_cols = columns("tasks")?;
     if !task_cols.iter().any(|c| c == "report_when") {
@@ -537,6 +547,8 @@ pub enum RunState {
     Waiting,
     /// The last attempt failed; it will be retried.
     Failing,
+    /// The user stopped it part way. It waits to be continued.
+    Paused,
     NeedsRating,
     Rated,
 }
@@ -567,7 +579,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.choice,
                 t.priority, t.due, t.tags,
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
-                t.origin, t.created, r.note, tr.model, tr.waiting, t.dir
+                t.origin, t.created, r.note, tr.model, tr.waiting, t.dir, tr.paused
          FROM tasks t
          LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id AND abandoned = 0)
          LEFT JOIN ratings r ON r.trial = tr.id
@@ -581,7 +593,9 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         let error: Option<String> = r.get(14)?;
         let score: Option<i64> = r.get(15)?;
         let waiting: Option<bool> = r.get(20)?;
+        let paused: Option<bool> = r.get(22)?;
         let run_state = trial.map(|_| match (ended.is_some(), error.is_some(), score.is_some()) {
+            (false, _, _) if paused == Some(true) => RunState::Paused,
             (false, _, _) if waiting == Some(true) => RunState::Waiting,
             (false, true, _) => RunState::Failing,
             (false, false, _) => RunState::Running,
@@ -821,6 +835,14 @@ pub fn set_done(conn: &Connection, id: i64, done: bool) -> Result<()> {
     if done && matches!(t.run_state, Some(RunState::Running | RunState::Failing | RunState::Waiting)) {
         bail!("an agent is still working on task {id}");
     }
+    if done {
+        // A stopped run closes without a result, as one whose model was out of reach does.
+        conn.execute(
+            "UPDATE trials SET ended = datetime('now'), abandoned = 1, reported = 1, paused = 0
+             WHERE task = ?1 AND ended IS NULL AND paused = 1",
+            params![id],
+        )?;
+    }
     set_state(conn, id, if done { TaskState::Done } else { TaskState::Open })
 }
 
@@ -952,10 +974,86 @@ pub fn wait_for_children(conn: &Connection, conv: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clear any pending dispatcher wake for `conv`.
+/// Clear any pending dispatcher wake for `conv`, and the dispatcher's claim on it.
 pub fn clear_wake(conn: &Connection, conv: &str) -> Result<()> {
-    conn.execute("UPDATE conversations SET wake_at = 0 WHERE name = ?1", params![conv])?;
+    conn.execute("UPDATE conversations SET wake_at = 0, lease_until = 0 WHERE name = ?1", params![conv])?;
     Ok(())
+}
+
+/// `conv` and every conversation below it: the runs of the tasks it handed
+/// out, the runs of theirs, and so on. Finished runs are walked through too,
+/// since a task they handed out may still be going.
+const SUBTREE: &str = "WITH RECURSIVE sub(conv) AS (
+        SELECT ?1
+        UNION
+        SELECT tr.conversation FROM sub
+        JOIN tasks t ON t.created_by = 'conversations/' || sub.conv OR t.origin = sub.conv
+        JOIN trials tr ON tr.task = t.id AND tr.abandoned = 0
+    )";
+
+/// The conversations below `conv`, not counting it.
+pub fn descendants(conn: &Connection, conv: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("{SUBTREE} SELECT conv FROM sub WHERE conv != ?1"))?;
+    let rows = stmt.query_map(params![conv], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Work below `conv` that is going or is about to: runs that are open and not
+/// stopped, and tasks handed to an agent that no run has picked up yet.
+pub fn active_children(conn: &Connection, conv: &str) -> Result<u32> {
+    Ok(conn.query_row(
+        &format!(
+            "{SUBTREE}
+             SELECT (SELECT count(*) FROM trials tr JOIN sub ON sub.conv = tr.conversation
+                     WHERE sub.conv != ?1 AND tr.ended IS NULL AND tr.paused = 0)
+                  + (SELECT count(*) FROM tasks t
+                     WHERE t.assignee = 'agent' AND t.state IN ('open', 'ready')
+                       AND EXISTS (SELECT 1 FROM sub WHERE t.created_by = 'conversations/' || sub.conv OR t.origin = sub.conv))"
+        ),
+        params![conv],
+        |r| r.get(0),
+    )?)
+}
+
+/// Stop the run in `conv`, if it has one that is open: it is never claimed or
+/// woken again until someone continues it. True if it was open and not stopped already.
+pub fn pause(conn: &Connection, conv: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE trials SET paused = 1, waiting = 0, lease_until = 0, retry_at = 0
+         WHERE conversation = ?1 AND ended IS NULL AND paused = 0",
+        params![conv],
+    )? > 0)
+}
+
+/// Stop `conv` and everything below it, from any process: turns running are
+/// stopped, open runs paused, wakes cleared, and tasks handed to an agent that
+/// no run picked up yet go back to the user, so nothing below starts again on
+/// its own. Returns how many conversations were stopped, and how many tasks
+/// went back to the user.
+pub fn stop_subtree(conn: &Connection, conv: &str) -> Result<(u32, u32)> {
+    let mut stopped = 0;
+    let mut convs = vec![conv.to_string()];
+    convs.extend(descendants(conn, conv)?);
+    for c in &convs {
+        let turn = crate::turn::stop(conn, c)?;
+        let run = pause(conn, c)?;
+        let waking: bool =
+            conn.query_row("SELECT count(*) > 0 FROM conversations WHERE name = ?1 AND wake_at != 0", params![c], |r| r.get(0))?;
+        clear_wake(conn, c)?;
+        if turn || run || waking {
+            stopped += 1;
+        }
+    }
+    let mut taken_back = 0;
+    for c in &convs {
+        taken_back += conn.execute(
+            "UPDATE tasks SET assignee = ?2, edits = edits + 1
+             WHERE assignee = 'agent' AND state IN ('open', 'ready')
+               AND (created_by = 'conversations/' || ?1 OR origin = ?1)",
+            params![c, me()],
+        )? as u32;
+    }
+    Ok((stopped, taken_back))
 }
 
 /// Whoever handed a run its task, as a run would address them.

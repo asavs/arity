@@ -113,6 +113,10 @@ impl Live {
     pub fn push(&self, s: &str) {
         self.text.lock().unwrap().push_str(s);
     }
+    /// Drop the text so far, for a reply that failed and is asked for again.
+    pub fn clear_text(&self) {
+        self.text.lock().unwrap().clear();
+    }
     /// Whether the reply should be cut off: the turn was stopped, or steered.
     pub fn stopped(&self) -> bool {
         self.stop.load(Relaxed)
@@ -206,7 +210,9 @@ impl Lease {
 
     /// End the turn. Returns false, keeping the lease, if a message was queued
     /// meanwhile and the turn should answer it. A stopped turn ends regardless;
-    /// what was queued stays in the journal for the next turn.
+    /// what was queued, a sub-task's report above all, goes into the journal
+    /// unanswered, where `Arity::continue_turn` picks it up. Only
+    /// `discard_queued_user` ever drops anything queued, and never a report.
     pub fn release(&mut self, db: &Journal, stopped: bool) -> Result<bool> {
         let end = db.immediate(|c| {
             if drain(c, &self.conv, true)? > 0 && !stopped {
@@ -333,7 +339,15 @@ pub fn send_as(db: &Journal, conv: &str, text: &str, how: Delivery) -> Result<()
     db.immediate(|c| deliver(c, conv, "user", &json!({ "text": text }), how).map(|_| ()))
 }
 
-/// Ask the turn running in `conv` to stop, from any process. False if none is running.
+/// Take back the user's messages waiting for the turn running in `conv`.
+/// Reports from sub-tasks and other participants' entries stay queued: they
+/// are owed an answer whatever the user does. Returns how many were taken back.
+pub fn discard_queued_user(c: &Connection, conv: &str) -> Result<usize> {
+    Ok(c.execute("DELETE FROM queued WHERE conversation = ?1 AND kind = 'user'", params![conv])?)
+}
+
+/// Ask the turn running in `conv` to stop, from any process. False if none is
+/// running. Nothing queued is touched: it joins the journal as the turn ends.
 pub fn stop(c: &Connection, conv: &str) -> Result<bool> {
     Ok(c.execute("UPDATE turns SET stop = 1, seq = seq + 1 WHERE conversation = ?1 AND lease_until >= ?2", params![
         conv,

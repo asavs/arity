@@ -143,6 +143,11 @@ pub struct Thread {
     pub task: Option<BoardTask>,
     /// The task card being drafted in it, if one is open.
     pub card: Option<TaskFields>,
+    /// Nothing runs in it, and it stopped short: a reply cut off, a message or
+    /// report not answered yet, or a run stopped or failing. See `continue_turn`.
+    pub can_continue: bool,
+    /// Runs below it that are going or about to start, at any depth. See `stop_subtree`.
+    pub active_children: u32,
 }
 
 /// Where a thread sits in the list, most pressing first.
@@ -395,6 +400,7 @@ impl Arity {
     pub fn threads(&self) -> Result<Vec<Thread>> {
         let db = self.journal()?;
         let mut conversations = db.conversations()?;
+        let running = turn::running(db.conn())?;
         let mut out = Vec::new();
         // A run's own todos are its scratchpad, shown in its thread rather than listed.
         for t in board::tasks(db.conn())?.into_iter().filter(|t| !t.fields.assignee.starts_with("conversations/")) {
@@ -402,11 +408,22 @@ impl Arity {
             let updated = conversations.iter().find(|c| c.0 == name).map_or(&t.created, |c| &c.1).clone();
             let group = match (t.state, t.run_state) {
                 (TaskState::Done, _) => ThreadGroup::Done,
-                (_, Some(RunState::NeedsRating)) => ThreadGroup::NeedsYou,
+                (_, Some(RunState::NeedsRating | RunState::Paused)) => ThreadGroup::NeedsYou,
                 (_, Some(RunState::Running | RunState::Failing | RunState::Waiting)) => ThreadGroup::Running,
                 _ => ThreadGroup::Open,
             };
-            out.push(Thread { name, title: t.fields.title.clone(), group, updated, task: Some(t.into()), card: None });
+            let can_continue = t.conversation.is_some() && can_continue(&db, &name, &db.chain(&name)?, &running)?;
+            let active_children = board::active_children(db.conn(), &name)?;
+            out.push(Thread {
+                name,
+                title: t.fields.title.clone(),
+                group,
+                updated,
+                task: Some(t.into()),
+                card: None,
+                can_continue,
+                active_children,
+            });
         }
         // Whatever is left is a chat. Earlier runs of a task that was run again are not listed.
         let runs = board::run_conversations(db.conn())?;
@@ -417,7 +434,9 @@ impl Arity {
             let said = chain.iter().find(|e| e.kind == "user").and_then(|e| e.body["text"].as_str());
             let title = said.and_then(|s| s.lines().next()).map_or(name.clone(), |l| l.chars().take(60).collect());
             let group = if card.is_some() { ThreadGroup::NeedsYou } else { ThreadGroup::Chat };
-            out.push(Thread { name, title, group, updated, task: None, card });
+            let can_continue = can_continue(&db, &name, &chain, &running)?;
+            let active_children = board::active_children(db.conn(), &name)?;
+            out.push(Thread { name, title, group, updated, task: None, card, can_continue, active_children });
         }
         out.sort_by_key(|t| t.group);
         Ok(out)
@@ -482,6 +501,36 @@ impl Arity {
     /// The reply so far is kept. False if nothing was running.
     pub fn stop(&self, conversation: String) -> Result<bool> {
         Ok(turn::stop(self.journal()?.conn(), &conversation)?)
+    }
+
+    /// Stop a conversation and everything it handed out, at any depth: turns
+    /// running are stopped, open runs are paused until continued, nothing is
+    /// woken again, and tasks for an agent no run has picked up yet go back to
+    /// the user. Returns how many conversations were stopped.
+    pub fn stop_subtree(&self, conversation: String) -> Result<u32> {
+        let db = self.journal()?;
+        Ok(db.immediate(|c| board::stop_subtree(c, &conversation))?.0)
+    }
+
+    /// Take back the user's messages still waiting for the turn running in a
+    /// conversation. Reports from sub-tasks are never taken back. Returns how many were.
+    pub fn discard_queued(&self, conversation: String) -> Result<u32> {
+        Ok(turn::discard_queued_user(self.journal()?.conn(), &conversation)? as u32)
+    }
+
+    /// Whether `continue_turn` has something to carry on in a conversation; see `Thread::can_continue`.
+    pub fn can_continue(&self, conversation: String) -> Result<bool> {
+        let db = self.journal()?;
+        Ok(can_continue(&db, &conversation, &db.chain(&conversation)?, &turn::running(db.conn())?)?)
+    }
+
+    /// Carry on a conversation that stopped short (see `can_continue`) from
+    /// where it is, without writing anything to ask for it: a reply cut off is
+    /// asked for again, an unanswered message or report is answered, a stopped
+    /// or failing run goes on. `model` is for a chat; None uses its last one,
+    /// and a run always keeps its own. Blocks. Returns how the turn ended.
+    pub fn continue_turn(&self, conversation: String, model: Option<String>) -> Result<String> {
+        self.continue_with(&conversation, model.as_deref(), &mut |_| {})
     }
 
     /// Conversations a turn is running in, in any process.
@@ -772,6 +821,39 @@ impl Arity {
         self.run_resolved(&db, conv, &model, None, on)
     }
 
+    /// As `continue_turn`, reporting text and messages as they come.
+    pub fn continue_with(&self, conv: &str, model: Option<&str>, on: &mut dyn FnMut(Event)) -> Result<String> {
+        self.continue_in(&self.journal()?, conv, model, None, on)
+    }
+
+    pub(crate) fn continue_in(
+        &self,
+        db: &Journal,
+        conv: &str,
+        model: Option<&str>,
+        scripted: Option<&agent::Complete>,
+        on: &mut dyn FnMut(Event),
+    ) -> Result<String> {
+        let running = turn::running(db.conn())?;
+        if running.iter().any(|r| r == conv) {
+            return Err(busy(conv));
+        }
+        if !can_continue(db, conv, &db.chain(conv)?, &running)? {
+            return Err(ArityError::Failed(format!("Nothing to continue in {conv}: it is not waiting on anything")));
+        }
+        let model = resolve_model(db, conv, model.unwrap_or("-"))?;
+        board::clear_wake(db.conn(), conv)?;
+        Ok(match self.run_outcome(db, conv, &model, scripted, true, on)? {
+            None | Some(agent::Outcome::Busy) => "a turn is already running",
+            Some(agent::Outcome::Ended) => "answered",
+            Some(agent::Outcome::Stopped) => "stopped",
+            Some(agent::Outcome::Finished(_)) => "finished",
+            Some(agent::Outcome::Waiting) => "waiting on its sub-tasks",
+            Some(agent::Outcome::Unfinished) => "stopped without finishing",
+        }
+        .to_string())
+    }
+
     pub(crate) fn run_resolved(
         &self,
         db: &Journal,
@@ -780,8 +862,27 @@ impl Arity {
         scripted: Option<&agent::Complete>,
         on: &mut dyn FnMut(Event),
     ) -> Result<bool> {
+        Ok(self.run_outcome(db, conv, model, scripted, false, on)?.is_some())
+    }
+
+    /// Run a turn and settle its run, if it is one. None when another loop holds the conversation.
+    fn run_outcome(
+        &self,
+        db: &Journal,
+        conv: &str,
+        model: &str,
+        scripted: Option<&agent::Complete>,
+        continuing: bool,
+        on: &mut dyn FnMut(Event),
+    ) -> Result<Option<agent::Outcome>> {
         let trial = board::trial_state(db.conn(), conv)?;
         let hidden = hidden(db, conv)?;
+        // Someone asked for it: a run stopped or waiting out a backoff goes on now.
+        if let Some((tr_id, _, _, false)) = &trial {
+            db.conn()
+                .execute("UPDATE trials SET paused = 0, retry_at = 0 WHERE id = ?1", rusqlite::params![tr_id])
+                .map_err(anyhow::Error::from)?;
+        }
         let mut on_event = |e: Event| {
             if let Some((tr_id, _, _, false)) = &trial {
                 let _ = db.conn().execute(
@@ -795,18 +896,18 @@ impl Arity {
             }
         };
         let ran = match scripted {
-            Some(complete) => agent::run_with(db, conv, model, complete, &mut on_event),
-            None => agent::run(db, &self.dir, conv, model, &mut on_event),
+            Some(complete) => agent::run_turn(db, conv, model, &agent::Harness::default(), complete, continuing, &mut on_event),
+            None => agent::run_from(db, &self.dir, conv, model, continuing, &mut on_event),
         };
         match ran {
-            Ok(agent::Outcome::Busy) => Ok(false),
+            Ok(agent::Outcome::Busy) => Ok(None),
             Ok(outcome) => {
                 if let Some((tr_id, task_id, _, ended_before)) = trial {
-                    if matches!(dispatch::settle(db, tr_id, task_id, conv, ended_before, outcome)?, dispatch::Did::Ran { .. }) {
+                    if matches!(dispatch::settle(db, tr_id, task_id, conv, ended_before, outcome.clone())?, dispatch::Did::Ran { .. }) {
                         let _ = dispatch::deliver_report(db)?;
                     }
                 }
-                Ok(true)
+                Ok(Some(outcome))
             }
             Err(e) => {
                 if let Some((tr_id, _, _, ended_before)) = trial {
@@ -814,10 +915,7 @@ impl Arity {
                     if ended_before {
                         let _ = db.conn().execute("UPDATE trials SET error = ?2 WHERE id = ?1", rusqlite::params![tr_id, detail]);
                     } else {
-                        let _ = db.conn().execute(
-                            "UPDATE trials SET error = ?2, lease_until = ?3 WHERE id = ?1",
-                            rusqlite::params![tr_id, detail, board::now() + 60],
-                        );
+                        let _ = dispatch::retry_later(db.conn(), tr_id, &detail);
                     }
                 }
                 if hidden {
@@ -990,6 +1088,33 @@ fn conversation_usage(chain: &[Entry]) -> ConversationUsage {
         out.compacted_entries = chain[..i].iter().filter(|e| !read.contains(&e.id)).count() as u32;
     }
     out
+}
+
+/// Whether `conv`, whose chain is `chain`, stopped short and nothing else will
+/// carry it on: no turn runs there (`running`), the dispatcher is not about to
+/// wake it, and it is a run the user stopped or that is failing, or its chain
+/// ends on a cut-off reply or something not answered yet.
+fn can_continue(db: &Journal, conv: &str, chain: &[Entry], running: &[String]) -> anyhow::Result<bool> {
+    if running.iter().any(|r| r == conv) {
+        return Ok(false);
+    }
+    let open: Option<(bool, bool)> = db
+        .conn()
+        .query_row(
+            "SELECT paused, error IS NOT NULL FROM trials WHERE conversation = ?1 AND ended IS NULL ORDER BY id DESC LIMIT 1",
+            [conv],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) })?;
+    // An open run is the dispatcher's to carry on, unless it was stopped or keeps failing.
+    if let Some((paused, failing)) = open {
+        return Ok(paused || failing);
+    }
+    let waking: bool = db
+        .conn()
+        .query_row("SELECT count(*) > 0 FROM conversations WHERE name = ?1 AND wake_at > 0", [conv], |r| r.get(0))?;
+    Ok(!waking && (agent::cut_short(chain) || agent::owes_a_step(chain)))
 }
 
 /// An unrated run's thread, where the model stays hidden.
@@ -1270,6 +1395,111 @@ mod tests {
         assert_eq!(db.chain_for_model("chat-1-fork")?.iter().filter(|e| e.kind != "system").count(), 2);
         assert_eq!(arity.usage("chat-1-fork".into())?.compacted_entries, 0);
 
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    fn scratch_arity(name: &str) -> anyhow::Result<(PathBuf, Arc<Arity>, Journal)> {
+        let dir = std::env::temp_dir().join(format!("arity-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let arity = Arity::new(Some(dir.to_string_lossy().into_owned()));
+        let db = arity.journal()?;
+        Ok((dir, arity, db))
+    }
+
+    fn says(text: &str) -> Reply {
+        Reply { text: text.into(), tool_calls: vec![], interrupted: false, usage: None }
+    }
+
+    /// Stop while a sub-task's report and a user's message wait for the turn:
+    /// the user may take their message back, the report is never dropped, and
+    /// it lands unanswered in the journal, where `continue_turn` answers it
+    /// without anything written to ask.
+    #[test]
+    fn a_report_waiting_at_stop_survives_and_continue_answers_it() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("stop-report")?;
+        db.append("chat", "user", &json!({ "text": "check the sources" }), None)?;
+        db.append("chat", "assistant", &json!({ "text": "Handed off." }), Some("test:m"))?;
+        let mut lease = turn::Lease::take(&db, "chat", "test:m")?.unwrap();
+        let report = json!({ "text": "Task 1, \"sources\", is finished. The result:\n\nAll fine.", "task": 1, "trial": 1 });
+        assert!(!turn::deliver(db.conn(), "chat", "report", &report, Delivery::AfterTurn)?);
+        turn::send_as(&db, "chat", "never mind", Delivery::AfterTurn)?;
+        assert!(arity.stop("chat".into())?);
+        assert_eq!(arity.discard_queued("chat".into())?, 1, "the user's message is taken back");
+        let reports: i64 = db.conn().query_row("SELECT count(*) FROM queued WHERE kind = 'report'", [], |r| r.get(0))?;
+        assert_eq!(reports, 1, "the report is not");
+        assert!(lease.release(&db, true)?, "a stopped turn ends");
+        drop(lease);
+        let chain = db.chain("chat")?;
+        assert_eq!(chain.last().unwrap().kind, "report", "kept, in the journal, unanswered");
+        assert!(arity.can_continue("chat".into())?);
+        assert!(arity.threads()?.iter().any(|t| t.name == "chat" && t.can_continue));
+
+        let model = |_: &str, view: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            let last = view.iter().rev().find(|e| e.kind != "system").unwrap();
+            assert_eq!(last.kind, "report");
+            Ok(says("The sources check out."))
+        };
+        assert_eq!(arity.continue_in(&db, "chat", None, Some(&model), &mut |_| {})?, "answered");
+        let kinds: Vec<String> = db.chain("chat")?.into_iter().filter(|e| e.kind != "system").map(|e| e.kind).collect();
+        assert_eq!(kinds, ["user", "assistant", "report", "assistant"], "no message was written to ask");
+        assert!(!arity.can_continue("chat".into())?);
+        let nothing = arity.continue_in(&db, "chat", None, Some(&model), &mut |_| {}).unwrap_err().to_string();
+        assert!(nothing.contains("Nothing to continue"), "{nothing}");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A worker run the user stopped mid-reply waits as paused; continuing it
+    /// carries on the cut-off reply, and only its real finish reaches the parent.
+    #[test]
+    fn a_stopped_run_continues_to_its_real_finish() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("continue-run")?;
+        db.append("chat-1", "assistant", &json!({ "text": "Handed off." }), Some("chat:front"))?;
+        let f = TaskFields { title: "write an essay".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(db.conn(), &f, Some("chat-1"))?;
+        db.conn().execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-1', 'secret:w')", [task])?;
+        board::set_state(db.conn(), task, TaskState::Assigned)?;
+        db.append("task-1", "user", &json!({ "text": "write an essay" }), None)?;
+        db.append("task-1", "assistant", &json!({ "text": "The first half", "interrupted": true }), Some("secret:w"))?;
+        dispatch::settle(&db, 1, task, "task-1", false, agent::Outcome::Stopped)?;
+        let thread = |name: &str| arity.threads().unwrap().into_iter().find(|t| t.name == name).unwrap();
+        let t = thread("task-1");
+        assert_eq!((t.group, t.task.as_ref().unwrap().run_state, t.can_continue), (ThreadGroup::NeedsYou, Some(RunState::Paused), true));
+        assert_eq!(thread("chat-1").active_children, 0, "a paused run is not going");
+
+        let worker = |_: &str, view: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            assert_eq!(view.last().unwrap().kind, "system", "told it was cut off");
+            let finish = ToolCall { id: "f".into(), name: "finish".into(), arguments: json!({ "report": "The whole essay." }).to_string() };
+            Ok(Reply { text: "and the second half.".into(), tool_calls: vec![finish], interrupted: false, usage: None })
+        };
+        assert_eq!(arity.continue_in(&db, "task-1", Some("ignored:model"), Some(&worker), &mut |_| {})?, "finished");
+        let t = thread("task-1");
+        assert_eq!((t.task.as_ref().unwrap().run_state, t.can_continue), (Some(RunState::NeedsRating), false));
+        assert_eq!(t.task.unwrap().result.as_deref(), Some("The whole essay."));
+        let report = db.chain("chat-1")?.last().unwrap().clone();
+        assert!(report.kind == "report" && report.body["text"].as_str().unwrap().contains("The whole essay."));
+        assert!(!report.body["text"].as_str().unwrap().contains("The first half"));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn stop_subtree_counts_what_it_stopped_and_threads_show_active_children() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("stop-subtree")?;
+        db.append("chat-1", "assistant", &json!({ "text": "Handed off." }), Some("chat:front"))?;
+        let agent = |t: &str| TaskFields { title: t.into(), assignee: board::AGENT.into(), ..Default::default() };
+        board::add_task(db.conn(), &agent("parent"), Some("chat-1"))?;
+        db.conn().execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'w:a')", [])?;
+        board::set_state(db.conn(), 1, TaskState::Assigned)?;
+        board::add_task(db.conn(), &agent("child"), Some("task-1"))?;
+        db.conn().execute("INSERT INTO trials (task, conversation, model) VALUES (2, 'task-2', 'w:b')", [])?;
+        board::set_state(db.conn(), 2, TaskState::Assigned)?;
+        let active = |name: &str| arity.threads().unwrap().into_iter().find(|t| t.name == name).unwrap().active_children;
+        assert_eq!((active("chat-1"), active("task-1"), active("task-2")), (2, 1, 0));
+        assert_eq!(arity.stop_subtree("chat-1".into())?, 2, "two runs; the idle chat had nothing to stop");
+        assert_eq!((active("chat-1"), active("task-1")), (0, 0));
+        assert_eq!(arity.stop_subtree("chat-1".into())?, 0, "nothing left to stop");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

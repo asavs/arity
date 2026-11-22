@@ -42,7 +42,9 @@ impl Journal {
                  name       TEXT PRIMARY KEY,
                  head       INTEGER NOT NULL REFERENCES entries(id),
                  wake_at    INTEGER NOT NULL DEFAULT 0, -- 0 idle; -1 waiting on children; >0 eligible unix ts to wake
-                 session_id TEXT NOT NULL DEFAULT ''    -- stable provider cache/session id; fresh on fork
+                 session_id TEXT NOT NULL DEFAULT '',   -- stable provider cache/session id; fresh on fork
+                 lease_until INTEGER NOT NULL DEFAULT 0, -- a dispatcher woke it and holds it until then
+                 restarts   INTEGER NOT NULL DEFAULT 0  -- woken again after its dispatcher died, with no progress since
              );
              CREATE TABLE IF NOT EXISTS hook_runs (
                  conversation TEXT NOT NULL,
@@ -60,6 +62,11 @@ impl Journal {
         }
         if !conv_cols.iter().any(|c| c == "session_id") {
             conn.execute_batch("ALTER TABLE conversations ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")?;
+        }
+        for col in ["lease_until", "restarts"] {
+            if !conv_cols.iter().any(|c| c == col) {
+                conn.execute_batch(&format!("ALTER TABLE conversations ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"))?;
+            }
         }
         // Backfill legacy conversations with a stable random session id.
         let missing_sid: Vec<String> = {
@@ -136,7 +143,7 @@ impl Journal {
             "SELECT (SELECT ifnull(max(id), 0) FROM entries) || '.' || (SELECT count(*) FROM conversations)
                  || '.' || (SELECT count(*) + ifnull(sum(edits), 0) FROM tasks)
                  || '.' || (SELECT count(*) FROM task_blockers)
-                 || '.' || (SELECT count(*) + count(ended) + count(error) FROM trials)
+                 || '.' || (SELECT (count(*) + count(ended) + count(error)) || ':' || ifnull(sum(paused), 0) FROM trials)
                  || '.' || (SELECT count(*) FROM ratings)
                  || '.' || (SELECT count(*) || ':' || ifnull(sum(seq), 0) FROM turns)
                  || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)
@@ -239,6 +246,11 @@ pub fn insert(tx: &Connection, conv: &str, kind: &str, body: &Value, model: Opti
          ON CONFLICT(name) DO UPDATE SET head = excluded.head",
         params![conv, id, new_session_id()],
     )?;
+    // Real progress clears the crash-loop count. Prompt sections and Arity's own notices are not progress.
+    if !matches!(kind, "system" | "notice") {
+        tx.execute("UPDATE conversations SET restarts = 0 WHERE name = ?1 AND restarts > 0", params![conv])?;
+        tx.execute("UPDATE trials SET restarts = 0 WHERE conversation = ?1 AND restarts > 0", params![conv])?;
+    }
     Ok(id)
 }
 

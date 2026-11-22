@@ -65,6 +65,7 @@ private struct ThreadRow: View {
             case (_, .running?): ProgressView().controlSize(.mini)
             case (_, .waiting?): Image(systemName: "hourglass").foregroundStyle(.secondary).help("Waiting on its sub-tasks")
             case (_, .failing?): Image(systemName: "exclamationmark.arrow.circlepath").foregroundStyle(.orange)
+            case (_, .paused?): Image(systemName: "pause.circle").foregroundStyle(.secondary).help("Stopped; continue it to carry on")
             case (.done, _): Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             case (_, .needsRating?): Image(systemName: "star.leadinghalf.filled").foregroundStyle(.yellow)
             case (.open, _): Image(systemName: "lock").foregroundStyle(.secondary).help("Waiting on its blockers")
@@ -89,6 +90,7 @@ func details(_ task: BoardTask, me: String) -> String {
         case .running?: parts.append("running")
         case .waiting?: parts.append("waiting on sub-tasks")
         case .failing?: parts.append("retrying")
+        case .paused?: parts.append("stopped")
         case .needsRating? where task.state != .done: parts.append("needs rating")
         default: break
         }

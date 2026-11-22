@@ -838,6 +838,7 @@ fn line(t: &board::TaskRow) -> String {
                 RunState::Running => "an agent is on it",
                 RunState::Waiting => "an agent is waiting on its sub-tasks",
                 RunState::Failing => "an agent is retrying it",
+                RunState::Paused => "stopped by the user part way",
                 RunState::NeedsRating => "finished, needs rating",
                 RunState::Rated => "finished and rated",
             }

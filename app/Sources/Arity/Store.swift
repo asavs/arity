@@ -73,6 +73,11 @@ final class Store {
     let me: String
 
     var thread: Thread? { threads.first { $0.name == selection } }
+    /// The selected thread stopped short and nothing runs in it: a reply cut off, a message or
+    /// task result not answered yet, or a run stopped or failing. Continue carries it on.
+    var canContinue: Bool { thread?.canContinue ?? false }
+    /// Runs below the selected thread that are going or about to start, at any depth.
+    var activeChildren: UInt32 { thread?.activeChildren ?? 0 }
     /// Selected thread is a task with an agent run; its model is the trial's, kept inside the core.
     var isWorkerRun: Bool { thread?.task?.run != nil }
     var tasks: [BoardTask] { threads.compactMap(\.task) }
@@ -177,6 +182,14 @@ final class Store {
         _ = attempt { try core.stop(conversation: conv) }
     }
 
+    /// Stop the selected thread and every task it handed out, at any depth. Stopped runs wait
+    /// to be continued; tasks not started yet go back to the user's own list.
+    func stopAll() {
+        guard let conv = selection else { return }
+        _ = attempt { try core.stopSubtree(conversation: conv) }
+        refresh(force: true)
+    }
+
     /// Carry on after a failed step. The journal knows where it stopped.
     func resume() {
         guard let conv = selection else { return }
@@ -184,6 +197,21 @@ final class Store {
         run(conv, fixedModel: worker ? "" : nil) { core, model in
             try core.resume(conversation: conv, model: model)
         }
+    }
+
+    /// Carry on where the selected thread stopped short, writing nothing to ask for it:
+    /// a reply cut off by Stop, an unanswered message or task result, a stopped run.
+    func continueTurn() {
+        guard let conv = selection else { return }
+        let worker = isWorkerRun
+        run(conv, fixedModel: worker ? "" : nil) { core, model in
+            _ = try core.continueTurn(conversation: conv, model: model.isEmpty ? nil : model)
+        }
+    }
+
+    /// The error banner's Retry: continue where it stopped when there is something to carry on.
+    func retry() {
+        if canContinue { continueTurn() } else { resume() }
     }
 
     func fork(at entry: Int64) {

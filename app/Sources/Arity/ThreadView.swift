@@ -45,11 +45,13 @@ struct ThreadView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text(error).font(.callout).textSelection(.enabled)
                     Spacer()
-                    Button("Retry") { store.resume() }.disabled(busy)
+                    Button("Retry") { store.retry() }.disabled(busy)
                     Button("Dismiss") { store.error = nil }
                 }
                 .padding(10)
                 .background(.orange.opacity(0.1))
+            } else if store.canContinue && !busy {
+                continueBar
             }
 
             Divider()
@@ -76,18 +78,58 @@ struct ThreadView: View {
                     UsagePill(usage: usage)
                 }
                 Menu("Thread Actions", systemImage: "ellipsis.circle") {
-                    Button("Compact Context") { store.compact() }
-                        .help("Replace what the model reads with a summary it writes; every message stays here")
-                    Button("Reset Context") { store.resetContext() }
-                        .help("The model starts fresh from here; every message stays here and can be forked")
+                    Group {
+                        Button("Compact Context") { store.compact() }
+                            .help("Replace what the model reads with a summary it writes; every message stays here")
+                        Button("Reset Context") { store.resetContext() }
+                            .help("The model starts fresh from here; every message stays here and can be forked")
+                    }
+                    .disabled(busy || store.messages.isEmpty)
+                    if store.activeChildren > 0 {
+                        Divider()
+                        Button(stopAllTitle) { store.stopAll() }
+                            .help("Stop this thread and every task it handed out; each can be continued later")
+                    }
                 }
-                .disabled(busy || store.messages.isEmpty)
-                .help("Compact or reset the model's context")
+                .help("Compact or reset the model's context, or stop its sub-tasks")
             }
         }
         .onAppear { composing = true }
         .onChange(of: store.unsent) {
             if let text = store.unsent { message = text; store.unsent = nil }
+        }
+    }
+
+    private var stopAllTitle: String {
+        let n = store.activeChildren
+        return "Stop All, Including \(n) Sub-task\(n == 1 ? "" : "s")"
+    }
+
+    /// Under the transcript when the thread stopped short: why, and Continue, which carries it on
+    /// from there without sending anything.
+    private var continueBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pause.circle").foregroundStyle(.secondary)
+            Text(continueReason).font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Button("Continue", systemImage: "play.fill") { store.continueTurn() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .help("Carry on from where it stopped, without sending a message (⇧⌘R)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var continueReason: String {
+        if store.thread?.task?.runState == .paused { return "The agent was stopped part way" }
+        if store.thread?.task?.runState == .failing { return "The last attempt failed" }
+        switch store.messages.last?.kind {
+        case .report?: return "A task result is waiting for an answer"
+        case .user?: return "Your message has not been answered"
+        case .toolResult?: return "Stopped between steps"
+        default: return "Stopped part way"
         }
     }
 
@@ -198,7 +240,24 @@ struct ThreadView: View {
                 .onExitCommand { if busy { store.stop() } }
 
             // While a turn runs, Stop sits where Send is, until something is typed to send after it.
-            if busy && message.isEmpty {
+            if busy && message.isEmpty && store.activeChildren > 0 {
+                // Its sub-tasks run on their own: Stop leaves them going; Stop All stops them too.
+                Menu {
+                    Button("Stop This Reply  ⎋") { store.stop() }
+                    Button(stopAllTitle) { store.stopAll() }
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                } primaryAction: {
+                    store.stop()
+                }
+                .menuStyle(.button)
+                .menuIndicator(.visible)
+                .font(.title2)
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .keyboardShortcut(.cancelAction)
+                .help("Stop the reply (Esc); or stop it and every task it handed out")
+            } else if busy && message.isEmpty {
                 Button("Stop", systemImage: "stop.circle.fill") { store.stop() }
                     .labelStyle(.iconOnly)
                     .font(.title2)
@@ -280,6 +339,13 @@ private struct TaskDock: View {
             case .failing?:
                 Label(task.error ?? "The last attempt failed", systemImage: "exclamationmark.arrow.circlepath")
                     .foregroundStyle(.orange).textSelection(.enabled)
+            case .paused?:
+                Label("Stopped. Continue it, message the agent, or mark it done.", systemImage: "pause.circle")
+                    .foregroundStyle(.secondary)
+                if task.state != .done {
+                    Button("Mark Done") { store.setDone(task, true) }
+                        .help("Close the task; the stopped run ends without a result")
+                }
             case .needsRating?: RateControl(task: task)
             case .rated?: rating
             }

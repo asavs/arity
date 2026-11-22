@@ -19,7 +19,11 @@ const USAGE: &str = "usage:
                                              --inbox leaves it for the next turn and starts nothing;
                                              --dir <path> first attaches a folder (see folder)
   arity resume <conv> [model]                carry on a conversation that stopped
-  arity stop   <conv>                        stop the turn running in a conversation, from anywhere
+  arity continue <conv> [--smart|--fast|--free|--private|--model <m>]
+                                             carry on where it stopped short, writing nothing to ask: a reply
+                                             cut off by stop, an unanswered message or report, a stopped run
+  arity stop   <conv> [--all | --subtree]    stop the turn running in a conversation, from anywhere; --all also
+                                             stops every task it handed out, at any depth, until continued
   arity fork   <entry> <new-conv>            branch a conversation at an entry
   arity usage  <conv>                        tokens used, how full the context is, and how much was cached
   arity compact <conv> [instructions...]     replace the model's context with a summary it writes;
@@ -168,9 +172,32 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 println!("a turn is already running in {conv}");
             }
         }
+        ("continue", 2..=4) => {
+            let conv = arg(1);
+            let model = match (is_worker(&conv)?, arg(2).as_str()) {
+                (true, _) | (false, "") => None,
+                (false, "--model") if args.len() == 4 => Some(arg(3)),
+                (false, flag) => match choice(flag) {
+                    Some(c) if args.len() == 3 => {
+                        let pick = arity.pick(c)?;
+                        println!("      {}: {}", pick.model, pick.reason);
+                        Some(pick.model)
+                    }
+                    _ => return Err(format!("unexpected {:?}; see `arity help`", args[2..].join(" ")).into()),
+                },
+            };
+            let who = who_for(&conv, model.as_deref().unwrap_or("-"))?;
+            stop_on_ctrl_c(&conv);
+            let ended = arity.continue_with(&conv, model.as_deref(), &mut streamer(&who))?;
+            println!("{conv}: {ended}");
+        }
         ("stop", 2) => match arity.stop(arg(1))? {
             true => println!("stopping {}", arg(1)),
             false => println!("nothing is running in {}", arg(1)),
+        },
+        ("stop", 3) if arg(2) == "--all" || arg(2) == "--subtree" => match arity.stop_subtree(arg(1))? {
+            0 => println!("nothing is running in {} or below it", arg(1)),
+            n => println!("stopped {n} conversation{} in and below {}; `arity continue` carries any of them on", if n == 1 { "" } else { "s" }, arg(1)),
         },
         ("fork", 3) => {
             arity.fork(arg(1).parse()?, arg(2))?;
@@ -634,9 +661,16 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
 /// `  task-3    3 ready     for agent   write a poem  · high · due 2026-12-01 · blocked by 2 · #fun`
 /// `  chat-1                              how do I ...  · card open`
 fn thread_line(thread: &Thread, me: &str) -> String {
+    let mut flow = String::new();
+    if thread.can_continue {
+        flow.push_str("  · stopped short; arity continue");
+    }
+    if thread.active_children > 0 {
+        flow.push_str(&format!("  · {} sub-task{} going", thread.active_children, if thread.active_children == 1 { "" } else { "s" }));
+    }
     let Some(t) = &thread.task else {
         let card = if thread.card.is_some() { "  · card open" } else { "" };
-        return format!("  {:<12} {:<24} {}{card}", thread.name, "", clip(&thread.title));
+        return format!("  {:<12} {:<24} {}{card}{flow}", thread.name, "", clip(&thread.title));
     };
     let f = &t.fields;
     let state = match t.state {
@@ -652,6 +686,7 @@ fn thread_line(thread: &Thread, me: &str) -> String {
         Some(RunState::Running) => extra.push("running".to_string()),
         Some(RunState::Waiting) => extra.push("waiting on sub-tasks".into()),
         Some(RunState::Failing) => extra.push("retrying".into()),
+        Some(RunState::Paused) => extra.push("stopped; arity continue".into()),
         Some(RunState::NeedsRating) => extra.push(format!("needs rating (run {})", t.run.unwrap_or_default())),
         Some(RunState::Rated) => extra.push(format!("rated {}/5", t.score.unwrap_or_default())),
         None => {}
@@ -677,7 +712,7 @@ fn thread_line(thread: &Thread, me: &str) -> String {
         extra.push(format!("from {origin}"));
     }
     let extra = if extra.is_empty() { String::new() } else { format!("  · {}", extra.join(" · ")) };
-    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}", thread.name, t.id, state, who, clip(&f.title))
+    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}{flow}", thread.name, t.id, state, who, clip(&f.title))
 }
 
 fn first_sentence(s: &str) -> String {

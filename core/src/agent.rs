@@ -8,7 +8,7 @@
 //! as `"system"` delta entries only when changed.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::json;
@@ -25,12 +25,25 @@ use crate::{Event, messages_of};
 
 const MAX_STEPS: usize = 24;
 
+/// How long to wait before each retry of a model call that failed for a
+/// passing reason (see `is_transient_error`), before jitter. Tests wait not at all.
+const RETRY_DELAYS: [Duration; 3] = if cfg!(test) {
+    [Duration::ZERO; 3]
+} else {
+    [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)]
+};
+
+/// What the model is told, for one call only, when asked to carry on a reply that was cut off.
+const CARRY_ON: &str = "Your previous reply was cut off before it was finished. Carry on from where it stopped, without repeating it.";
+
 /// The runtime harness: registered tools and write-capable lifecycle hooks.
 pub struct Harness {
     pub tools: ToolRegistry,
     pub hooks: HookRegistry,
     /// Compact before a model call once the latest prompt reached this many tokens. None: only on overflow.
     pub auto_compact_tokens: Option<u64>,
+    /// The wait before each retry of a model call that failed for a passing reason; one retry per entry.
+    pub retry_delays: Vec<Duration>,
 }
 
 impl Default for Harness {
@@ -39,6 +52,7 @@ impl Default for Harness {
             tools: ToolRegistry::default(),
             hooks: HookRegistry::default(),
             auto_compact_tokens: Some(crate::config::DEFAULT_AUTO_COMPACT_TOKENS),
+            retry_delays: RETRY_DELAYS.to_vec(),
         }
     }
 }
@@ -52,7 +66,97 @@ impl Harness {
             auto_compact_tokens: crate::config::load(data_dir)
                 .map(|c| c.auto_compact_tokens)
                 .unwrap_or(Some(crate::config::DEFAULT_AUTO_COMPACT_TOKENS)),
+            retry_delays: RETRY_DELAYS.to_vec(),
         }
+    }
+}
+
+/// Whether a failed model call is worth trying again in a moment: rate limits,
+/// server errors and dropped connections. A refused key, a bad request, a
+/// missing key or a prompt too long for the model fail the same way every time.
+pub fn is_transient_error(e: &anyhow::Error) -> bool {
+    if compact::is_context_overflow(e) {
+        return false;
+    }
+    let text = format!("{e:#}").to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let status = |codes: &[&str]| codes.iter().any(|c| words.contains(c));
+    let says = |phrases: &[&str]| phrases.iter().any(|p| text.contains(p));
+    if status(&["400", "401", "403", "404", "422"])
+        || says(&[
+            "unauthorized",
+            "forbidden",
+            "api key",
+            "api_key",
+            "invalid_request",
+            "invalid request",
+            "insufficient_quota",
+            "not signed in",
+            "connection refused",
+            "refused connection",
+        ])
+    {
+        return false;
+    }
+    status(&["429", "500", "502", "503", "504", "529"])
+        || says(&[
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "overloaded",
+            "internal server error",
+            "server_error",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "connection reset",
+            "connection closed",
+            "connection aborted",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "temporary failure",
+            "unexpected eof",
+            "error decoding response body",
+        ])
+}
+
+/// Wait `wait`, unless the turn is stopped or steered first. True if the whole wait passed.
+fn wait_unless_stopped(wait: Duration, live: &crate::turn::Live) -> bool {
+    let until = Instant::now() + wait;
+    loop {
+        if live.stopped() {
+            return false;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(20)));
+    }
+}
+
+/// Where a conversation stopped short of an answer that the next step would
+/// not give by itself: a reply cut off by Stop, or a compact asked for between
+/// turns. Continuing asks the model once more from there.
+pub(crate) fn cut_short(chain: &[Entry]) -> bool {
+    let Some(last) = chain.iter().rev().find(|e| e.kind != "system") else { return false };
+    match last.kind.as_str() {
+        "assistant" => last.body["interrupted"] == true && tool_calls_of(&last.body).is_empty(),
+        "compact" => last.body["continue"] != true,
+        _ => false,
+    }
+}
+
+/// Whether the next step of `chain` asks for the model or a tool by itself: an
+/// unanswered message, report, notice or tool call.
+pub(crate) fn owes_a_step(chain: &[Entry]) -> bool {
+    let Some(last) = chain.iter().rev().find(|e| e.kind != "system") else { return false };
+    match next_step(chain) {
+        Step::RunTool(_) => true,
+        Step::CallModel => matches!(last.kind.as_str(), "user" | "report" | "message" | "notice" | "tool"),
+        _ => false,
     }
 }
 
@@ -61,8 +165,10 @@ impl Harness {
 pub enum Outcome {
     /// Another loop holds the conversation; nothing was done.
     Busy,
-    /// A chat's turn ended, or someone stopped the turn.
+    /// A chat's turn ended.
     Ended,
+    /// Someone stopped the turn part way. A run is not finished by it.
+    Stopped,
     /// A run called finish; this is its report.
     Finished(String),
     /// A run stopped with sub-tasks out, to be woken by their results.
@@ -110,23 +216,31 @@ pub type Complete<'a> = dyn Fn(&str, &[Entry], &[ToolSpec], &mut Sink) -> Result
 /// it runs out of steps. `on` sees the reply's text as it arrives and every
 /// message as it is written.
 pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
+    run_from(db, data_dir, conv, spec, false, on)
+}
+
+/// As `run`; `continuing` also asks the model again where the conversation was cut short (see `cut_short`).
+pub fn run_from(db: &Journal, data_dir: &Path, conv: &str, spec: &str, continuing: bool, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
     let session_id = crate::journal::session_id(db.conn(), conv)?;
     let model = Model::parse(spec, data_dir, &session_id)?;
     let harness = Harness::for_data_dir(data_dir);
-    run_with_harness(
+    run_turn(
         db,
         conv,
         spec,
         &harness,
         &|system, chain, tools, out| model.complete(system, chain, tools, out),
+        continuing,
         on,
     )
 }
 
+#[cfg(test)]
 pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
     run_with_harness(db, conv, spec, &Harness::default(), complete, on)
 }
 
+#[cfg(test)]
 pub fn run_with_harness(
     db: &Journal,
     conv: &str,
@@ -135,6 +249,28 @@ pub fn run_with_harness(
     complete: &Complete,
     on: &mut dyn FnMut(Event),
 ) -> Result<Outcome> {
+    run_turn(db, conv, spec, harness, complete, false, on)
+}
+
+/// A model call's end: its reply, or a stop or steer that came while it waited to retry.
+enum Called {
+    Reply(Reply),
+    Interrupted,
+}
+
+/// The loop. With `continuing`, a conversation cut short (see `cut_short`) is
+/// answered once more, as if the cut never happened; nothing is written to
+/// ask for it.
+pub fn run_turn(
+    db: &Journal,
+    conv: &str,
+    spec: &str,
+    harness: &Harness,
+    complete: &Complete,
+    continuing: bool,
+    on: &mut dyn FnMut(Event),
+) -> Result<Outcome> {
+    let mut continuing = continuing;
     let Some(mut lease) = Lease::take(db, conv, spec)? else { return Ok(Outcome::Busy) };
     let trial = board::trial_state(db.conn(), conv)?;
     let worker = trial.is_some();
@@ -160,13 +296,18 @@ pub fn run_with_harness(
             } else if lease.live.stopped() {
                 lease.release(db, true)?;
                 show(&mut shown, on)?;
-                return Ok(Outcome::Ended);
+                return Ok(Outcome::Stopped);
             }
             lease.drain(db)?;
             chain = db.chain(conv)?;
         }
         show(&mut shown, on)?;
-        match next_step(&chain) {
+        let mut step = next_step(&chain);
+        let carry_on = std::mem::take(&mut continuing) && matches!(step, Step::Done) && cut_short(&chain);
+        if carry_on {
+            step = Step::CallModel;
+        }
+        match step {
             Step::CallModel => {
                 let folder = board::folder_of(db.conn(), conv)?;
                 let state = PromptState {
@@ -194,22 +335,58 @@ pub fn run_with_harness(
                 }
                 let vis = ToolVisibility { caller: tools::caller(db.conn(), conv)?, folder };
                 let specs = harness.tools.specs(&vis);
-                let mut clock = Stopwatch::start();
-                let mut out = |text: &str| {
-                    if !text.is_empty() {
-                        clock.text(text);
-                        live.push(text);
-                        on(Event::Text(text));
+                // Carrying on a cut-off reply: the model is told so for this call only.
+                if carry_on && chain.iter().rev().find(|e| e.kind != "system").is_some_and(|e| e.kind == "assistant") {
+                    view.push(Entry { id: i64::MAX, kind: "system".into(), body: json!({ "text": CARRY_ON }), model: None });
+                }
+                let mut clock: Stopwatch;
+                let mut tries = 0;
+                let called = loop {
+                    clock = Stopwatch::start();
+                    let result = {
+                        let mut out = |text: &str| {
+                            if !text.is_empty() {
+                                clock.text(text);
+                                live.push(text);
+                                on(Event::Text(text));
+                            }
+                            !live.stopped()
+                        };
+                        match complete(system, &view, &specs, &mut out) {
+                            // Too long for the model: compact, then try once more.
+                            Err(e) if compact::is_context_overflow(&e) => match compact_now() {
+                                Ok(compacted) => {
+                                    view = compacted;
+                                    complete(system, &view, &specs, &mut out)
+                                }
+                                Err(ce) => Err(e.context(format!("the context was too long, and compacting it failed: {ce:#}"))),
+                            },
+                            r => r,
+                        }
+                    };
+                    match result {
+                        Ok(reply) => break Called::Reply(reply),
+                        // A passing failure: wait a little longer each time, unless stopped or steered meanwhile.
+                        Err(e) if tries < harness.retry_delays.len() && is_transient_error(&e) => {
+                            let wait = harness.retry_delays[tries].mul_f64(1.0 + rand::random::<f64>() * 0.25);
+                            tries += 1;
+                            live.clear_text();
+                            if !wait_unless_stopped(wait, &live) {
+                                break Called::Interrupted;
+                            }
+                        }
+                        Err(e) => return Err(e),
                     }
-                    !live.stopped()
                 };
-                let reply = match complete(system, &view, &specs, &mut out) {
-                    // Too long for the model: compact, then try once more.
-                    Err(e) if compact::is_context_overflow(&e) => {
-                        view = compact_now().map_err(|ce| e.context(format!("the context was too long, and compacting it failed: {ce:#}")))?;
-                        complete(system, &view, &specs, &mut out)?
+                let reply = match called {
+                    Called::Reply(reply) => reply,
+                    // A steer: the top of the loop takes it in and asks again.
+                    Called::Interrupted if lease.live.cut_for_steer() => continue,
+                    Called::Interrupted => {
+                        lease.release(db, true)?;
+                        show(&mut shown, on)?;
+                        return Ok(Outcome::Stopped);
                     }
-                    r => r?,
                 };
                 let mut body = reply.to_json();
                 if reply.interrupted && lease.live.cut_for_steer() {
@@ -224,7 +401,7 @@ pub fn run_with_harness(
                 if reply.interrupted && !lease.live.cut_for_steer() {
                     lease.release(db, true)?;
                     show(&mut shown, on)?;
-                    return Ok(Outcome::Ended);
+                    return Ok(Outcome::Stopped);
                 }
             }
             Step::RunTool(call) => {
@@ -499,7 +676,7 @@ mod tests {
         turn::send(&db, "c", "write a long story")?;
         let turn = std::thread::spawn({
             let path = path.clone();
-            move || -> Result<bool> {
+            move || -> Result<Outcome> {
                 let db = Journal::open(&path)?;
                 // Writes a little, then a tool call starts arriving; it never finishes before the stop.
                 let model = |_: &str, _: &[Entry], _: &[ToolSpec], out: &mut Sink| {
@@ -509,12 +686,12 @@ mod tests {
                     }
                     Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true, usage: None })
                 };
-                turn_on(&db, "c", "test:m", &model, &mut |_| {})
+                run_with(&db, "c", "test:m", &model, &mut |_| {})
             }
         });
         until("the reply to start", || turn::partial(db.conn(), "c").unwrap().is_some());
         assert!(turn::stop(db.conn(), "c")?, "a turn was running");
-        assert!(turn.join().unwrap()?);
+        assert_eq!(turn.join().unwrap()?, Outcome::Stopped);
         let chain = db.chain("c")?;
         let first_reply = chain.iter().find(|e| e.kind == "assistant").unwrap();
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
@@ -820,6 +997,152 @@ mod tests {
         let sys_entries: Vec<Entry> = db.chain("chat-1")?.into_iter().filter(|e| e.kind == "system").collect();
         assert_eq!(sys_entries.len(), 2, "initial date delta + card-opened delta only");
         assert!(sys_entries[1].body["text"].as_str().unwrap().contains("Ship harness"));
+        Ok(())
+    }
+
+    #[test]
+    fn passing_failures_are_told_from_lasting_ones() {
+        let transient = [
+            "429 Too Many Requests: {\"error\":{\"message\":\"Rate limit reached\"}}",
+            "500 Internal Server Error: oops",
+            "502 Bad Gateway: ",
+            "503 Service Unavailable: overloaded",
+            "504 Gateway Timeout: ",
+            "error decoding response body: connection reset by peer",
+            "error sending request: operation timed out",
+            "Broken pipe (os error 32)",
+            "dns error: Temporary failure in name resolution",
+        ];
+        for msg in transient {
+            assert!(is_transient_error(&anyhow::anyhow!("{msg}")), "{msg}");
+        }
+        let lasting = [
+            "401 Unauthorized: invalid key",
+            "403 Forbidden: ",
+            "400 Bad Request: {\"error\":{\"code\":\"invalid_request_error\"}}",
+            "nous has no API key; run `arity key set nous` or add one in Settings",
+            "400 Bad Request: maximum context length is 8192 tokens, you asked for 9000 (server said 503 once)",
+            "429 Too Many Requests: {\"error\":{\"code\":\"insufficient_quota\"}}",
+            "secret:worker-7b refused connection on 127.0.0.1:9999",
+            "model must be <provider>:<id>",
+        ];
+        for msg in lasting {
+            assert!(!is_transient_error(&anyhow::anyhow!("{msg}")), "{msg}");
+        }
+    }
+
+    /// A model call that fails for a passing reason is tried again, with the
+    /// text it streamed before failing dropped; a lasting failure is not.
+    #[test]
+    fn a_passing_failure_is_retried_and_a_lasting_one_is_not() -> Result<()> {
+        let db = Journal::open(&scratch("retry"))?;
+        turn::send(&db, "c", "hi")?;
+        let asked = AtomicUsize::new(0);
+        let flaky = |_: &str, _: &[Entry], _: &[ToolSpec], out: &mut Sink| {
+            if asked.fetch_add(1, SeqCst) == 0 {
+                out("Hel");
+                bail!("503 Service Unavailable: overloaded");
+            }
+            out("Hello");
+            Ok(says("Hello"))
+        };
+        let mut streamed = String::new();
+        let outcome = run_with(&db, "c", "test:m", &flaky, &mut |e| {
+            if let Event::Text(t) = e {
+                streamed.push_str(t)
+            }
+        })?;
+        assert_eq!((outcome, asked.load(SeqCst)), (Outcome::Ended, 2), "succeeds on the second try");
+        assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
+        assert_eq!(db.chain("c")?.last().unwrap().body["text"], "Hello");
+        assert_eq!(streamed, "HelHello", "the failed try's text was shown, then dropped from the reply");
+
+        for lasting in ["401 Unauthorized: bad key", "400 Bad Request: unknown parameter"] {
+            turn::send(&db, "c", "again")?;
+            asked.store(0, SeqCst);
+            let refused = |_: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| -> Result<Reply> {
+                asked.fetch_add(1, SeqCst);
+                bail!("{lasting}")
+            };
+            assert!(run_with(&db, "c", "test:m", &refused, &mut |_| {}).is_err());
+            assert_eq!(asked.load(SeqCst), 1, "{lasting} is not retried");
+        }
+
+        // Retries run out: three, then the failure stands.
+        asked.store(0, SeqCst);
+        let down = |_: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| -> Result<Reply> {
+            asked.fetch_add(1, SeqCst);
+            bail!("502 Bad Gateway: ")
+        };
+        let err = run_with(&db, "c", "test:m", &down, &mut |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("502"));
+        assert_eq!(asked.load(SeqCst), 1 + RETRY_DELAYS.len());
+        assert!(turn::running(db.conn())?.is_empty(), "the lease was let go");
+        Ok(())
+    }
+
+    /// Stop during the wait before a retry ends the turn at once, as stopped, with nothing written.
+    #[test]
+    fn a_stop_during_the_backoff_cancels_the_retry() -> Result<()> {
+        let path = scratch("retry-stop");
+        let db = Journal::open(&path)?;
+        turn::send(&db, "c", "hi")?;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let turn = std::thread::spawn({
+            let (path, asked) = (path.clone(), asked.clone());
+            move || -> Result<(Outcome, Duration)> {
+                let db = Journal::open(&path)?;
+                let harness = Harness { retry_delays: vec![Duration::from_secs(30); 3], ..Harness::default() };
+                let model = |_: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| -> Result<Reply> {
+                    asked.fetch_add(1, SeqCst);
+                    bail!("429 Too Many Requests: slow down")
+                };
+                let start = Instant::now();
+                let outcome = run_with_harness(&db, "c", "test:m", &harness, &model, &mut |_| {})?;
+                Ok((outcome, start.elapsed()))
+            }
+        });
+        until("the first try to fail", || asked.load(SeqCst) == 1);
+        assert!(turn::stop(db.conn(), "c")?);
+        let (outcome, took) = turn.join().unwrap()?;
+        assert_eq!(outcome, Outcome::Stopped);
+        assert!(took < Duration::from_secs(5), "took {took:?}, not the 30 s backoff");
+        assert_eq!(asked.load(SeqCst), 1, "no retry after the stop");
+        assert_eq!(kinds(&db, "c"), ["user"], "nothing written; the message waits to be continued");
+        assert!(owes_a_step(&db.chain("c")?));
+        Ok(())
+    }
+
+    /// Continuing a reply cut off by Stop asks the model once more, telling it
+    /// so for that call only; nothing is written to ask for it. Without
+    /// continuing, a cut-off reply is where the turn ends.
+    #[test]
+    fn continuing_carries_on_a_cut_off_reply_without_writing_a_message() -> Result<()> {
+        let db = Journal::open(&scratch("continue"))?;
+        db.append("c", "user", &json!({ "text": "write a long story" }), None)?;
+        db.append("c", "assistant", &json!({ "text": "Once upon", "interrupted": true }), Some("test:m"))?;
+        assert!(cut_short(&db.chain("c")?) && !owes_a_step(&db.chain("c")?));
+        assert_eq!(run_with(&db, "c", "test:m", &|_, _, _, _| panic!("a plain turn has nothing to answer"), &mut |_| {})?, Outcome::Ended);
+
+        let model = |_: &str, view: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            assert_eq!(view.last().unwrap().body["text"], CARRY_ON, "a note for this call comes last");
+            let said = view.iter().rev().find(|e| e.kind != "system").unwrap();
+            assert_eq!((said.kind.as_str(), said.body["text"].as_str()), ("assistant", Some("Once upon")));
+            Ok(says("a time, there was a cat."))
+        };
+        assert_eq!(run_turn(&db, "c", "test:m", &Harness::default(), &model, true, &mut |_| {})?, Outcome::Ended);
+        assert_eq!(kinds(&db, "c"), ["user", "assistant", "assistant"], "no user message was added");
+        assert!(db.chain("c")?.iter().all(|e| e.body["text"] != CARRY_ON), "the note is never written");
+        assert!(!cut_short(&db.chain("c")?), "answered now");
+
+        // A compact asked for between turns can be continued too; it adds no note.
+        db.append("c", "compact", &json!({ "summary": "a cat story", "compacted_count": 3 }), None)?;
+        assert!(cut_short(&db.chain("c")?));
+        let after_compact = |_: &str, view: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            assert!(view.iter().all(|e| e.body["text"] != CARRY_ON));
+            Ok(says("Where were we?"))
+        };
+        assert_eq!(run_turn(&db, "c", "test:m", &Harness::default(), &after_compact, true, &mut |_| {})?, Outcome::Ended);
         Ok(())
     }
 }
