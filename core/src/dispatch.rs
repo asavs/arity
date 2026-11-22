@@ -304,6 +304,26 @@ fn wake_settled(c: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// `work_once_with`, with runs on a scripted model instead of a real one. For
+/// tests that drive the whole dispatcher without a network.
+#[cfg(test)]
+pub(crate) fn work_once_scripted(db: &Journal, data_dir: &Path, reach: &[Candidate], complete: &agent::Complete) -> Result<Did> {
+    if let Some(did) = deliver_report(db)? {
+        return Ok(did);
+    }
+    db.immediate(wake_settled)?;
+    let Some((trial, task, conv, model)) = db.immediate(|c| claim(c, data_dir, reach))? else {
+        return Ok(Did::Nothing);
+    };
+    let mut renew = |_: crate::Event| {
+        let _ = db.conn().execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS]);
+    };
+    match agent::run_with(db, &conv, &model, complete, &mut renew)? {
+        agent::Outcome::Busy => anyhow::bail!("another turn is running in {conv}"),
+        outcome => settle(db, trial, task, &conv, false, outcome),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

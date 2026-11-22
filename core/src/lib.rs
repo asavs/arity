@@ -897,4 +897,192 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
+
+    /// The whole loop on scripted models: a chat delegates, a blindly picked
+    /// worker hands part on and waits, the sub-task's run is killed after a
+    /// committed tool call and taken over from the journal without repeating
+    /// it, the parent rates the sub-task and finishes, and the result waits in
+    /// the chat for the user. No model name shows before the user rates, except
+    /// through `reveal`.
+    #[test]
+    fn scripted_end_to_end_survives_a_crash_and_stays_blind_until_rated() -> anyhow::Result<()> {
+        use crate::dispatch::{Did, work_once_scripted};
+        use crate::leaderboard::{Candidate, Reach};
+        use std::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let dir = std::env::temp_dir().join(format!("arity-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        // The two workers; the local server points nowhere, so `leaderboard` stays offline.
+        std::fs::write(
+            dir.join("config.json"),
+            json!({ "workers": ["secret-a:alpha", "secret-b:beta"], "providers": { "mlx": { "url": "http://127.0.0.1:9/v1" } } })
+                .to_string(),
+        )?;
+        let arity = Arity::new(Some(dir.to_string_lossy().into_owned()));
+        let db = arity.journal()?;
+        let only = |m: &str| vec![Candidate { model: m.into(), reach: Reach::Local }];
+
+        let call = |name: &str, args: serde_json::Value| Reply {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("{name}-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() }],
+            interrupted: false,
+        };
+        let says = |text: &str| Reply { text: text.into(), tool_calls: vec![], interrupted: false };
+        let last_tool = |chain: &[Entry]| {
+            let e = chain.last().unwrap();
+            (e.kind.clone(), e.body["name"].as_str().unwrap_or_default().to_string(), e.body["output"].as_str().unwrap_or_default().to_string())
+        };
+
+        // The chat's model: hands the work to an agent, then says so.
+        let chat_calls = Cell::new(0);
+        let chat = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            chat_calls.set(chat_calls.get() + 1);
+            Ok(match last_tool(chain).0.as_str() {
+                "user" => call("add_task", json!({ "title": "Check the sources", "brief": "Check every citation in draft.md.", "assignee": "agent" })),
+                "tool" => says("Handed to an agent."),
+                other => panic!("chat-1 woken by {other}"),
+            })
+        };
+
+        // Both workers, told apart by their brief. Worker 2 is killed on its second call, once.
+        let crash = Cell::new(true);
+        let worker_2_calls = Cell::new(0);
+        let workers = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            let brief = chain[0].body["text"].as_str().unwrap_or_default();
+            let (kind, name, output) = last_tool(chain);
+            if brief.starts_with("Check the sources") {
+                return Ok(match (kind.as_str(), name.as_str()) {
+                    ("user", _) => call(
+                        "add_task",
+                        json!({ "title": "Verify footnote 3", "brief": "Does footnote 3 match its source?", "assignee": "agent" }),
+                    ),
+                    ("tool", "add_task") => says("Waiting for the footnote check."),
+                    // Tries to finish before rating the sub-task's result.
+                    ("report", _) => call("finish", json!({ "report": "Sources verified." })),
+                    ("tool", "finish") if output.starts_with("error") => call("rate", json!({ "task": 2, "score": 4, "note": "solid" })),
+                    ("tool", "rate") => call("finish", json!({ "report": "All sources verified; footnote 3 holds." })),
+                    other => panic!("task-1 did not expect {other:?}"),
+                });
+            }
+            worker_2_calls.set(worker_2_calls.get() + 1);
+            Ok(match (kind.as_str(), name.as_str()) {
+                ("user", _) => call("add_task", json!({ "title": "Note the page number" })),
+                ("tool", "add_task") if crash.replace(false) => panic!("the dispatcher's process is killed"),
+                ("tool", "add_task") => call("complete_task", json!({ "id": 3 })),
+                ("tool", "complete_task") => call("finish", json!({ "report": "Footnote 3 matches page 12." })),
+                other => panic!("task-2 did not expect {other:?}"),
+            })
+        };
+
+        // 1. chat-1 delegates task 1; the dispatcher claims it onto task-1 with a blind pick.
+        turn::send_as(&db, "chat-1", "Please check the sources in draft.md.", Delivery::Steer)?;
+        arity.run_resolved(&db, "chat-1", "chat:front", Some(&chat), &mut |_| {})?;
+        assert_eq!(chat_calls.get(), 2);
+        let t1 = board::task(db.conn(), 1)?;
+        assert_eq!((t1.fields.assignee.as_str(), t1.origin.as_deref()), ("agent", Some("chat-1")));
+        let did = work_once_scripted(&db, &dir, &only("secret-a:alpha"), &workers)?;
+        assert!(matches!(did, Did::Waiting { task: 1, trial: 1 }), "{:?}", did.describe());
+
+        // 2. Worker 1 filed task 2 and ended its turn: it waits, holding no lease.
+        let thread = |name: &str| arity.threads().unwrap().into_iter().find(|t| t.name == name).unwrap();
+        assert_eq!(thread("task-1").task.unwrap().run_state, Some(RunState::Waiting));
+        let lease = |conv: &str| -> i64 {
+            db.conn().query_row("SELECT lease_until FROM trials WHERE conversation = ?1", [conv], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(lease("task-1"), 0);
+        assert_eq!(board::task(db.conn(), 2)?.created_by, "conversations/task-1");
+
+        // 3. Worker 2 claims task 2, at the floor, commits one tool call, and its process dies.
+        let killed = catch_unwind(AssertUnwindSafe(|| work_once_scripted(&db, &dir, &only("secret-b:beta"), &workers)));
+        assert!(killed.is_err(), "the run was killed mid-turn");
+        assert_eq!(board::run_depth(db.conn(), "task-2")?, Some(board::MAX_DEPTH));
+        assert_eq!(worker_2_calls.get(), 2);
+        // A killed process leaves its turn lease behind, and its run's lease, last renewed 30 s ago, minutes to go.
+        db.conn().execute(
+            "INSERT OR REPLACE INTO turns (conversation, owner, lease_until) VALUES ('task-2', 'dead', ?1)",
+            rusqlite::params![board::now() + 10],
+        )?;
+        db.conn().execute(
+            "UPDATE trials SET lease_until = ?1 WHERE conversation = 'task-2'",
+            rusqlite::params![board::now() + board::LEASE_SECS - 30],
+        )?;
+        assert!(matches!(work_once_scripted(&db, &dir, &only("secret-b:beta"), &workers)?, Did::Nothing), "alive until its turn lease lapses");
+        db.conn().execute("UPDATE turns SET lease_until = ?1 WHERE conversation = 'task-2'", rusqlite::params![board::now() - 1])?;
+        assert!(lease("task-2") > board::now() + 60, "the run's own lease still has minutes left");
+        // Taken over from the journal: the committed call is not made again.
+        let did = work_once_scripted(&db, &dir, &[], &workers)?;
+        assert!(matches!(did, Did::Ran { task: 2, trial: 2 }), "{:?}", did.describe());
+        assert_eq!(worker_2_calls.get(), 4, "two calls after the restart, not three");
+        let chain2 = db.chain("task-2")?;
+        assert_eq!(chain2.iter().filter(|e| e.kind == "tool" && e.body["name"] == "add_task").count(), 1);
+        let todos: i64 = db.conn().query_row("SELECT count(*) FROM tasks WHERE title = 'Note the page number'", [], |r| r.get(0))?;
+        assert_eq!(todos, 1, "the todo was filed once");
+        let trials: i64 = db.conn().query_row("SELECT count(*) FROM trials WHERE task = 2", [], |r| r.get(0))?;
+        assert_eq!(trials, 1, "the same run carried on");
+
+        // 4. The report wakes task-1, which is turned back from finishing until it rates task 2.
+        let did = work_once_scripted(&db, &dir, &[], &workers)?;
+        assert!(matches!(&did, Did::Reported { task: 2, rater: Some(r) } if r == "task-1"), "{:?}", did.describe());
+        let did = work_once_scripted(&db, &dir, &[], &workers)?;
+        assert!(matches!(did, Did::Ran { task: 1, trial: 1 }), "{:?}", did.describe());
+        let chain1 = db.chain("task-1")?;
+        let refused = chain1.iter().find(|e| e.kind == "tool" && e.body["name"] == "finish").unwrap();
+        assert!(refused.body["output"].as_str().unwrap().contains("rate the result of task 2"), "{:?}", refused.body);
+        let (score, note, by): (i64, String, String) =
+            db.conn().query_row("SELECT score, note, rated_by FROM ratings WHERE trial = 2", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        assert_eq!((score, note.as_str(), by.as_str()), (4, "solid", "conversations/task-1"));
+        // The final report lands in chat-1's inbox and wakes nothing.
+        let did = work_once_scripted(&db, &dir, &[], &workers)?;
+        assert!(matches!(did, Did::Reported { task: 1, rater: None }), "{:?}", did.describe());
+        assert!(matches!(work_once_scripted(&db, &dir, &[], &workers)?, Did::Nothing));
+        assert_eq!(chat_calls.get(), 2, "chat-1's model was not called again");
+        assert!(arity.running()?.is_empty());
+        let note = arity.messages("chat-1".into())?.pop().unwrap();
+        assert_eq!(note.kind, MessageKind::Report);
+        assert!(note.text.contains("All sources verified; footnote 3 holds."), "{}", note.text);
+        let t1 = thread("task-1");
+        assert_eq!((t1.group, t1.task.as_ref().unwrap().run_state), (ThreadGroup::NeedsYou, Some(RunState::NeedsRating)));
+
+        // 5. Before the user rates, nothing public names task 1's model.
+        let sweep = || -> anyhow::Result<String> {
+            Ok(format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                arity.threads()?,
+                arity.messages("chat-1".into())?,
+                arity.messages("task-1".into())?,
+                arity.runs()?,
+                arity.scores()?,
+                arity.last_model("task-1".into())?,
+                arity.leaderboard()?,
+            ))
+        };
+        let public = sweep()?;
+        assert!(!public.contains("secret-a") && !public.contains("alpha"), "{public}");
+        assert_eq!(arity.last_model("task-1".into())?, None);
+        // Run 2 is rated, by task-1's agent, so its model is open: the rule is "rated", not "rated by the user".
+        let runs = arity.runs()?;
+        assert_eq!(runs.iter().find(|r| r.id == 2).unwrap().model.as_deref(), Some("secret-b:beta"));
+        assert_eq!(runs.iter().find(|r| r.id == 1).unwrap().model, None);
+        assert_eq!(arity.scores()?.iter().map(|s| (s.model.as_str(), s.rated)).collect::<Vec<_>>(), [("secret-b:beta", 1)]);
+        assert!(arity.leaderboard()?.iter().any(|s| format!("{s:?}").contains("secret-b:beta")));
+        // reveal tells, and rates nothing.
+        assert_eq!(arity.reveal(1)?, "secret-a:alpha");
+        assert_eq!(thread("task-1").task.unwrap().run_state, Some(RunState::NeedsRating));
+        assert!(!sweep()?.contains("alpha"));
+
+        // 6. The user's rating opens it everywhere.
+        arity.rate(1, 5, "great".into())?;
+        let t1 = thread("task-1");
+        assert_eq!(t1.group, ThreadGroup::Done);
+        assert_eq!(t1.task.unwrap().model.as_deref(), Some("secret-a:alpha"));
+        assert!(arity.messages("task-1".into())?.iter().any(|m| m.model.as_deref() == Some("secret-a:alpha")));
+        assert_eq!(arity.runs()?.iter().find(|r| r.id == 1).unwrap().model.as_deref(), Some("secret-a:alpha"));
+        assert_eq!(arity.last_model("task-1".into())?.as_deref(), Some("secret-a:alpha"));
+        assert!(arity.scores()?.iter().any(|s| s.model == "secret-a:alpha" && s.rated == 1 && s.average == 5.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }
