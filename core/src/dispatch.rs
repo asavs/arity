@@ -531,6 +531,7 @@ mod tests {
             text: String::new(),
             tool_calls: vec![ToolCall { id: format!("{name}-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() }],
             interrupted: false,
+            usage: None,
         };
         let model = |_: &str, chain: &[crate::journal::Entry], _: &[crate::tools::ToolSpec], _: &mut crate::model::Sink| {
             let last = chain.iter().rev().find(|e| e.kind != "system").unwrap();
@@ -539,7 +540,7 @@ mod tests {
             }
             Ok(match (last.kind.as_str(), last.body["name"].as_str()) {
                 ("user", _) => call("add_task", json!({ "title": "find trains", "assignee": "agent", "brief": "List two." })),
-                ("tool", Some("add_task")) => Reply { text: "Waiting for the trains.".into(), tool_calls: vec![], interrupted: false },
+                ("tool", Some("add_task")) => Reply { text: "Waiting for the trains.".into(), tool_calls: vec![], interrupted: false, usage: None },
                 ("report", _) => call("finish", json!({ "report": "Take the 9:10." })),
                 other => panic!("unexpected {other:?}"),
             })

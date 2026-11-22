@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use crate::board;
+use crate::compact;
 use crate::hooks::{BeforeTool, HookCtx, HookRegistry, YieldAction};
 use crate::journal::{Entry, Journal};
 use crate::model::{Model, Reply, Sink, ToolCall, tool_calls_of};
@@ -28,6 +29,8 @@ const MAX_STEPS: usize = 24;
 pub struct Harness {
     pub tools: ToolRegistry,
     pub hooks: HookRegistry,
+    /// Compact before a model call once the latest prompt reached this many tokens. None: only on overflow.
+    pub auto_compact_tokens: Option<u64>,
 }
 
 impl Default for Harness {
@@ -35,6 +38,7 @@ impl Default for Harness {
         Self {
             tools: ToolRegistry::default(),
             hooks: HookRegistry::default(),
+            auto_compact_tokens: Some(crate::config::DEFAULT_AUTO_COMPACT_TOKENS),
         }
     }
 }
@@ -45,6 +49,9 @@ impl Harness {
         Self {
             tools: ToolRegistry::default(),
             hooks: HookRegistry::for_data_dir(data_dir),
+            auto_compact_tokens: crate::config::load(data_dir)
+                .map(|c| c.auto_compact_tokens)
+                .unwrap_or(Some(crate::config::DEFAULT_AUTO_COMPACT_TOKENS)),
         }
     }
 }
@@ -90,7 +97,9 @@ fn next_step(chain: &[Entry]) -> Step {
             }
         }
     }
-    if matches!(last.kind.as_str(), "assistant" | "rating") { Step::Done } else { Step::CallModel }
+    // A compact made part way through a turn carries on; one asked for between turns, or a reset, waits for the user.
+    let marker_waits = last.kind == "reset" || (last.kind == "compact" && last.body["continue"] != true);
+    if matches!(last.kind.as_str(), "assistant" | "rating") || marker_waits { Step::Done } else { Step::CallModel }
 }
 
 /// A model call: system prompt, chain and tools in, the reply streamed into the
@@ -167,11 +176,24 @@ pub fn run_with_harness(
                     folder: folder.clone(),
                     draft_card: (!worker).then(|| crate::draft::current(&chain).map(|c| c.describe())).flatten(),
                 };
-                if prompt::sync(db, conv, &state)? {
-                    chain = db.chain(conv)?;
+                prompt::sync(db, conv, &state)?;
+                let mut view = db.chain_for_model(conv)?;
+                let live = lease.live.clone();
+                // Only a real stop cuts a summary short; a steer waits for it and joins after.
+                let stopped = || live.stopped() && !live.cut_for_steer();
+                let compact_now = || -> Result<Vec<Entry>> {
+                    compact::compact(db, conv, complete, None, true, &stopped)?;
+                    prompt::sync(db, conv, &state)?;
+                    db.chain_for_model(conv)
+                };
+                if harness.auto_compact_tokens.is_some_and(|limit| compact::last_prompt_tokens(&view) >= limit) {
+                    // Past the threshold but not yet too long: a failed compact leaves the context as it was.
+                    if let Ok(compacted) = compact_now() {
+                        view = compacted;
+                    }
                 }
                 let vis = ToolVisibility { caller: tools::caller(db.conn(), conv)?, folder };
-                let live = lease.live.clone();
+                let specs = harness.tools.specs(&vis);
                 let mut clock = Stopwatch::start();
                 let mut out = |text: &str| {
                     if !text.is_empty() {
@@ -181,7 +203,14 @@ pub fn run_with_harness(
                     }
                     !live.stopped()
                 };
-                let reply = complete(system, &chain, &harness.tools.specs(&vis), &mut out)?;
+                let reply = match complete(system, &view, &specs, &mut out) {
+                    // Too long for the model: compact, then try once more.
+                    Err(e) if compact::is_context_overflow(&e) => {
+                        view = compact_now().map_err(|ce| e.context(format!("the context was too long, and compacting it failed: {ce:#}")))?;
+                        complete(system, &view, &specs, &mut out)?
+                    }
+                    r => r?,
+                };
                 let mut body = reply.to_json();
                 if reply.interrupted && lease.live.cut_for_steer() {
                     body["cut_for_message"] = json!(true);
@@ -317,7 +346,7 @@ mod tests {
     }
 
     fn says(text: &str) -> Reply {
-        Reply { text: text.into(), tool_calls: vec![], interrupted: false }
+        Reply { text: text.into(), tool_calls: vec![], interrupted: false, usage: None }
     }
 
     /// Waits until `f` holds, or fails after a few seconds.
@@ -340,7 +369,7 @@ mod tests {
     /// A reply that calls one tool.
     pub(crate) fn calls(name: &str, args: Value) -> Reply {
         let call = ToolCall { id: format!("call-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() };
-        Reply { text: String::new(), tool_calls: vec![call], interrupted: false }
+        Reply { text: String::new(), tool_calls: vec![call], interrupted: false, usage: None }
     }
 
     /// After a chat integrates a child's report in its reply, the post-use
@@ -478,7 +507,7 @@ mod tests {
                     while out("") {
                         std::thread::sleep(Duration::from_millis(20));
                     }
-                    Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true })
+                    Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true, usage: None })
                 };
                 turn_on(&db, "c", "test:m", &model, &mut |_| {})
             }
@@ -524,7 +553,7 @@ mod tests {
                     while out("") {
                         std::thread::sleep(Duration::from_millis(20));
                     }
-                    Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true })
+                    Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true, usage: None })
                 };
                 run_with(&db, "c", "test:m", &model, &mut |_| {})
             }
@@ -600,6 +629,123 @@ mod tests {
         assert!(turn_on(&db, "c", "test:m", &|_, _, _, _| Ok(says("here")), &mut |_| {})?);
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
         assert!(turn::running(db.conn())?.is_empty());
+        Ok(())
+    }
+
+    fn says_with(text: &str, input: u64, cached: u64) -> Reply {
+        let usage = crate::model::TokenUsage { input, cached, output: 7, total: input + 7 };
+        Reply { usage: Some(usage), ..says(text) }
+    }
+
+    /// A conversation with two answered exchanges whose replies report usage, never compacted.
+    fn two_exchanges(db: &Journal, conv: &str, input: u64) -> Result<()> {
+        let harness = Harness { auto_compact_tokens: None, ..Harness::default() };
+        for (i, text) in ["first", "second"].iter().enumerate() {
+            turn::send(db, conv, text)?;
+            let reply = format!("re: {text}");
+            run_with_harness(db, conv, "test:m", &harness, &|_, _, _, _| Ok(says_with(&reply, input + i as u64, input / 2)), &mut |_| {})?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replies_keep_their_token_usage_in_the_journal() -> Result<()> {
+        let db = Journal::open(&scratch("usage"))?;
+        two_exchanges(&db, "c", 1000)?;
+        let replies: Vec<Entry> = db.chain("c")?.into_iter().filter(|e| e.kind == "assistant").collect();
+        assert_eq!(replies[1].body["usage"], json!({ "input": 1001, "cached": 500, "output": 7, "total": 1008 }));
+        turn::send(&db, "c", "third")?;
+        run_with(&db, "c", "test:m", &|_, _, _, _| Ok(says("no usage")), &mut |_| {})?;
+        assert!(db.chain("c")?.last().unwrap().body.get("usage").is_none(), "None writes nothing");
+        Ok(())
+    }
+
+    /// A model whose context fits only once compacted: the turn compacts, retries, and answers.
+    #[test]
+    fn a_context_length_error_compacts_and_retries_once() -> Result<()> {
+        let db = Journal::open(&scratch("overflow"))?;
+        two_exchanges(&db, "c", 1000)?;
+        turn::send(&db, "c", "third")?;
+        let views = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let model = |system: &str, chain: &[Entry], tools: &[ToolSpec], _: &mut Sink| {
+            if system == compact::SUMMARIZER_SYSTEM {
+                assert!(tools.is_empty());
+                let asked = chain[0].body["text"].as_str().unwrap();
+                assert!(asked.contains("User: first") && asked.contains("Assistant: re: second") && asked.contains("User: third"));
+                return Ok(says("## Goal\nAnswer three messages."));
+            }
+            views.borrow_mut().push(chain.iter().map(|e| e.kind.clone()).collect());
+            if chain[0].kind != "compact" {
+                bail!("400 Bad Request: {{\"error\":{{\"code\":\"context_length_exceeded\",\"message\":\"This model's maximum context length is 8192 tokens\"}}}}");
+            }
+            Ok(says("re: third"))
+        };
+        assert_eq!(run_with(&db, "c", "test:m", &model, &mut |_| {})?, Outcome::Ended);
+        let views = views.borrow();
+        assert_eq!(views.len(), 2, "one failed call, one retry");
+        assert_eq!(views[1][..2], ["compact", "system"], "the summary, then the sections sent again");
+        assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant", "user", "compact", "assistant"]);
+        let compact = db.chain("c")?.into_iter().find(|e| e.kind == "compact").unwrap();
+        assert_eq!((compact.body["continue"].clone(), compact.body["compacted_count"].clone()), (json!(true), json!(5)));
+        assert!(messages_of(&compact)[0].text.starts_with("Context compacted automatically"));
+
+        // A model that still overflows after compacting fails the turn with both errors, not a loop.
+        turn::send(&db, "c", "fourth")?;
+        let always = |system: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            if system == compact::SUMMARIZER_SYSTEM {
+                return Ok(says("summary"));
+            }
+            bail!("maximum context length exceeded")
+        };
+        let err = run_with(&db, "c", "test:m", &always, &mut |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("maximum context length"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_prompt_past_the_threshold_is_compacted_before_the_call() -> Result<()> {
+        let db = Journal::open(&scratch("threshold"))?;
+        two_exchanges(&db, "c", 130_000)?;
+        turn::send(&db, "c", "third")?;
+        let first_seen = std::cell::RefCell::new(None::<String>);
+        let model = |system: &str, chain: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            if system == compact::SUMMARIZER_SYSTEM {
+                return Ok(says("## Goal\nKeep going."));
+            }
+            first_seen.borrow_mut().get_or_insert(chain[0].kind.clone());
+            Ok(says_with("re: third", 900, 0))
+        };
+        assert_eq!(run_with(&db, "c", "test:m", &model, &mut |_| {})?, Outcome::Ended);
+        assert_eq!(first_seen.borrow().as_deref(), Some("compact"), "the model never saw the long context");
+        assert_eq!(compact::last_prompt_tokens(&db.chain_for_model("c")?), 900);
+
+        // Below the threshold, or with it turned off, nothing is compacted.
+        let db = Journal::open(&scratch("threshold-off"))?;
+        two_exchanges(&db, "c", 130_000)?;
+        turn::send(&db, "c", "third")?;
+        let harness = Harness { auto_compact_tokens: None, ..Harness::default() };
+        let plain = |system: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            assert_ne!(system, compact::SUMMARIZER_SYSTEM);
+            Ok(says("re: third"))
+        };
+        run_with_harness(&db, "c", "test:m", &harness, &plain, &mut |_| {})?;
+        assert!(!kinds(&db, "c").contains(&"compact".to_string()));
+        Ok(())
+    }
+
+    /// After a compact asked for between turns, the turn ends; a reset does too. Neither calls the model.
+    #[test]
+    fn a_marker_at_the_head_waits_for_the_next_message() -> Result<()> {
+        let db = Journal::open(&scratch("marker-waits"))?;
+        two_exchanges(&db, "c", 10)?;
+        for (kind, body) in [("compact", json!({ "summary": "s", "compacted_count": 4 })), ("reset", json!({ "note": null }))] {
+            db.append("c", kind, &body, None)?;
+            assert!(matches!(next_step(&db.chain("c")?), Step::Done), "{kind}");
+            let outcome = run_with(&db, "c", "test:m", &|_, _, _, _| panic!("nothing to answer"), &mut |_| {})?;
+            assert_eq!(outcome, Outcome::Ended);
+        }
+        db.append("c", "compact", &json!({ "summary": "s", "continue": true }), None)?;
+        assert!(matches!(next_step(&db.chain("c")?), Step::CallModel), "a compact made mid-turn carries on");
         Ok(())
     }
 

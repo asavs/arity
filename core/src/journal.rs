@@ -11,7 +11,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: i64,
-    pub kind: String, // "user" | "assistant" | "tool" | "report" | "notice" | "draft"
+    pub kind: String, // "user" | "assistant" | "tool" | "report" | "notice" | "draft" | "system" | "compact" | "reset" | ...
     pub body: Value,
     pub model: Option<String>,
 }
@@ -82,8 +82,14 @@ impl Journal {
     }
 
     /// The conversation's entries, oldest first, following parent links from the head.
+    /// Everything ever written: what the transcript shows and forks branch from.
     pub fn chain(&self, conv: &str) -> Result<Vec<Entry>> {
         chain(&self.conn, conv)
+    }
+
+    /// The part of the chain the model reads: from the newest `"compact"` or `"reset"` head marker on.
+    pub fn chain_for_model(&self, conv: &str) -> Result<Vec<Entry>> {
+        Ok(model_view(chain(&self.conn, conv)?))
     }
 
     /// A new conversation that shares history up to and including `entry`.
@@ -183,6 +189,42 @@ pub fn chain(conn: &Connection, conv: &str) -> Result<Vec<Entry>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Entry kinds that start a new context for the model without touching the entries before them.
+pub const HEAD_MARKERS: [&str; 2] = ["compact", "reset"];
+
+/// Where the model's context starts in `chain`: the index of the newest head marker, if any.
+pub fn head_marker(chain: &[Entry]) -> Option<usize> {
+    chain.iter().rposition(|e| HEAD_MARKERS.contains(&e.kind.as_str()))
+}
+
+/// The entries the model reads, given the whole chain:
+/// - no head marker: all of it;
+/// - a `"reset"`: only what came after it;
+/// - a `"compact"`: the compact entry (its summary), then the entries it kept verbatim, then what came after it.
+///
+/// A compact's `head_entry` names the oldest entry it keeps. It is moved forward to the next entry that
+/// starts a turn, so the view never opens on a tool result whose call was summarized away.
+pub fn model_view(chain: Vec<Entry>) -> Vec<Entry> {
+    let Some(i) = head_marker(&chain) else { return chain };
+    let mut rest = chain;
+    let after = rest.split_off(i + 1);
+    let marker = rest.pop().expect("the marker");
+    if marker.kind == "reset" {
+        return after;
+    }
+    let mut out = Vec::with_capacity(after.len() + 1);
+    let keep_from = marker.body["head_entry"].as_i64();
+    out.push(marker);
+    if let Some(from) = keep_from {
+        let starts_turn = |e: &Entry| matches!(e.kind.as_str(), "user" | "report" | "message" | "notice" | "draft");
+        if let Some(start) = rest.iter().position(|e| e.id >= from && starts_turn(e)) {
+            out.extend(rest.drain(start..));
+        }
+    }
+    out.extend(after);
+    out
+}
+
 pub fn insert(tx: &Connection, conv: &str, kind: &str, body: &Value, model: Option<&str>) -> Result<i64> {
     let head: Option<i64> = tx
         .query_row("SELECT head FROM conversations WHERE name = ?1", params![conv], |r| r.get(0))
@@ -247,5 +289,69 @@ mod tests {
         assert_eq!(session_id(reopened.conn(), "chat-2")?, sid2);
         let _ = std::fs::remove_file(&path);
         Ok(())
+    }
+
+    fn ids(entries: &[Entry]) -> Vec<i64> {
+        entries.iter().map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn head_markers_cut_the_model_view_but_never_the_chain_or_forks() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-journal-markers-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = Journal::open(&path)?;
+        let say = |kind: &str, text: &str| db.append("c", kind, &json!({ "text": text }), None).unwrap();
+        let u1 = say("user", "one");
+        let a1 = say("assistant", "1");
+        assert_eq!(ids(&db.chain_for_model("c")?), [u1, a1], "no marker: the whole chain");
+
+        let compact = db.append("c", "compact", &json!({ "summary": "said one", "compacted_count": 2 }), None)?;
+        let u2 = say("user", "two");
+        let a2 = say("assistant", "2");
+        assert_eq!(ids(&db.chain("c")?), [u1, a1, compact, u2, a2], "the raw chain keeps everything");
+        assert_eq!(ids(&db.chain_for_model("c")?), [compact, u2, a2], "starts at the summary");
+        assert_eq!(db.chain("c")?[0].body["text"], "one", "nothing before the marker changed");
+
+        let reset = db.append("c", "reset", &json!({ "note": "fresh start", "head_entry": null }), None)?;
+        assert!(db.chain_for_model("c")?.is_empty(), "a reset leaves nothing before it");
+        let u3 = say("user", "three");
+        assert_eq!(ids(&db.chain_for_model("c")?), [u3]);
+        assert_eq!(db.chain("c")?.len(), 7);
+
+        // A fork from before the reset sees the compact; one from before the compact sees everything.
+        db.fork(a2, "after-compact")?;
+        assert_eq!(ids(&db.chain_for_model("after-compact")?), [compact, u2, a2]);
+        db.fork(a1, "before-compact")?;
+        assert_eq!(ids(&db.chain_for_model("before-compact")?), [u1, a1]);
+        let _ = reset;
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn a_compact_that_keeps_recent_turns_never_opens_on_an_orphan_tool_result() {
+        let e = |id: i64, kind: &str, body: Value| Entry { id, kind: kind.into(), body, model: None };
+        let chain = vec![
+            e(1, "user", json!({ "text": "fix it" })),
+            e(2, "assistant", json!({ "text": "", "tool_calls": [{ "id": "c1", "name": "read_file", "arguments": "{}" }] })),
+            e(3, "tool", json!({ "call_id": "c1", "output": "..." })),
+            e(4, "assistant", json!({ "text": "Fixed." })),
+            e(5, "user", json!({ "text": "now test" })),
+            e(6, "assistant", json!({ "text": "Passing." })),
+            // Asks to keep from the tool result: moved on to the next user message.
+            e(7, "compact", json!({ "summary": "fixed a bug", "head_entry": 3, "compacted_count": 4 })),
+            e(8, "user", json!({ "text": "ship it" })),
+        ];
+        assert_eq!(ids(&model_view(chain.clone())), [7, 5, 6, 8]);
+        let rendered = crate::model::chat_messages("s", &model_view(chain.clone()));
+        assert!(rendered.iter().all(|m| m["role"] != "tool"), "{rendered:?}");
+        // Keeping from a turn's start keeps that turn whole.
+        let mut from_start = chain.clone();
+        from_start[6].body["head_entry"] = json!(1);
+        assert_eq!(ids(&model_view(from_start)), [7, 1, 2, 3, 4, 5, 6, 8]);
+        // Keeping from past the last turn start keeps nothing extra.
+        let mut none = chain;
+        none[6].body["head_entry"] = json!(6);
+        assert_eq!(ids(&model_view(none)), [7, 8]);
     }
 }

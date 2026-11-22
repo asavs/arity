@@ -72,7 +72,12 @@ pub struct Config {
     pub providers: Vec<Provider>,
     /// User-configured shell hooks.
     pub hooks: Vec<HookConfig>,
+    /// Compact a conversation before a model call once its last prompt reached this many tokens
+    /// (`"auto_compact_tokens"`; `null` or `0` turns it off).
+    pub auto_compact_tokens: Option<u64>,
 }
+
+pub const DEFAULT_AUTO_COMPACT_TOKENS: u64 = 120_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Provider {
@@ -223,7 +228,11 @@ fn parse(v: &Value) -> Result<Config> {
             enabled,
         });
     }
-    Ok(Config { workers: strings(&v["workers"]), providers: out, hooks })
+    let auto_compact_tokens = match v.get("auto_compact_tokens") {
+        None => Some(DEFAULT_AUTO_COMPACT_TOKENS),
+        Some(n) => n.as_u64().filter(|&n| n > 0),
+    };
+    Ok(Config { workers: strings(&v["workers"]), providers: out, hooks, auto_compact_tokens })
 }
 
 fn hook_to_json(h: &HookConfig) -> Value {
@@ -362,6 +371,10 @@ mod tests {
         let defaults = parse(&json!({}))?;
         assert!(defaults.providers.iter().find(|p| p.name == "mlx").unwrap().local());
         assert!(!defaults.providers.iter().find(|p| p.name == "nous").unwrap().local());
+        assert_eq!(defaults.auto_compact_tokens, Some(DEFAULT_AUTO_COMPACT_TOKENS));
+        assert_eq!(parse(&json!({ "auto_compact_tokens": 50000 }))?.auto_compact_tokens, Some(50000));
+        assert_eq!(parse(&json!({ "auto_compact_tokens": null }))?.auto_compact_tokens, None);
+        assert_eq!(parse(&json!({ "auto_compact_tokens": 0 }))?.auto_compact_tokens, None);
         Ok(())
     }
 

@@ -21,6 +21,10 @@ const USAGE: &str = "usage:
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
+  arity usage  <conv>                        tokens used, how full the context is, and how much was cached
+  arity compact <conv> [instructions...]     replace the model's context with a summary it writes;
+                                             the thread keeps every message
+  arity reset  <conv> [note...]              start the model afresh from here; the thread keeps every message
   arity folder <conv> [<path> | --clear]     the folder a conversation's file and shell tools work in;
                                              tasks filed there take it with them
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
@@ -171,6 +175,38 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("fork", 3) => {
             arity.fork(arg(1).parse()?, arg(2))?;
             println!("{} now branches from entry #{}", arg(2), arg(1));
+        }
+        ("usage", 2) => {
+            let u = arity.usage(arg(1))?;
+            if u.replies_with_usage == 0 {
+                println!("no usage reported in {} yet; some local servers never report it", arg(1));
+            } else {
+                println!(
+                    "context    {} tokens in the last prompt, {} cached",
+                    tokens(u.last_input_tokens),
+                    percent(u.last_cached_tokens, u.last_input_tokens)
+                );
+                println!(
+                    "all told   {} in ({} cached) · {} out · over {} replies",
+                    tokens(u.input_tokens),
+                    percent(u.cached_tokens, u.input_tokens),
+                    tokens(u.output_tokens),
+                    u.replies_with_usage
+                );
+            }
+            if u.compacted_entries > 0 {
+                println!("compacted  {} earlier entries are no longer in the model's context", u.compacted_entries);
+            }
+        }
+        ("compact", n) if n >= 2 => {
+            let instructions = (n > 2).then(|| args[2..].join(" "));
+            let summary = arity.compact(arg(1), instructions)?;
+            println!("compacted {}; the model now reads this summary:\n\n{summary}", arg(1));
+        }
+        ("reset", n) if n >= 2 => {
+            let note = (n > 2).then(|| args[2..].join(" "));
+            arity.reset_context(arg(1), note)?;
+            println!("{}'s model starts fresh from here; `arity log {}` still shows everything", arg(1), arg(1));
         }
         ("folder", 2) => match arity.folder(arg(1))? {
             Some(dir) => println!("{dir}"),
@@ -528,7 +564,21 @@ fn print(m: &Message) {
         MessageKind::Rating => println!("#{:<4} rating: {}", m.entry, m.text),
         MessageKind::TaskCard => println!("#{:<4} card: {}", m.entry, m.text),
         MessageKind::ToolResult => println!("#{:<4}   -> {}", m.entry, m.text.replace('\n', "\n          ")),
+        MessageKind::Compaction => println!("#{:<4} context: {}", m.entry, m.text.replace('\n', "\n          ")),
     }
+}
+
+/// 18400 -> "18.4k"
+fn tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.2}M", n as f64 / 1e6),
+    }
+}
+
+fn percent(part: u64, whole: u64) -> String {
+    if whole == 0 { "0%".into() } else { format!("{:.0}%", part as f64 * 100.0 / whole as f64) }
 }
 
 /// A folder named on the command line, as the absolute path a run can use from anywhere.
@@ -802,6 +852,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn token_counts_read_short() {
+        assert_eq!((tokens(950), tokens(18_400), tokens(2_500_000)), ("950".into(), "18.4k".into(), "2.50M".into()));
+        assert_eq!((percent(13_248, 18_400), percent(1, 0)), ("72%".into(), "0%".into()));
     }
 
     #[test]

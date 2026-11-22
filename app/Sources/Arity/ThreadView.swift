@@ -70,6 +70,21 @@ struct ThreadView: View {
         }
         .navigationTitle(store.thread?.title ?? "New chat")
         .navigationSubtitle(store.thread?.task.map { details($0, me: store.me) } ?? chatSubtitle)
+        .toolbar {
+            ToolbarItemGroup {
+                if let usage = store.conversationUsage, usage.repliesWithUsage > 0 {
+                    UsagePill(usage: usage)
+                }
+                Menu("Thread Actions", systemImage: "ellipsis.circle") {
+                    Button("Compact Context") { store.compact() }
+                        .help("Replace what the model reads with a summary it writes; every message stays here")
+                    Button("Reset Context") { store.resetContext() }
+                        .help("The model starts fresh from here; every message stays here and can be forked")
+                }
+                .disabled(busy || store.messages.isEmpty)
+                .help("Compact or reset the model's context")
+            }
+        }
         .onAppear { composing = true }
         .onChange(of: store.unsent) {
             if let text = store.unsent { message = text; store.unsent = nil }
@@ -413,8 +428,88 @@ struct MessageRow: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .padding(.leading, 26)
+        case .compaction:
+            CompactionRow(text: message.text)
         }
     }
+}
+
+/// Where the model's context was compacted or reset: one line, with the summary or note folded away.
+private struct CompactionRow: View {
+    let text: String
+    @State private var expanded = false
+
+    var body: some View {
+        let split = text.range(of: "\n\n")
+        let head = split.map { String(text[..<$0.lowerBound]) } ?? text
+        let detail = split.map { String(text[$0.upperBound...]) }
+        let reset = head.hasPrefix("Context reset")
+        VStack(alignment: .leading, spacing: 6) {
+            Label(head, systemImage: reset ? "arrow.counterclockwise" : "rectangle.compress.vertical")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if let detail, !detail.isEmpty {
+                DisclosureGroup(reset ? "Note" : "Summary", isExpanded: $expanded) {
+                    Text(detail)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+    }
+}
+
+/// How full the context is and how much of it the provider's cache served, e.g. "18.4k ctx · 72% cached".
+private struct UsagePill: View {
+    let usage: ConversationUsage
+
+    var body: some View {
+        Text(label)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
+            .fixedSize()
+            .help(breakdown)
+    }
+
+    private var label: String {
+        if usage.lastInputTokens > 0 {
+            return "\(tokenCount(usage.lastInputTokens)) ctx · \(percent(usage.lastCachedTokens, of: usage.lastInputTokens)) cached"
+        }
+        return usage.compactedEntries > 0 ? "Context compacted" : "\(tokenCount(usage.inputTokens)) in"
+    }
+
+    private var breakdown: String {
+        var lines: [String] = []
+        if usage.lastInputTokens > 0 {
+            lines.append("Context now: \(usage.lastInputTokens.formatted()) tokens, \(usage.lastCachedTokens.formatted()) cached (\(percent(usage.lastCachedTokens, of: usage.lastInputTokens)))")
+        }
+        lines.append("Whole thread: \(usage.inputTokens.formatted()) in, \(usage.cachedTokens.formatted()) cached (\(percent(usage.cachedTokens, of: usage.inputTokens))), \(usage.outputTokens.formatted()) out over \(usage.repliesWithUsage) replies")
+        if usage.compactedEntries > 0 {
+            lines.append("\(usage.compactedEntries) earlier entries are no longer in the model's context")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// 18400 -> "18.4k"
+private func tokenCount(_ n: UInt64) -> String {
+    switch n {
+    case ..<1_000: "\(n)"
+    case ..<1_000_000: String(format: "%.1fk", Double(n) / 1e3)
+    default: String(format: "%.2fM", Double(n) / 1e6)
+    }
+}
+
+private func percent(_ part: UInt64, of whole: UInt64) -> String {
+    whole == 0 ? "0%" : "\(Int((Double(part) * 100 / Double(whole)).rounded()))%"
 }
 
 /// "mlx:mlx-community/Qwen3.5-4B-MLX-4bit" -> "Qwen3.5-4B-MLX-4bit · mlx"

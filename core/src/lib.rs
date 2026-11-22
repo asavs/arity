@@ -14,6 +14,7 @@ mod board;
 mod catalog;
 mod codex_auth;
 mod coding;
+mod compact;
 mod config;
 mod dispatch;
 mod draft;
@@ -40,7 +41,7 @@ pub use catalog::KeyCheck;
 pub use config::{HookConfig, HookEvent};
 pub use hooks::{BeforeTool, Hook, HookCtx, HookRegistry, YieldAction};
 pub use leaderboard::{Choice, Figures, Pick, Standing};
-pub use model::{Reply, Sink, ToolCall};
+pub use model::{Reply, Sink, TokenUsage, ToolCall};
 pub use tools::{Caller, Execution, Replay, Tool, ToolOutput, ToolRegistry, ToolSpec, ToolVisibility};
 pub use usage::{Limit, Usage};
 pub use journal::{Entry, Journal};
@@ -83,6 +84,30 @@ pub enum MessageKind {
     Rating,
     /// The person opened, edited, added or dismissed the task card.
     TaskCard,
+    /// The model's context was compacted into a summary, or reset; the first line says which.
+    Compaction,
+}
+
+/// Tokens a conversation used, as its providers reported them. Replies from
+/// providers that do not report usage are not counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct ConversationUsage {
+    /// Prompt tokens summed over every reply in the whole thread, before and after any compact or reset.
+    /// Each reply re-reads its context, so this is what was paid for, not how full the context is.
+    pub input_tokens: u64,
+    /// The part of `input_tokens` served from providers' prompt caches.
+    pub cached_tokens: u64,
+    /// Output tokens summed over every reply in the whole thread.
+    pub output_tokens: u64,
+    /// Prompt tokens of the latest reply in the active context: how full the context is now.
+    /// 0 right after a compact or reset, until the next reply.
+    pub last_input_tokens: u64,
+    /// The part of `last_input_tokens` served from the prompt cache.
+    pub last_cached_tokens: u64,
+    /// Replies that reported usage.
+    pub replies_with_usage: u32,
+    /// Entries before the newest compact or reset that the model no longer reads; 0 if there is none.
+    pub compacted_entries: u32,
 }
 
 /// A built-in hook registered in Arity's default harness.
@@ -475,6 +500,33 @@ impl Arity {
         Ok(self.journal()?.fork(entry, &new_conversation)?)
     }
 
+    /// Tokens the conversation used, and how full its context is now.
+    pub fn usage(&self, conversation: String) -> Result<ConversationUsage> {
+        Ok(conversation_usage(&self.journal()?.chain(&conversation)?))
+    }
+
+    /// Replace what the model reads in a conversation with a summary the model writes, keeping every
+    /// entry in the journal. `instructions` say what the summary should keep. Returns the summary.
+    /// Blocks on a model call. Refused while a turn runs there.
+    pub fn compact(&self, conversation: String, instructions: Option<String>) -> Result<String> {
+        self.compact_with(&self.journal()?, &conversation, instructions.as_deref(), None)
+    }
+
+    /// Start the model afresh in a conversation: it reads nothing before this point, though the whole
+    /// thread stays visible and can still be forked. `note` is shown with the marker.
+    pub fn reset_context(&self, conversation: String, note: Option<String>) -> Result<()> {
+        let db = self.journal()?;
+        if db.chain_for_model(&conversation)?.iter().all(|e| e.kind == "system") {
+            return Err(ArityError::Failed("Nothing to reset yet: the model's context is already empty".into()));
+        }
+        let Some(mut lease) = turn::Lease::take(&db, &conversation, "")? else {
+            return Err(busy(&conversation));
+        };
+        compact::reset(&db, &conversation, note.as_deref())?;
+        lease.release(&db, true)?;
+        Ok(())
+    }
+
     /// Attach a folder to a conversation, or with None take it away. Its file
     /// tools read only inside it, and tasks filed there take it with them. The
     /// folder must exist; it can be set before the first message.
@@ -778,6 +830,51 @@ impl Arity {
         }
     }
 
+    /// As `compact`, on `scripted` instead of the conversation's model when given.
+    pub(crate) fn compact_with(
+        &self,
+        db: &Journal,
+        conv: &str,
+        instructions: Option<&str>,
+        scripted: Option<&agent::Complete>,
+    ) -> Result<String> {
+        let view = db.chain_for_model(conv)?;
+        if compact::replies(&view) < 2 {
+            return Err(ArityError::Failed("Nothing to compact yet: the context holds fewer than two replies".into()));
+        }
+        let model = match resolve_model(db, conv, "-") {
+            Ok(m) => m,
+            Err(_) => self.pick(Choice::Smart)?.model,
+        };
+        let real = match scripted {
+            Some(_) => None,
+            None => Some(model::Model::parse(&model, &self.dir, &journal::session_id(db.conn(), conv)?)?),
+        };
+        let call = |system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink| real.as_ref().expect("a model").complete(system, chain, tools, out);
+        let complete: &agent::Complete = scripted.unwrap_or(&call);
+
+        // Holding the turn's lease keeps a turn from starting meanwhile; messages sent wait for it.
+        let Some(mut lease) = turn::Lease::take(db, conv, &model)? else {
+            return Err(busy(conv));
+        };
+        let live = lease.live.clone();
+        let summary = compact::compact(db, conv, complete, instructions, false, &|| live.stopped() && !live.cut_for_steer());
+        let answer = !lease.release(db, summary.is_err())?;
+        drop(lease);
+        let summary = match summary {
+            Ok(s) => s,
+            Err(_) if hidden(db, conv)? => {
+                return Err(ArityError::Failed("could not reach the model for this task; rate first or use reveal to see why".into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        // Someone wrote while it was summarizing: answer them now, as the turn would have.
+        if answer {
+            self.run_resolved(db, conv, &model, scripted, &mut |_| {})?;
+        }
+        Ok(summary)
+    }
+
     fn standings(&self, candidates: &[leaderboard::Candidate]) -> Result<Vec<Standing>> {
         let own = leaderboard::own(self.journal()?.conn())?;
         let names: Vec<String> = candidates.iter().map(|c| c.model.clone()).collect();
@@ -870,6 +967,31 @@ fn resolve_model(db: &Journal, conv: &str, given: &str) -> anyhow::Result<String
     anyhow::bail!("{conv} has no model yet; name one")
 }
 
+fn busy(conv: &str) -> ArityError {
+    ArityError::Failed(format!("A turn is running in {conv}; wait for it to end or stop it first"))
+}
+
+/// Sums every reply's usage in `chain`, and reads the latest one in the model's active context.
+fn conversation_usage(chain: &[Entry]) -> ConversationUsage {
+    let mut out = ConversationUsage::default();
+    for u in chain.iter().filter(|e| e.kind == "assistant").filter_map(|e| model::TokenUsage::from_json(&e.body["usage"])) {
+        out.input_tokens += u.input;
+        out.cached_tokens += u.cached;
+        out.output_tokens += u.output;
+        out.replies_with_usage += 1;
+    }
+    let view = journal::model_view(chain.to_vec());
+    if let Some(u) = compact::last_usage(&view) {
+        out.last_input_tokens = u.input;
+        out.last_cached_tokens = u.cached;
+    }
+    if let Some(i) = journal::head_marker(chain) {
+        let read: std::collections::HashSet<i64> = view.iter().map(|e| e.id).collect();
+        out.compacted_entries = chain[..i].iter().filter(|e| !read.contains(&e.id)).count() as u32;
+    }
+    out
+}
+
 /// An unrated run's thread, where the model stays hidden.
 fn hidden(db: &Journal, conv: &str) -> anyhow::Result<bool> {
     Ok(match board::trial_of_conversation(db.conn(), conv)? {
@@ -922,6 +1044,19 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
             out
         }
         "tool" => vec![msg(0, MessageKind::ToolResult, text("output"))],
+        "compact" => {
+            let n = e.body["compacted_count"].as_u64().unwrap_or_default();
+            let how = if e.body["continue"] == true { "Context compacted automatically" } else { "Context compacted" };
+            let head = format!("{how}: the model now reads this summary instead of the {n} entries before it.");
+            vec![Message { model: None, ..msg(0, MessageKind::Compaction, format!("{head}\n\n{}", text("summary"))) }]
+        }
+        "reset" => {
+            let mut t = "Context reset: the model starts fresh from here. Everything above stays here, and can be forked.".to_string();
+            if !text("note").is_empty() {
+                t.push_str(&format!("\n\n{}", text("note")));
+            }
+            vec![Message { model: None, ..msg(0, MessageKind::Compaction, t) }]
+        }
         _ => vec![],
     }
 }
@@ -962,10 +1097,11 @@ mod tests {
                         arguments: json!({ "report": "which port?", "outcome": "blocked" }).to_string(),
                     }],
                     interrupted: false,
+                    usage: None,
                 })
             } else if said.contains("why") {
                 out("Ports below 1024 need root.");
-                Ok(Reply { text: "Ports below 1024 need root.".into(), tool_calls: vec![], interrupted: false })
+                Ok(Reply { text: "Ports below 1024 need root.".into(), tool_calls: vec![], interrupted: false, usage: None })
             } else {
                 Ok(Reply {
                     text: String::new(),
@@ -975,6 +1111,7 @@ mod tests {
                         arguments: json!({ "report": "Listening on 8080.", "outcome": "done" }).to_string(),
                     }],
                     interrupted: false,
+                    usage: None,
                 })
             }
         };
@@ -1042,6 +1179,101 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn compact_and_reset_change_what_the_model_reads_and_nothing_else() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let arity = Arity::new(Some(dir.to_string_lossy().into_owned()));
+        let db = arity.journal()?;
+        let conv = "chat-1";
+        let seen = std::cell::RefCell::new(Vec::<Vec<Entry>>::new());
+        let model = |system: &str, chain: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            if system == compact::SUMMARIZER_SYSTEM {
+                let asked = chain[0].body["text"].as_str().unwrap();
+                assert!(asked.contains("Also: keep the port number"), "instructions reach the summarizer");
+                return Ok(Reply { text: "## Goal\nServe on port 8080.".into(), tool_calls: vec![], interrupted: false, usage: None });
+            }
+            seen.borrow_mut().push(chain.to_vec());
+            let n = seen.borrow().len() as u64;
+            let usage = model::TokenUsage { input: 1000 * n, cached: 600 * n, output: 10, total: 1000 * n + 10 };
+            Ok(Reply { text: format!("reply {n}"), tool_calls: vec![], interrupted: false, usage: Some(usage) })
+        };
+        let say = |text: &str| -> anyhow::Result<()> {
+            turn::send_as(&db, conv, text, Delivery::Steer)?;
+            arity.run_resolved(&db, conv, "test:m", Some(&model), &mut |_| {})?;
+            Ok(())
+        };
+
+        say("serve it on 8080")?;
+        let early = arity.compact_with(&db, conv, None, Some(&model)).unwrap_err().to_string();
+        assert!(early.contains("Nothing to compact yet"), "{early}");
+        say("and log requests")?;
+        let u = arity.usage(conv.into())?;
+        assert_eq!(
+            u,
+            ConversationUsage {
+                input_tokens: 3000,
+                cached_tokens: 1800,
+                output_tokens: 20,
+                last_input_tokens: 2000,
+                last_cached_tokens: 1200,
+                replies_with_usage: 2,
+                compacted_entries: 0
+            }
+        );
+
+        // Refused while a turn holds the conversation.
+        let lease = turn::Lease::take(&db, conv, "test:m")?.unwrap();
+        assert!(arity.compact_with(&db, conv, None, Some(&model)).unwrap_err().to_string().contains("A turn is running"));
+        assert!(arity.reset_context(conv.into(), None).unwrap_err().to_string().contains("A turn is running"));
+        drop(lease);
+
+        let before = db.chain(conv)?;
+        let summary = arity.compact_with(&db, conv, Some("keep the port number"), Some(&model))?;
+        assert_eq!(summary, "## Goal\nServe on port 8080.");
+        let after = db.chain(conv)?;
+        assert_eq!(after.len(), before.len() + 1, "one entry appended");
+        assert!(before.iter().zip(&after).all(|(a, b)| a.id == b.id && a.body == b.body), "nothing rewritten");
+        let marker = after.last().unwrap();
+        assert_eq!((marker.kind.as_str(), marker.body["compacted_count"].as_u64()), ("compact", Some(4)));
+        assert!(turn::running(db.conn())?.is_empty(), "the lease is let go");
+
+        // The transcript shows everything and the marker; usage counts the whole thread, but the context is empty for now.
+        let msgs = arity.messages(conv.into())?;
+        assert_eq!(msgs.iter().filter(|m| m.kind == MessageKind::User).count(), 2);
+        let shown = msgs.iter().find(|m| m.kind == MessageKind::Compaction).unwrap();
+        assert!(shown.text.starts_with("Context compacted: ") && shown.text.ends_with("Serve on port 8080."));
+        let u = arity.usage(conv.into())?;
+        assert_eq!((u.input_tokens, u.last_input_tokens, u.compacted_entries), (3000, 0, 5));
+
+        // The next turn reads the summary, the new message, and the sections sent again.
+        say("what port?")?;
+        let view = seen.borrow().last().unwrap().clone();
+        assert_eq!(view.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["compact", "user", "system"]);
+        assert!(view[2].body["text"].as_str().unwrap().starts_with("Today is"));
+        assert_eq!(arity.usage(conv.into())?.last_input_tokens, 3000);
+
+        // A reset: the model starts from nothing but the sections, and the thread still shows it all.
+        arity.reset_context(conv.into(), Some("new topic".into()))?;
+        say("hello again")?;
+        let view = seen.borrow().last().unwrap().clone();
+        assert_eq!(view.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["user", "system"]);
+        assert_eq!(view[0].body["text"], "hello again");
+        let msgs = arity.messages(conv.into())?;
+        assert!(msgs.iter().any(|m| m.kind == MessageKind::Compaction && m.text.starts_with("Context reset") && m.text.ends_with("new topic")));
+        assert_eq!(msgs.iter().filter(|m| m.kind == MessageKind::User).count(), 4);
+        assert!(arity.reset_context("nobody".into(), None).unwrap_err().to_string().contains("Nothing to reset"));
+
+        // Forking from before the compact gets the raw history back, as the model reads it too.
+        let first_reply = after.iter().find(|e| e.kind == "assistant").unwrap().id;
+        arity.fork(first_reply, "chat-1-fork".into())?;
+        assert_eq!(db.chain_for_model("chat-1-fork")?.iter().filter(|e| e.kind != "system").count(), 2);
+        assert_eq!(arity.usage("chat-1-fork".into())?.compacted_entries, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     /// The whole recursive loop on scripted models: a chat delegates, a blindly
     /// picked worker hands part on and waits, the sub-task's run is killed
     /// after a committed tool call and taken over from the journal without
@@ -1073,8 +1305,9 @@ mod tests {
             text: String::new(),
             tool_calls: vec![ToolCall { id: format!("{name}-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() }],
             interrupted: false,
+            usage: None,
         };
-        let says = |text: &str| Reply { text: text.into(), tool_calls: vec![], interrupted: false };
+        let says = |text: &str| Reply { text: text.into(), tool_calls: vec![], interrupted: false, usage: None };
         let last_tool = |chain: &[Entry]| {
             let e = chain.iter().rev().find(|e| e.kind != "system").unwrap();
             (e.kind.clone(), e.body["name"].as_str().unwrap_or_default().to_string())

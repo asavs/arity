@@ -18,6 +18,8 @@ final class Store {
     var draft: TaskFields?
     /// The folder attached to the selected chat, enabling file and shell tools in it.
     var folder: String?
+    /// Tokens the selected thread used and how full its context is, as its providers reported them.
+    var conversationUsage: ConversationUsage?
     var scores: [Score] = []
     /// What the configured providers offer, and which of them tasks for agents are picked from.
     var models: [String] = []
@@ -114,6 +116,7 @@ final class Store {
             messages = attempt { try core.messages(conversation: selection) } ?? []
             if pendingCard?.conv != selection { draft = thread?.card }
             folder = attempt { try core.folder(conversation: selection) } ?? nil
+            conversationUsage = attempt { try core.usage(conversation: selection) }
         }
     }
 
@@ -122,9 +125,10 @@ final class Store {
         flushCard()
         pickReason = nil
         choiceChanged = false
-        guard let selection else { messages = []; draft = nil; folder = nil; return }
+        guard let selection else { messages = []; draft = nil; folder = nil; conversationUsage = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
         folder = attempt { try core.folder(conversation: selection) } ?? nil
+        conversationUsage = attempt { try core.usage(conversation: selection) }
         draft = thread?.card
         if let last = attempt({ try core.lastModel(conversation: selection) }), let last {
             model = last
@@ -190,6 +194,33 @@ final class Store {
             refresh(force: true)
             selection = name
         }
+    }
+
+    // Context
+
+    /// Replace what the model reads in the selected thread with a summary it writes. The thread
+    /// keeps every message. Blocks on a model call, so it runs off the main thread.
+    func compact(instructions: String? = nil) {
+        guard let conv = selection else { return }
+        error = nil
+        starting.insert(conv)
+        let core = self.core
+        Task.detached {
+            let result = Result { try core.compact(conversation: conv, instructions: instructions) }
+            await MainActor.run {
+                self.starting.remove(conv)
+                if case .failure(let e) = result, self.selection == conv { self.error = Self.describe(e) }
+                self.refresh(force: true)
+            }
+        }
+    }
+
+    /// The model starts afresh from here; the thread keeps every message and can still be forked.
+    func resetContext() {
+        guard let conv = selection else { return }
+        error = nil
+        _ = attempt { try core.resetContext(conversation: conv, note: nil) }
+        refresh(force: true)
     }
 
     // Task cards

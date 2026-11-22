@@ -23,12 +23,53 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// What one model call cost in tokens, as the provider reported it.
+/// `input` counts the whole prompt, `cached` the part of it served from the provider's prompt cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
+    pub total: u64,
+}
+
+impl TokenUsage {
+    pub fn to_json(&self) -> Value {
+        json!({ "input": self.input, "cached": self.cached, "output": self.output, "total": self.total })
+    }
+
+    /// The `"usage"` an assistant entry was committed with; None for entries from before usage was kept.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let n = |k: &str| v[k].as_u64().unwrap_or(0);
+        v.is_object().then(|| TokenUsage { input: n("input"), cached: n("cached"), output: n("output"), total: n("total") })
+    }
+
+    /// Chat completions: `prompt_tokens`, `prompt_tokens_details.cached_tokens`, `completion_tokens`, `total_tokens`.
+    /// DeepSeek-style servers report cache hits as `prompt_cache_hit_tokens` instead.
+    fn from_chat(u: &Value) -> Option<Self> {
+        let input = u["prompt_tokens"].as_u64()?;
+        let output = u["completion_tokens"].as_u64().unwrap_or(0);
+        let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().or_else(|| u["prompt_cache_hit_tokens"].as_u64()).unwrap_or(0);
+        Some(TokenUsage { input, cached, output, total: u["total_tokens"].as_u64().unwrap_or(input + output) })
+    }
+
+    /// Responses: `input_tokens`, `input_tokens_details.cached_tokens`, `output_tokens`, `total_tokens`.
+    fn from_responses(u: &Value) -> Option<Self> {
+        let input = u["input_tokens"].as_u64()?;
+        let output = u["output_tokens"].as_u64().unwrap_or(0);
+        let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+        Some(TokenUsage { input, cached, output, total: u["total_tokens"].as_u64().unwrap_or(input + output) })
+    }
+}
+
 #[derive(Debug)]
 pub struct Reply {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     /// Stopped part way. The text is what had arrived; half-made tool calls are dropped.
     pub interrupted: bool,
+    /// None when the provider did not say (some local servers never do).
+    pub usage: Option<TokenUsage>,
 }
 
 impl Reply {
@@ -41,6 +82,9 @@ impl Reply {
         });
         if self.interrupted {
             v["interrupted"] = json!(true);
+        }
+        if let Some(u) = &self.usage {
+            v["usage"] = u.to_json();
         }
         v
     }
@@ -100,6 +144,21 @@ fn user_text(e: &Entry) -> Option<&str> {
     }
 }
 
+/// A `"compact"` entry as the model reads it: a handoff from its earlier self, spoken as the user
+/// so every wire format and chat template accepts it wherever it lands.
+pub(crate) fn compact_text(e: &Entry) -> Option<String> {
+    (e.kind == "compact").then(|| {
+        let summary = e.body["summary"].as_str().unwrap_or_default().trim();
+        let mut text = format!(
+            "[Context compacted] The earlier part of this conversation was replaced by this summary to save space:\n\n{summary}"
+        );
+        if e.body["continue"] == true {
+            text.push_str("\n\nContinue the work from where it left off.");
+        }
+        text
+    })
+}
+
 /// Arity names itself to every endpoint; OpenCode Go asks clients to.
 pub const USER_AGENT: &str = concat!("Arity/", env!("CARGO_PKG_VERSION"));
 
@@ -123,7 +182,7 @@ struct Events {
 }
 
 impl Events {
-    fn new(resp: reqwest::blocking::Response) -> Self {
+    fn new(resp: impl std::io::Read + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(resp).lines() {
@@ -168,6 +227,10 @@ pub(crate) fn chat_messages(system: &str, chain: &[Entry]) -> Vec<Value> {
             messages.push(json!({"role": "user", "content": text}));
             continue;
         }
+        if let Some(text) = compact_text(e) {
+            messages.push(json!({"role": "user", "content": text}));
+            continue;
+        }
         messages.push(match e.kind.as_str() {
             "system" => match e.body["text"].as_str().filter(|t| !t.is_empty()) {
                 Some(text) => json!({"role": "system", "content": text}),
@@ -193,24 +256,43 @@ pub(crate) fn chat_messages(system: &str, chain: &[Entry]) -> Vec<Value> {
 }
 
 fn chat(endpoint: &Endpoint, model: &str, system: &str, chain: &[Entry], tools: &[ToolSpec], out: &mut Sink) -> Result<Reply> {
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": chat_messages(system, chain),
         "tools": tools.iter().map(|t| json!({"type": "function", "function": {
             "name": t.name, "description": t.description, "parameters": t.parameters}})).collect::<Vec<_>>(),
         "max_tokens": 2048,
         "stream": true,
+        "stream_options": { "include_usage": true },
     });
-    let resp = endpoint.observe(endpoint.post(&client(), "/chat/completions").json(&body).send()?);
-    let status = resp.status();
+    let mut resp = endpoint.observe(endpoint.post(&client(), "/chat/completions").json(&body).send()?);
+    let mut status = resp.status();
     if !status.is_success() {
-        bail!("{status}: {}", resp.text().unwrap_or_default());
+        let detail = resp.text().unwrap_or_default();
+        // Servers that do not know stream_options and refuse unknown fields: ask again without it.
+        if !(matches!(status.as_u16(), 400 | 422) && detail.contains("stream_options")) {
+            bail!("{status}: {detail}");
+        }
+        body.as_object_mut().unwrap().remove("stream_options");
+        resp = endpoint.observe(endpoint.post(&client(), "/chat/completions").json(&body).send()?);
+        status = resp.status();
+        if !status.is_success() {
+            bail!("{status}: {}", resp.text().unwrap_or_default());
+        }
     }
-    let mut events = Events::new(resp);
-    let (mut text, mut calls) = (String::new(), Vec::<ToolCall>::new());
+    chat_stream(&mut Events::new(resp), out)
+}
+
+/// A chat completions stream: text and tool calls in deltas, and with `include_usage`, a last chunk
+/// with `usage` and no choices. A server that ignores `stream_options` leaves usage None.
+fn chat_stream(events: &mut Events, out: &mut Sink) -> Result<Reply> {
+    let (mut text, mut calls, mut usage) = (String::new(), Vec::<ToolCall>::new(), None);
     while let Some(ev) = events.next(out)? {
         if !ev["error"].is_null() {
             bail!("{}", ev["error"]);
+        }
+        if let Some(u) = TokenUsage::from_chat(&ev["usage"]) {
+            usage = Some(u);
         }
         let delta = &ev["choices"][0]["delta"];
         if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
@@ -242,7 +324,7 @@ fn chat(endpoint: &Endpoint, model: &str, system: &str, chain: &[Entry], tools: 
     if interrupted {
         calls.clear();
     }
-    Ok(Reply { text: text.trim().into(), tool_calls: calls, interrupted })
+    Ok(Reply { text: text.trim().into(), tool_calls: calls, interrupted, usage })
 }
 
 /// The chain as Responses input items.
@@ -250,6 +332,10 @@ pub(crate) fn codex_input(chain: &[Entry]) -> Vec<Value> {
     let mut input = Vec::new();
     for e in chain {
         if let Some(text) = user_text(e) {
+            input.push(json!({"role": "user", "content": [{"type": "input_text", "text": text}]}));
+            continue;
+        }
+        if let Some(text) = compact_text(e) {
             input.push(json!({"role": "user", "content": [{"type": "input_text", "text": text}]}));
             continue;
         }
@@ -298,10 +384,14 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
         bail!("{status}: {}", resp.text().unwrap_or_default());
     }
 
-    // Text deltas are shown as they come; finished output items make the reply.
-    let mut events = Events::new(resp);
+    codex_stream(&mut Events::new(resp), out)
+}
+
+/// A Responses stream. Text deltas are shown as they come; finished output items make the reply,
+/// and `response.completed` carries the usage.
+fn codex_stream(events: &mut Events, out: &mut Sink) -> Result<Reply> {
     let mut streamed = String::new();
-    let mut reply = Reply { text: String::new(), tool_calls: vec![], interrupted: false };
+    let mut reply = Reply { text: String::new(), tool_calls: vec![], interrupted: false, usage: None };
     while let Some(ev) = events.next(out)? {
         match ev["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => {
@@ -329,12 +419,15 @@ fn codex(model: &str, auth: &std::path::Path, system: &str, chain: &[Entry], too
                 }
             }
             "response.failed" | "error" => bail!("codex error: {ev}"),
-            "response.completed" => break,
+            "response.completed" => {
+                reply.usage = TokenUsage::from_responses(&ev["response"]["usage"]);
+                break;
+            }
             _ => {}
         }
     }
     if events.stopped {
-        return Ok(Reply { text: streamed, tool_calls: vec![], interrupted: true });
+        return Ok(Reply { text: streamed, tool_calls: vec![], interrupted: true, usage: None });
     }
     Ok(reply)
 }
@@ -415,6 +508,145 @@ mod tests {
             assert!(!std::fs::read_to_string(d.join("config.json"))?.contains(key));
         }
         Ok(())
+    }
+
+    fn sse(events: &[Value]) -> Events {
+        let mut s: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        s.push_str("data: [DONE]\n\n");
+        Events::new(std::io::Cursor::new(s.into_bytes()))
+    }
+
+    #[test]
+    fn chat_streams_report_usage_with_cached_tokens_in_the_last_chunk() -> Result<()> {
+        let mut seen = String::new();
+        let reply = chat_stream(
+            &mut sse(&[
+                json!({ "choices": [{ "delta": { "content": "Hel" } }], "usage": null }),
+                json!({ "choices": [{ "delta": { "content": "lo" } }], "usage": null }),
+                json!({ "choices": [], "usage": { "prompt_tokens": 18400, "completion_tokens": 12, "total_tokens": 18412,
+                    "prompt_tokens_details": { "cached_tokens": 13248 } } }),
+            ]),
+            &mut |t| {
+                seen.push_str(t);
+                true
+            },
+        )?;
+        assert_eq!((reply.text.as_str(), seen.as_str()), ("Hello", "Hello"));
+        assert_eq!(reply.usage, Some(TokenUsage { input: 18400, cached: 13248, output: 12, total: 18412 }));
+        assert_eq!(TokenUsage::from_json(&reply.to_json()["usage"]), reply.usage, "round-trips through the journal body");
+
+        // A server that ignores stream_options: no usage, and nothing else changes.
+        let plain = chat_stream(&mut sse(&[json!({ "choices": [{ "delta": { "content": "Hi" } }] })]), &mut |_| true)?;
+        assert_eq!((plain.text.as_str(), plain.usage), ("Hi", None));
+        assert!(plain.to_json().get("usage").is_none());
+        // DeepSeek-style cache hits; a missing total is input + output.
+        let ds = TokenUsage::from_chat(&json!({ "prompt_tokens": 100, "completion_tokens": 5, "prompt_cache_hit_tokens": 64 }));
+        assert_eq!(ds, Some(TokenUsage { input: 100, cached: 64, output: 5, total: 105 }));
+        Ok(())
+    }
+
+    #[test]
+    fn responses_streams_report_usage_on_response_completed() -> Result<()> {
+        let reply = codex_stream(
+            &mut sse(&[
+                json!({ "type": "response.output_text.delta", "delta": "Done." }),
+                json!({ "type": "response.output_item.done", "item": { "type": "message", "content": [{ "type": "output_text", "text": "Done." }] } }),
+                json!({ "type": "response.output_item.done", "item": { "type": "function_call", "call_id": "c1", "name": "list_tasks", "arguments": "{}" } }),
+                json!({ "type": "response.completed", "response": { "usage": { "input_tokens": 5000, "output_tokens": 40,
+                    "total_tokens": 5040, "input_tokens_details": { "cached_tokens": 4096 } } } }),
+            ]),
+            &mut |_| true,
+        )?;
+        assert_eq!((reply.text.as_str(), reply.tool_calls.len()), ("Done.", 1));
+        assert_eq!(reply.usage, Some(TokenUsage { input: 5000, cached: 4096, output: 40, total: 5040 }));
+        let bare = codex_stream(&mut sse(&[json!({ "type": "response.completed", "response": {} })]), &mut |_| true)?;
+        assert_eq!(bare.usage, None);
+        Ok(())
+    }
+
+    /// A one-request-at-a-time HTTP server: `answer` gets each request's JSON body and returns (status line, body).
+    fn serve(answer: impl Fn(&Value) -> (&'static str, String) + Send + 'static) -> Result<u16> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body = loop {
+                    let n = s.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break Value::Null;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + len {
+                        break serde_json::from_slice(&buf[end + 4..end + 4 + len]).unwrap_or(Value::Null);
+                    }
+                };
+                let (status, reply) = answer(&body);
+                let kind = if status.starts_with("200") { "text/event-stream" } else { "application/json" };
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+            }
+        });
+        Ok(port)
+    }
+
+    #[test]
+    fn chat_asks_for_usage_and_falls_back_when_a_server_refuses_stream_options() -> Result<()> {
+        let stream = |usage: bool| {
+            let mut s = format!("data: {}\n\n", json!({ "choices": [{ "delta": { "content": "ok" } }] }));
+            if usage {
+                s.push_str(&format!("data: {}\n\n", json!({ "choices": [], "usage": { "prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11 } })));
+            }
+            s + "data: [DONE]\n\n"
+        };
+        // Honours stream_options.
+        let port = serve(move |body| {
+            assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+            ("200 OK", stream(true))
+        })?;
+        let d = dir("usage-ok", json!({ "ok": { "url": format!("http://127.0.0.1:{port}/v1") } }));
+        let reply = Model::parse("ok:m", &d, "c")?.complete("s", &[], &[], &mut |_| true)?;
+        assert_eq!(reply.usage, Some(TokenUsage { input: 10, cached: 0, output: 1, total: 11 }));
+
+        // Refuses it: asked again without, and the reply comes back with no usage.
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        let port = serve(move |body| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if body.get("stream_options").is_some() {
+                ("400 Bad Request", json!({ "error": "Unrecognized request argument supplied: stream_options" }).to_string())
+            } else {
+                ("200 OK", stream(false))
+            }
+        })?;
+        let d = dir("usage-refused", json!({ "strict": { "url": format!("http://127.0.0.1:{port}/v1") } }));
+        let reply = Model::parse("strict:m", &d, "c")?.complete("s", &[], &[], &mut |_| true)?;
+        assert_eq!((reply.text.as_str(), reply.usage), ("ok", None));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_compact_entry_renders_as_a_framed_handoff_in_both_formats() {
+        let entry = |id: i64, kind: &str, body: Value| Entry { id, kind: kind.into(), body, model: None };
+        let chain = vec![
+            entry(9, "compact", json!({ "summary": "Goal: ship M1.", "compacted_count": 8, "continue": true })),
+            entry(10, "system", json!({ "sections": { "date": "Today is 2026-11-21." }, "text": "Today is 2026-11-21." })),
+        ];
+        let chat = chat_messages("S", &chain);
+        assert_eq!(chat[1]["role"], "user");
+        let text = chat[1]["content"].as_str().unwrap();
+        assert!(text.starts_with("[Context compacted]") && text.contains("Goal: ship M1.") && text.ends_with("left off."), "{text}");
+        let codex = codex_input(&chain);
+        assert_eq!(codex[0]["role"], "user");
+        assert_eq!(codex[0]["content"][0]["text"], text);
+        assert_eq!(codex[1]["role"], "developer");
     }
 
     #[test]

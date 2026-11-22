@@ -158,8 +158,10 @@ pub fn plan_delta(chain: &[Entry], state: &PromptState) -> Option<Value> {
 
 /// Append a minimal `"system"` delta entry to `conv` if any dynamic section changed.
 /// Returns `Ok(true)` if an entry was appended, `Ok(false)` if the prefix stayed untouched.
+/// Sections are replayed from what the model reads, so after a compact or reset every
+/// current section is sent once more.
 pub fn sync(db: &Journal, conv: &str, state: &PromptState) -> Result<bool> {
-    let chain = db.chain(conv)?;
+    let chain = db.chain_for_model(conv)?;
     if let Some(body) = plan_delta(&chain, state) {
         db.append(conv, "system", &body, None)?;
         Ok(true)
@@ -312,6 +314,41 @@ mod tests {
         assert!(shown2.contains_key("status"));
 
         assert!(!sync(&db, conv, &state)?);
+
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_sends_every_current_section_once_after_a_compact_or_reset() -> Result<()> {
+        let (path, db) = temp_db("markers");
+        let conv = "chat-1";
+        let state = PromptState {
+            worker: false,
+            in_run: false,
+            today: "2026-11-21".into(),
+            folder: Some(PathBuf::from("/tmp/repo")),
+            draft_card: Some("Title: Ship M1".into()),
+        };
+        assert!(sync(&db, conv, &state)?);
+        db.append(conv, "user", &json!({ "text": "hi" }), None)?;
+        assert!(!sync(&db, conv, &state)?, "unchanged");
+
+        for marker in [json!(["compact", { "summary": "said hi", "compacted_count": 2 }]), json!(["reset", { "note": null, "head_entry": null }])] {
+            db.append(conv, marker[0].as_str().unwrap(), &marker[1], None)?;
+            assert!(sync(&db, conv, &state)?, "{} re-sends the sections", marker[0]);
+            let last = db.chain(conv)?.pop().unwrap();
+            assert_eq!(last.kind, "system");
+            let sections = last.body["sections"].as_object().unwrap();
+            assert_eq!(sections.keys().map(String::as_str).collect::<Vec<_>>(), ["card", "date", "folder"]);
+            let text = last.body["text"].as_str().unwrap();
+            assert!(text.starts_with("Today is 2026-11-21.") && text.contains("/tmp/repo") && text.contains("Ship M1"));
+            assert!(!text.contains("removed") && !text.contains("No task card"), "no removal notices: {text}");
+            assert!(!sync(&db, conv, &state)?, "and only once");
+            let model_systems = db.chain_for_model(conv)?.iter().filter(|e| e.kind == "system").count();
+            assert_eq!(model_systems, 1, "the model reads one copy of each section");
+        }
+        assert_eq!(db.chain(conv)?.iter().filter(|e| e.kind == "system").count(), 3, "the raw chain keeps all of them");
 
         let _ = std::fs::remove_file(&path);
         Ok(())

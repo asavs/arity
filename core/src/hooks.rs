@@ -961,7 +961,8 @@ impl RatingHook {
                 continue;
             }
 
-            let mut hook_chain = chain.clone();
+            // Reports are found in the whole chain; the model reads only its own context.
+            let mut hook_chain = journal::model_view(chain.clone());
             hook_chain.push(Entry {
                 id: 0,
                 kind: "notice".into(),
@@ -1080,12 +1081,13 @@ mod tests {
                 arguments: json!({ "score": score, "note": note }).to_string(),
             }],
             interrupted: false,
+            usage: None,
         }
     }
 
     fn noop_complete() -> impl Fn(&str, &[Entry], &[ToolSpec], &mut crate::model::Sink) -> Result<Reply> {
         |_: &str, _: &[Entry], _: &[ToolSpec], _: &mut crate::model::Sink| {
-            Ok(Reply { text: String::new(), tool_calls: vec![], interrupted: false })
+            Ok(Reply { text: String::new(), tool_calls: vec![], interrupted: false, usage: None })
         }
     }
 
@@ -1155,7 +1157,7 @@ mod tests {
         let seen_tasks = std::cell::RefCell::new(vec![]);
         let bad_model = |_: &str, chain: &[Entry], _: &[ToolSpec], _: &mut crate::model::Sink| -> Result<Reply> {
             seen_tasks.borrow_mut().push(chain.last().unwrap().body["task"].as_i64().unwrap());
-            Ok(Reply { text: "4 out of 5".into(), tool_calls: vec![], interrupted: false })
+            Ok(Reply { text: "4 out of 5".into(), tool_calls: vec![], interrupted: false, usage: None })
         };
         assert_eq!(after_turn(&db, "chat-1", "m:same", "sys", &bad_model, &Live::default())?, 0);
         // Only `other` was offered to the hook; `same` was skipped; bad reply didn't error or mark ran.
