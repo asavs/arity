@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use board::{Priority, RunState, TaskFields, TaskState};
+pub use turn::Delivery;
 pub use catalog::KeyCheck;
 pub use leaderboard::{Choice, Figures, Pick, Standing};
 pub use usage::{Limit, Usage};
@@ -412,6 +413,15 @@ impl Arity {
         Ok(())
     }
 
+    /// The user's message, delivered the way any participant's is: `how` says
+    /// when it joins a turn running there. With no turn running, every timing
+    /// but inbox starts one and blocks until it ends; inbox only leaves the
+    /// message there for the conversation's next turn, waking nothing.
+    pub fn send_as(&self, conversation: String, model: String, text: String, how: Delivery) -> Result<()> {
+        self.send_as_with(&conversation, &model, &text, how, &mut |_| {})?;
+        Ok(())
+    }
+
     /// Stop the turn running in a conversation, in whichever process runs it.
     /// The reply so far is kept. False if nothing was running.
     pub fn stop(&self, conversation: String) -> Result<bool> {
@@ -553,7 +563,15 @@ impl Arity {
 /// when another loop is running the conversation; a sent message then waits for it.
 impl Arity {
     pub fn send_with(&self, conv: &str, model: &str, text: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
-        turn::send(&self.journal()?, conv, text)?;
+        self.send_as_with(conv, model, text, Delivery::NextStep, on)
+    }
+
+    /// As `send_as`. Inbox runs nothing and returns true.
+    pub fn send_as_with(&self, conv: &str, model: &str, text: &str, how: Delivery, on: &mut dyn FnMut(Event)) -> Result<bool> {
+        turn::send_as(&self.journal()?, conv, text, how)?;
+        if how == Delivery::Inbox {
+            return Ok(true);
+        }
         self.resume_with(conv, model, on)
     }
 

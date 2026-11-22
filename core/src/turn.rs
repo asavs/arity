@@ -326,7 +326,8 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
     Ok(true)
 }
 
-/// The user's message. A running turn takes it between replies.
+/// The user's message at the next step, as the front ends send by default.
+#[cfg(test)]
 pub fn send(db: &Journal, conv: &str, text: &str) -> Result<()> {
     send_as(db, conv, text, Delivery::NextStep)
 }

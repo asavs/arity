@@ -119,7 +119,13 @@ struct ThreadView: View {
                 .textFieldStyle(.plain)
                 .lineLimit(lines)
                 .focused($composing)
-                .onSubmit(send)
+                .onSubmit { send() }
+                .onKeyPress(.return, phases: .down) { press in
+                    // ⌥↩ after this turn; ⌘↩ now, unless a card is open (there ⌘↩ adds it).
+                    if press.modifiers.contains(.option) { send(.afterTurn); return .handled }
+                    if press.modifiers.contains(.command) && store.draft == nil { send(.now); return .handled }
+                    return .ignored
+                }
                 .onExitCommand { if busy { store.stop() } }
 
             // While a turn runs, Stop sits where Send is, until something is typed to send after it.
@@ -131,11 +137,25 @@ struct ThreadView: View {
                     .keyboardShortcut(.cancelAction)
                     .help("Stop the reply (Esc)")
             } else {
-                Button("Send", systemImage: "arrow.up.circle.fill", action: send)
-                    .labelStyle(.iconOnly)
-                    .font(.title2)
-                    .buttonStyle(.borderless)
-                    .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Menu {
+                    if busy {
+                        Button("Send at the Next Step  ↩") { send(.nextStep) }
+                        Button("Send After This Turn  ⌥↩") { send(.afterTurn) }
+                        Button("Send Now, Cutting Off the Reply  ⌘↩") { send(.now) }
+                    }
+                    Button("Leave a Note for Its Next Turn") { send(.inbox) }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                } primaryAction: {
+                    send()
+                }
+                .menuStyle(.button)
+                .menuIndicator(.visible)
+                .font(.title2)
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help(busy ? "Send at the next step (↩); more timings in the menu" : "Send (↩); or leave a note without a reply")
             }
         }
     }
@@ -167,11 +187,13 @@ struct ThreadView: View {
         .padding(10)
     }
 
-    private func send() {
+    /// While a turn runs, `how` says when the message joins it: the same
+    /// timings an agent's messages and reports have.
+    private func send(_ how: Delivery = .nextStep) {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         message = ""
-        store.send(text)
+        store.send(text, how: how)
     }
 }
 

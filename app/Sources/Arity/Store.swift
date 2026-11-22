@@ -125,12 +125,21 @@ final class Store {
 
     /// A chat keeps the model its first message was picked for, so a conversation
     /// does not change model part way; a new choice picks again from the next message.
-    func send(_ text: String) {
+    /// `how` is when it joins a turn already running there, as for any participant's
+    /// message. Inbox starts nothing: it waits there for the chat's next turn.
+    func send(_ text: String, how: Delivery = .nextStep) {
         guard let conv = selection else { return }
         flushCard()
+        if how == .inbox {
+            _ = attempt { try core.sendAs(conversation: conv, model: model, text: text, how: .inbox) }
+            refresh(force: true)
+            return
+        }
         let pick = choice.flatMap { messages.isEmpty || choiceChanged || model.isEmpty ? $0 : nil }
         choiceChanged = false
-        run(conv, pick: pick, unsent: text) { core, model in try core.send(conversation: conv, model: model, text: text) }
+        run(conv, pick: pick, unsent: text) { core, model in
+            try core.sendAs(conversation: conv, model: model, text: text, how: how)
+        }
     }
 
     /// Other…: use this model for the chat from the next message.

@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, Choice, Figures, KeyCheck, Usage, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, Choice, Delivery, Figures, KeyCheck, Usage, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -12,7 +12,10 @@ const USAGE: &str = "usage:
   arity board                                the same list, tasks only
   arity log    <thread>                      read a thread
   arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used,
-                                             or --smart, --fast, --free or --private to let Arity pick
+                                             or --smart, --fast, --free or --private to let Arity pick;
+                                             if a turn is running there, the message joins at its next step,
+                                             or with --after-turn when it would end, --now cutting off its reply;
+                                             --inbox leaves it for the next turn and starts nothing
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
@@ -110,9 +113,20 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None => model_for(&arg(1), arg(2))?,
             };
+            let (how, words) = match arg(3).as_str() {
+                "--now" => (Delivery::Now, &args[4..]),
+                "--after-turn" => (Delivery::AfterTurn, &args[4..]),
+                "--inbox" => (Delivery::Inbox, &args[4..]),
+                _ => (Delivery::NextStep, &args[3..]),
+            };
+            if words.is_empty() {
+                return Err("nothing to send".into());
+            }
             stop_on_ctrl_c(&arg(1));
-            if !arity.send_with(&arg(1), &model, &args[3..].join(" "), &mut streamer(&model))? {
-                println!("a turn is running in {}; it answers this next", arg(1));
+            if !arity.send_as_with(&arg(1), &model, &words.join(" "), how, &mut streamer(&model))? {
+                println!("a turn is running in {}; the message joins it", arg(1));
+            } else if how == Delivery::Inbox {
+                println!("left in {} for its next turn", arg(1));
             }
         }
         ("resume", 2 | 3) => {
