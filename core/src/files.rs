@@ -8,10 +8,43 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::tools::ToolSpec;
+use crate::tools::{Execution, Replay, Tool, ToolOutput, ToolSpec, ToolVisibility};
 
-/// The tools this module offers, for `tools::specs` and `tools::execute`.
-pub const NAMES: [&str; 3] = ["list_files", "read_file", "search_files"];
+struct FileTool {
+    spec: ToolSpec,
+}
+
+impl Tool for FileTool {
+    fn name(&self) -> &'static str {
+        self.spec.name
+    }
+
+    fn execution(&self) -> Execution {
+        Execution::External { replay: Replay::Safe }
+    }
+
+    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
+        vis.folder.is_some().then(|| self.spec.clone())
+    }
+
+    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
+        vis.folder
+            .is_none()
+            .then(|| "no folder is attached to this conversation, so there are no files to read".into())
+    }
+
+    fn run_external(&self, vis: &ToolVisibility, args: &Value) -> Result<ToolOutput> {
+        let Some(root) = vis.folder.as_deref() else {
+            bail!("no folder is attached to this conversation, so there are no files to read");
+        };
+        Ok(ToolOutput::ok(execute(root, self.spec.name, args)?))
+    }
+}
+
+/// The read-only file tools registered in `tools::ToolRegistry`.
+pub fn tools() -> Vec<Box<dyn Tool>> {
+    specs().into_iter().map(|spec| Box::new(FileTool { spec }) as Box<dyn Tool>).collect()
+}
 
 /// Folders never walked or searched.
 const IGNORED: [&str; 4] = [".git", "target", ".build", "node_modules"];

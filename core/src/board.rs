@@ -5,13 +5,13 @@
 //! Ready is decided by blockers and recomputed after every write. A task whose
 //! assignee is `agent` wakes the dispatcher once it is ready: it claims the
 //! task by creating a trial, which picks a model blind and runs a worker in its
-//! own conversation. The finished result waits in gates until whoever wrote the
-//! task rates it; the rating is the only gate for now. The model stays hidden
-//! until then.
+//! own conversation. The finished result reports back to whoever filed the task
+//! (a parent conversation — chat or worker — or the user directly) and waits in
+//! gates until rated. The model stays hidden until then.
 //!
-//! A task filed in a conversation the user is talking in is the user's, and
-//! `origin` remembers the conversation. Only a task an agent files from its own
-//! run is written by a conversation, and only those are rated by a model.
+//! Recursively, a conversation that delegates work is that task's parent,
+//! whether it is a chat or an agent's run. A task filed outside any
+//! conversation belongs to the user.
 
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -27,7 +27,7 @@ pub const AGENT: &str = "agent";
 
 /// How many levels of tasks for agents can stack up. A task filed in a chat is
 /// level 1; one its run hands to an agent is level 2. A run at the floor is not
-/// offered delegation: a task it writes is its own todo (see `tools::specs`).
+/// offered delegation (see `tools::specs`).
 pub const MAX_DEPTH: i64 = 2;
 
 /// The user's page: `people/<login>`.
@@ -42,12 +42,6 @@ pub fn me() -> String {
 
 pub fn conversation_page(conv: &str) -> String {
     format!("conversations/{conv}")
-}
-
-/// Who a task filed in this conversation belongs to: the agent whose run the
-/// conversation is, or else the user, who is the one talking in it.
-pub fn author(conn: &Connection, conv: &str) -> Result<String> {
-    Ok(if trial_of_conversation(conn, conv)?.is_some() { conversation_page(conv) } else { me() })
 }
 
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -678,13 +672,11 @@ fn write_links(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
 }
 
 /// A task filed in the conversation `origin`, or by the user directly when
-/// there is none. Who it belongs to follows from that; see `author`.
+/// there is none. Any conversation (chat or worker run) that files a task is
+/// its parent.
 pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Result<i64> {
     check(conn, None, f)?;
-    let created_by = match origin {
-        Some(conv) => author(conn, conv)?,
-        None => me(),
-    };
+    let created_by = origin.map(conversation_page).unwrap_or_else(me);
     let (depth, parent) = parent_of(conn, origin)?;
     // Private work stays private all the way down: a private run's tasks are private too.
     let choice = if parent == Some(Choice::Private) { Choice::Private } else { f.choice };
@@ -893,20 +885,20 @@ pub fn rate(conn: &Connection, trial: i64, score: i64, note: &str, rated_by: &st
 
 /// Finished, reported runs of tasks this conversation wrote that nobody has
 /// rated and that `model`, the one it is running on, may rate: not its own.
-/// The rest are left for the user. Each is (task, run).
-pub fn unrated_for(conn: &Connection, conv: &str, model: &str) -> Result<Vec<(i64, i64)>> {
+/// The rest are left for the user. Each is (task, run, title).
+pub fn unrated_for(conn: &Connection, conv: &str, model: &str) -> Result<Vec<(i64, i64, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT tr.task, tr.id FROM trials tr JOIN tasks t ON t.id = tr.task
+        "SELECT tr.task, tr.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task
          WHERE t.created_by = ?1 AND tr.ended IS NOT NULL AND tr.reported = 1 AND tr.abandoned = 0 AND tr.model != ?2
            AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.trial = tr.id)
          ORDER BY tr.id",
     )?;
-    let rows = stmt.query_map(params![conversation_page(conv), model], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![conversation_page(conv), model], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Tasks this run handed to an agent whose results have not reached it yet:
-/// not started, running, or finished but not yet passed on. Ids, oldest first.
+/// Tasks this conversation handed to an agent whose results have not reached it
+/// yet: not started, running, or finished but not yet passed on. Ids, oldest first.
 pub fn children_out(conn: &Connection, conv: &str) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT t.id FROM tasks t
@@ -920,13 +912,49 @@ pub fn children_out(conn: &Connection, conv: &str) -> Result<Vec<i64>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Wake `conv` if it is a run waiting for its sub-tasks: `claim` takes it up
-/// like a run whose lease ran out.
+/// The model a parent conversation can be woken on: its trial's model if it is
+/// an open run, or its last assistant model if it is a chat. None for a finished
+/// run or an empty chat with no model yet.
+pub fn parent_model(conn: &Connection, conv: &str) -> Result<Option<String>> {
+    if let Some((_, _, model, ended)) = trial_state(conn, conv)? {
+        return Ok((!ended).then_some(model));
+    }
+    if let Some(m) = crate::journal::chain(conn, conv)?.into_iter().rev().find_map(|e| e.model) {
+        return Ok(Some(m));
+    }
+    crate::turn::model(conn, conv)
+}
+
+/// Wake `conv` so the dispatcher runs it: a waiting run is taken up like one
+/// whose lease ran out, and an idle chat with a model is marked ready to wake.
 pub fn wake(conn: &Connection, conv: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE trials SET waiting = 0, lease_until = 0 WHERE conversation = ?1 AND waiting = 1 AND ended IS NULL",
-        params![conv],
-    )?;
+    if let Some((_, _, _, ended)) = trial_state(conn, conv)? {
+        if !ended {
+            conn.execute(
+                "UPDATE trials SET waiting = 0, lease_until = 0 WHERE conversation = ?1 AND waiting = 1 AND ended IS NULL",
+                params![conv],
+            )?;
+        }
+        return Ok(());
+    }
+    if parent_model(conn, conv)?.is_some() {
+        conn.execute("UPDATE conversations SET wake_at = 1 WHERE name = ?1", params![conv])?;
+    }
+    Ok(())
+}
+
+/// Mark an idle chat as waiting for its remaining delegated children to report
+/// before waking (unless an immediate wake is already queued).
+pub fn wait_for_children(conn: &Connection, conv: &str) -> Result<()> {
+    if trial_state(conn, conv)?.is_none() && parent_model(conn, conv)?.is_some() {
+        conn.execute("UPDATE conversations SET wake_at = -1 WHERE name = ?1 AND wake_at = 0", params![conv])?;
+    }
+    Ok(())
+}
+
+/// Clear any pending dispatcher wake for `conv`.
+pub fn clear_wake(conn: &Connection, conv: &str) -> Result<()> {
+    conn.execute("UPDATE conversations SET wake_at = 0 WHERE name = ?1", params![conv])?;
     Ok(())
 }
 
@@ -935,7 +963,7 @@ pub fn wake(conn: &Connection, conv: &str) -> Result<()> {
 pub enum Parent {
     /// Another agent's run, still going: its conversation.
     Run(String),
-    /// The user, who filed it in this chat.
+    /// A chat conversation that filed the task.
     Chat(String),
     /// The user, who filed it outside any chat; or a run that has finished.
     Unreachable,
@@ -949,14 +977,11 @@ pub fn parent(conn: &Connection, conv: &str) -> Result<Parent> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     Ok(match (created_by.strip_prefix("conversations/"), origin) {
-        (Some(run), _) => {
-            let live: bool = conn.query_row(
-                "SELECT count(*) > 0 FROM trials WHERE conversation = ?1 AND ended IS NULL",
-                params![run],
-                |r| r.get(0),
-            )?;
-            if live { Parent::Run(run.to_string()) } else { Parent::Unreachable }
-        }
+        (Some(p), _) => match trial_state(conn, p)? {
+            Some((_, _, _, false)) => Parent::Run(p.to_string()),
+            Some((_, _, _, true)) => Parent::Unreachable,
+            None => Parent::Chat(p.to_string()),
+        },
         (None, Some(chat)) => Parent::Chat(chat),
         (None, None) => Parent::Unreachable,
     })
@@ -976,13 +1001,6 @@ pub fn child_run(conn: &Connection, conv: &str, task: i64) -> Result<Option<Stri
             |r| r.get(0),
         )
         .optional()?)
-}
-
-/// A run's own todos that are not done, as (id, title).
-pub fn open_todos(conn: &Connection, conv: &str) -> Result<Vec<(i64, String)>> {
-    let mut stmt = conn.prepare("SELECT id, title FROM tasks WHERE assignee = ?1 AND state != 'done' ORDER BY id")?;
-    let rows = stmt.query_map(params![conversation_page(conv)], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 #[derive(Debug, Clone)]
@@ -1194,8 +1212,6 @@ mod tests {
         run(two)?;
         assert_eq!(task(c, two)?.fields.dir.as_deref(), repo.to_str());
         assert_eq!(folder_of(c, "task-2")?, Some(repo.clone()));
-        let todo = add_task(c, &TaskFields { assignee: conversation_page("task-2"), ..fields("todo") }, Some("task-2"))?;
-        assert_eq!(task(c, todo)?.fields.dir.as_deref(), repo.to_str());
         // An explicit folder is not overwritten.
         let other = add_task(c, &TaskFields { dir: Some("/elsewhere".into()), ..for_agent("other") }, Some("chat"))?;
         assert_eq!(task(c, other)?.fields.dir.as_deref(), Some("/elsewhere"));
@@ -1214,22 +1230,25 @@ mod tests {
     }
 
     #[test]
-    fn a_task_filed_in_a_chat_is_the_users() -> Result<()> {
+    fn a_task_filed_in_a_conversation_belongs_to_it() -> Result<()> {
         let path = temp("author");
         let db = crate::journal::Journal::open(&path)?;
         let c = db.conn();
-        // The model in a chat adds a task for an agent: the user's, from that chat.
+        // A chat delegates a task to an agent: the chat is its parent, same as a worker run.
         let out = crate::tools::execute(c, "chat", "codex:x", "add_task", r#"{"title": "write a poem", "assignee": "agent"}"#);
         assert!(out.starts_with("added task 1"), "{out}");
         let t = task(c, 1)?;
-        assert_eq!((&*t.created_by, t.origin.as_deref()), (&*me(), Some("chat")));
-        // So no model is asked to rate it, whichever one the chat is on.
+        assert_eq!((&*t.created_by, t.origin.as_deref()), ("conversations/chat", Some("chat")));
         let run = finished_run(c, 1, "mlx:m")?;
-        assert!(unrated_for(c, "chat", "codex:x")?.is_empty());
+        // Another model in the chat may rate it; the same model may not.
+        assert_eq!(unrated_for(c, "chat", "codex:x")?, vec![(1, run, "write a poem".into())]);
+        assert!(unrated_for(c, "chat", "mlx:m")?.is_empty());
+        // The user can also rate it directly.
         rate(c, run, 5, "lovely", &me(), None)?;
         assert_eq!(task(c, 1)?.state, TaskState::Done);
-        // Written directly, there is no origin. Filed from an agent's own run, it is that run's.
-        assert_eq!(task(c, add_task(c, &fields("direct"), None)?)?.origin, None);
+        // Written directly outside any conversation, it belongs to the user.
+        let direct = add_task(c, &fields("direct"), None)?;
+        assert_eq!((task(c, direct)?.created_by, task(c, direct)?.origin), (me(), None));
         let delegated = add_task(c, &for_agent("delegated"), Some("task-1"))?;
         assert_eq!(task(c, delegated)?.created_by, "conversations/task-1");
         let _ = std::fs::remove_file(&path);
@@ -1248,13 +1267,10 @@ mod tests {
         let run = finished_run(c, child, "mlx:a")?;
         assert!(unrated_for(c, "task-1", "mlx:a")?.is_empty(), "not offered its own run");
         assert!(rate(c, run, 5, "great", "conversations/task-1", Some("mlx:a")).is_err());
-        let out = crate::tools::execute(c, "task-1", "mlx:a", "rate", &format!(r#"{{"task": {child}, "score": 5, "note": "great"}}"#));
-        assert!(out.starts_with("error"), "{out}");
         assert_eq!(task(c, child)?.run_state, Some(RunState::NeedsRating), "still waiting, for the user");
         // Another model may, and is recorded as the rater.
-        assert_eq!(unrated_for(c, "task-1", "mlx:b")?, vec![(child, run)]);
-        let out = crate::tools::execute(c, "task-1", "mlx:b", "rate", &format!(r#"{{"task": {child}, "score": 3, "note": "ok"}}"#));
-        assert_eq!(out, format!("rated task {child}: 3/5"));
+        assert_eq!(unrated_for(c, "task-1", "mlx:b")?, vec![(child, run, "child".into())]);
+        rate(c, run, 3, "ok", "conversations/task-1", Some("mlx:b"))?;
         let rater: Option<String> = c.query_row("SELECT rater_model FROM ratings WHERE trial = ?1", params![run], |r| r.get(0))?;
         assert_eq!(rater.as_deref(), Some("mlx:b"));
         let _ = std::fs::remove_file(&path);

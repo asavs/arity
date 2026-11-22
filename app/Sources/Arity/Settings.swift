@@ -41,8 +41,13 @@ struct SettingsSheet: View {
                     Text("A task for an agent goes to one of these, picked blind.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                ToolsSection()
+                HooksSection()
             }
             .formStyle(.grouped)
+            .sheet(isPresented: $store.addingHook, onDismiss: { store.editingHook = nil }) {
+                AddHookSheet(existing: store.editingHook)
+            }
             HStack {
                 AddProviderMenu()
                 if let error = store.error {
@@ -54,7 +59,10 @@ struct SettingsSheet: View {
             .padding(12)
         }
         .frame(width: 560, height: 680)
-        .onAppear { store.checkKeys() }
+        .onAppear {
+            store.checkKeys()
+            store.loadHarness()
+        }
         .sheet(item: $store.addingProvider) { AddProviderSheet(preset: $0) }
     }
 }
@@ -419,6 +427,382 @@ private struct AddProviderSheet: View {
             name = preset.name
             url = preset.url
             needsKey = preset.needsKey
+        }
+    }
+}
+
+private struct ToolsSection: View {
+    @Environment(Store.self) private var store
+
+    private var contextLabel: String {
+        if let name = store.selection {
+            return store.folder == nil ? "\(name) · no folder" : "\(name) · folder attached"
+        }
+        return "Default chat · no folder"
+    }
+
+    var body: some View {
+        Section {
+            ForEach(store.tools, id: \.name) { tool in
+                ToolRow(tool: tool)
+            }
+        } header: {
+            HStack {
+                Text("Tools")
+                Spacer()
+                Text(contextLabel)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        } footer: {
+            Text("Green dots are offered to the current thread. File and bash tools turn on automatically when a folder is attached; atomic tools run inside the journal transaction, while external tools commit intent first.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ToolRow: View {
+    let tool: ToolInfo
+
+    private var shortDescription: String {
+        if let dot = tool.description.firstIndex(of: ".") {
+            return String(tool.description[...dot])
+        }
+        return tool.description
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(tool.available ? Color.green : Color.secondary.opacity(0.35))
+                .frame(width: 8, height: 8)
+                .frame(width: 16)
+                .help(tool.available ? "Available in this thread" : "Not offered in this thread (needs a folder or worker run)")
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(tool.name)
+                        .font(.body.monospaced())
+                        .foregroundStyle(tool.available ? .primary : .secondary)
+                    Text(tool.execution)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                }
+                if !shortDescription.isEmpty {
+                    Text(shortDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(tool.description)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct HooksSection: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        Section {
+            ForEach(store.builtinHooks, id: \.name) { hook in
+                BuiltinHookRow(hook: hook)
+            }
+            ForEach(store.hooks, id: \.name) { hook in
+                HookRow(hook: hook)
+            }
+            Button("Add Hook…", systemImage: "plus") {
+                store.editingHook = nil
+                store.addingHook = true
+            }
+            .buttonStyle(.borderless)
+        } header: {
+            Text("Hooks")
+        } footer: {
+            Text("Custom hooks run as shell commands with JSON context on stdin: exit non-zero to block before_tool or retry on_yield, or print JSON on stdout to rewrite args or write journal notes.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct BuiltinHookRow: View {
+    let hook: BuiltinHookInfo
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 8, height: 8)
+                .frame(width: 16)
+                .help("Built-in hook (always active)")
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(hook.name)
+                    Text("built-in")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.6), in: Capsule())
+                    Text(hook.event.badge)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                    if let tool = hook.tool, !tool.isEmpty {
+                        Text(tool)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary.opacity(0.7), in: Capsule())
+                            .lineLimit(1)
+                    }
+                }
+                Text(hook.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(hook.description)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct HookRow: View {
+    @Environment(Store.self) private var store
+    let hook: HookConfig
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Toggle("Enable \(hook.name)", isOn: Binding(
+                get: { hook.enabled },
+                set: { store.setHookEnabled(hook.name, $0) }
+            ))
+            .labelsHidden()
+            .controlSize(.small)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(hook.name)
+                        .foregroundStyle(hook.enabled ? .primary : .secondary)
+                    Text(hook.event.badge)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                    if let tool = hook.tool, !tool.isEmpty {
+                        Text(tool)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary.opacity(0.7), in: Capsule())
+                            .lineLimit(1)
+                    }
+                }
+                Text(hook.command)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(hook.command)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Edit \(hook.name)", systemImage: "pencil") {
+                store.editingHook = hook
+                store.addingHook = true
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Edit hook")
+
+            Button("Remove \(hook.name)", systemImage: "minus.circle") {
+                store.removeHook(hook.name)
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Remove hook")
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct HookPreset: Identifiable {
+    var title: String
+    var name: String
+    var event: HookEvent
+    var tool: String
+    var command: String
+    var id: String { name }
+
+    static let all = [
+        HookPreset(
+            title: "Read-only guard",
+            name: "read-only",
+            event: .beforeTool,
+            tool: "write_file,edit_file,bash",
+            command: #"echo "Read-only mode: edits and shell commands are disabled." >&2; exit 1"#
+        ),
+        HookPreset(
+            title: "Cargo check on yield",
+            name: "cargo-check",
+            event: .onYield,
+            tool: "",
+            command: "cargo check"
+        ),
+        HookPreset(
+            title: "Format Rust on edit",
+            name: "rustfmt",
+            event: .afterTool,
+            tool: "edit_file,write_file",
+            command: "cargo fmt"
+        ),
+    ]
+}
+
+private struct AddHookSheet: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let existing: HookConfig?
+    @State private var name: String
+    @State private var event: HookEvent
+    @State private var tool: String
+    @State private var command: String
+    @State private var enabled: Bool
+    @State private var saveError: String?
+
+    init(existing: HookConfig?) {
+        self.existing = existing
+        _name = State(initialValue: existing?.name ?? "")
+        _event = State(initialValue: existing?.event ?? .beforeTool)
+        _tool = State(initialValue: existing?.tool ?? "")
+        _command = State(initialValue: existing?.command ?? "")
+        _enabled = State(initialValue: existing?.enabled ?? true)
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Form {
+                Section {
+                    HStack(spacing: 8) {
+                        ForEach(HookPreset.all) { preset in
+                            Button(preset.title) {
+                                name = preset.name
+                                event = preset.event
+                                tool = preset.tool
+                                command = preset.command
+                                enabled = true
+                                saveError = nil
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                } header: {
+                    Text("Quick Presets")
+                }
+
+                Section {
+                    TextField("Name", text: $name, prompt: Text("e.g. cargo-check"))
+                    Picker("Event", selection: $event) {
+                        ForEach(HookEvent.all, id: \.self) { e in
+                            Text(e.title).tag(e)
+                        }
+                    }
+                    TextField("Tool filter", text: $tool, prompt: Text("All tools, or e.g. bash, edit_file"))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Command")
+                        TextField("Command", text: $command, prompt: Text("Shell command (receives JSON on stdin)"), axis: .vertical)
+                            .labelsHidden()
+                            .font(.body.monospaced())
+                            .lineLimit(3...6)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Toggle("Enabled", isOn: $enabled)
+                } header: {
+                    Text(existing == nil ? "Add Hook" : "Edit Hook")
+                } footer: {
+                    Text("Names use letters, digits, dashes, or underscores. Commands receive JSON hook context on stdin.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                if let saveError {
+                    Label(saveError, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSave)
+            }
+            .padding(12)
+        }
+        .frame(width: 480)
+    }
+
+    private func save() {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTool = tool.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hook = HookConfig(
+            name: trimmedName,
+            event: event,
+            tool: trimmedTool.isEmpty ? nil : trimmedTool,
+            command: trimmedCommand,
+            enabled: enabled
+        )
+        if store.saveHook(hook) {
+            if let oldName = existing?.name, oldName != trimmedName {
+                store.removeHook(oldName)
+            }
+            dismiss()
+        } else {
+            saveError = store.error
+        }
+    }
+}
+
+private extension HookEvent {
+    static let all: [HookEvent] = [.beforeTool, .afterTool, .onYield, .afterTurn]
+
+    var badge: String {
+        switch self {
+        case .beforeTool: "before_tool"
+        case .afterTool: "after_tool"
+        case .onYield: "on_yield"
+        case .afterTurn: "after_turn"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .beforeTool: "Before Tool"
+        case .afterTool: "After Tool"
+        case .onYield: "On Yield"
+        case .afterTurn: "After Turn"
         }
     }
 }

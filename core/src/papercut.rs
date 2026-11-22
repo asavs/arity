@@ -123,18 +123,17 @@ mod tests {
         let (db, path) = open("callers")?;
         let c = db.conn();
         chain(c)?;
-        for (conv, by) in [("chat", board::me()), ("task-1", "conversations/task-1".into()), ("task-2", "conversations/task-2".into())] {
+        for (conv, by) in [("chat", "conversations/chat"), ("task-1", "conversations/task-1"), ("task-2", "conversations/task-2")] {
             let said = call(c, conv, json!({ "note": "the docs link is dead", "about": "https://example.com/docs" }));
             assert!(said.starts_with("filed papercut"), "{conv}: {said}");
             let t = board::task(c, id_of(&said))?;
             assert_eq!(t.fields.title, "the docs link is dead");
             assert_eq!(t.fields.brief, "About: https://example.com/docs");
             assert_eq!((t.fields.assignee, t.fields.priority, t.fields.tags), (board::me(), Priority::Low, vec![TAG.to_string()]));
-            assert_eq!((t.created_by, t.origin.as_deref()), (by, Some(conv)));
+            assert_eq!((t.created_by.as_str(), t.origin.as_deref()), (by, Some(conv)));
             let runs: i64 = c.query_row("SELECT count(*) FROM trials WHERE task = ?1", [t.id], |r| r.get(0))?;
             assert_eq!(runs, 0);
         }
-        assert!(board::open_todos(c, "task-2")?.is_empty());
         assert!(board::children_out(c, "task-2")?.is_empty());
         assert_eq!(board::children_out(c, "task-1")?, [2], "only the task it handed out holds it up");
         assert_eq!(tools::execute(c, "task-2", "m", "finish", &json!({ "report": "done" }).to_string()), tools::FINISHED);
@@ -202,8 +201,8 @@ mod tests {
         assert!(!waiting(), "after_turn wakes a waiting parent");
         assert_eq!(messages().len(), 2);
         assert!(call(c, "task-2", json!({ "note": "x", "ask_help": true, "when": "soon" })).contains("when is one of"));
-        // Task 1's parent is the user: a note in the chat.
-        assert!(call(c, "task-1", json!({ "note": "halfway stuck", "ask_help": true })).contains("the user"));
+        // Task 1's parent is the chat: reached the same way.
+        assert!(call(c, "task-1", json!({ "note": "halfway stuck", "ask_help": true })).contains("whoever handed you this task"));
         assert!(db.chain("chat")?.last().unwrap().body["text"].as_str().unwrap().contains("halfway stuck"));
         // A task the user filed outside any chat: nobody to ask, but the papercut stays.
         let lone = board::add_task(c, &TaskFields { title: "lone".into(), assignee: board::AGENT.into(), ..Default::default() }, None)?;

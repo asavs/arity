@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, Choice, Delivery, Figures, KeyCheck, Usage, Event, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup};
+use arity_core::{Access, Arity, Choice, Delivery, Event, Figures, HookConfig, HookEvent, KeyCheck, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup, Usage};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -21,7 +21,7 @@ const USAGE: &str = "usage:
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
-  arity folder <conv> [<path> | --clear]     the folder a conversation's file tools may read, read-only;
+  arity folder <conv> [<path> | --clear]     the folder a conversation's file and shell tools work in;
                                              tasks filed there take it with them
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
                                              drawn among the top three its choice allows
@@ -48,11 +48,17 @@ const USAGE: &str = "usage:
   arity key    check <provider>              whether the provider takes its key; runs no model
   arity key    rm <provider>                 forget it
   arity workers [add|rm <model>]             the models tasks for agents are picked from
+  arity tools  [conv]                        tools available in a conversation (or a chat without a folder)
+  arity hooks                                configured pre/post hooks, plus built-in hooks
+  arity hook   add <name> --event <e> [--tool <t>] -- <command...>
+                                             add or replace a hook; event is before_tool, after_tool,
+                                             on_yield or after_turn; --tool filters by tool name(s)
+  arity hook   rm | enable | disable <name>  remove, enable or disable a hook
   arity login | logout                       sign in to ChatGPT, or out
 
 fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
         --due YYYY-MM-DD  --blocked-by <id,id>  --tag <t> (repeatable)  --no-tags
-        --dir <path> | --no-dir  the folder its run may read; left out, the chat's
+        --dir <path> | --no-dir  the folder its run may inspect, edit and run commands in; left out, the chat's
 
 data: $ARITY_HOME, or ~/Library/Application Support/Arity";
 
@@ -349,6 +355,73 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("key", 3) if arg(1) == "rm" => arity.set_key(arg(2), String::new())?,
         ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
         ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,
+        ("tools", 1 | 2) => {
+            let conv = (args.len() == 2).then(|| arg(1));
+            let tools = arity.tools(conv)?;
+            let name_w = tools.iter().map(|t| t.name.len()).max().unwrap_or(12).max(12);
+            for t in &tools {
+                let status = if t.available { "[on]" } else { "[off]" };
+                println!(
+                    "  {:<name_w$}  {:<5}  {:<15}  {}",
+                    t.name,
+                    status,
+                    t.execution,
+                    first_sentence(&t.description),
+                );
+            }
+        }
+        ("hooks", 1) => {
+            println!("Built-in hooks");
+            for h in arity.builtin_hooks() {
+                let label = format!("{} [{}]", h.name, h.event.as_str());
+                println!("  {:<28}  {}", label, h.description);
+            }
+            println!();
+            println!("User hooks");
+            let hooks = arity.hooks()?;
+            if hooks.is_empty() {
+                println!("  (none; add one with `arity hook add <name> --event <e> [--tool <t>] -- <command...>`)");
+            } else {
+                let name_w = hooks.iter().map(|h| h.name.len()).max().unwrap_or(8).max(8);
+                let tool_w = hooks
+                    .iter()
+                    .map(|h| h.tool.as_deref().unwrap_or("*").len())
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                for h in &hooks {
+                    let status = if h.enabled { "[on]" } else { "[off]" };
+                    let tool = h.tool.as_deref().unwrap_or("*");
+                    println!(
+                        "  {:<5}  {:<name_w$}  {:<11}  {:<tool_w$}  {}",
+                        status,
+                        h.name,
+                        h.event.as_str(),
+                        tool,
+                        h.command,
+                    );
+                }
+            }
+        }
+        ("hook", n) if n >= 2 && arg(1) == "add" => {
+            let hook = parse_hook_add(&args[2..])?;
+            let name = hook.name.clone();
+            arity.save_hook(hook)?;
+            println!("saved hook {name}");
+        }
+        ("hook", 3) if arg(1) == "rm" => {
+            let name = arg(2);
+            if !arity.remove_hook(name.clone())? {
+                return Err(format!("no hook named {name}").into());
+            }
+            println!("removed hook {name}");
+        }
+        ("hook", 3) if arg(1) == "enable" || arg(1) == "disable" => {
+            let enabled = arg(1) == "enable";
+            let name = arg(2);
+            arity.set_hook_enabled(name.clone(), enabled)?;
+            println!("{} hook {name}", if enabled { "enabled" } else { "disabled" });
+        }
         ("login", 1) => println!("Signed in to ChatGPT as {}.", arity.sign_in_chatgpt()?),
         ("" | "help" | "--help" | "-h", _) => println!("{USAGE}"),
         (cmd, _) => {
@@ -452,6 +525,7 @@ fn print(m: &Message) {
         MessageKind::ToolCall => println!("#{:<4} {who} calls {}", m.entry, m.text),
         MessageKind::Report => println!("#{:<4} report: {}", m.entry, m.text.replace('\n', "\n          ")),
         MessageKind::Notice => println!("#{:<4} arity: {}", m.entry, m.text),
+        MessageKind::Rating => println!("#{:<4} rating: {}", m.entry, m.text),
         MessageKind::TaskCard => println!("#{:<4} card: {}", m.entry, m.text),
         MessageKind::ToolResult => println!("#{:<4}   -> {}", m.entry, m.text.replace('\n', "\n          ")),
     }
@@ -554,4 +628,195 @@ fn thread_line(thread: &Thread, me: &str) -> String {
     }
     let extra = if extra.is_empty() { String::new() } else { format!("  · {}", extra.join(" · ")) };
     format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}", thread.name, t.id, state, who, clip(&f.title))
+}
+
+fn first_sentence(s: &str) -> String {
+    let first_line = s.lines().next().unwrap_or("").trim();
+    let sentence = match first_line.find(". ") {
+        Some(i) => &first_line[..=i],
+        None => first_line,
+    };
+    clip(sentence)
+}
+
+/// Parse arguments after `arity hook add`:
+/// `<name> --event <e> [--tool <t>] [--disabled] (--command <cmd> | -- <command...>)`
+fn parse_hook_add(args: &[String]) -> Result<HookConfig, Box<dyn std::error::Error>> {
+    let mut name: Option<String> = None;
+    let mut event: Option<HookEvent> = None;
+    let mut tool: Option<String> = None;
+    let mut command: Option<String> = None;
+    let mut enabled = true;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
+        match a.as_str() {
+            "--" => {
+                if command.is_some() {
+                    return Err("specify either --command or -- <command...>, not both".into());
+                }
+                let joined = it.by_ref().cloned().collect::<Vec<_>>().join(" ");
+                command = Some(joined);
+            }
+            "--event" => {
+                let raw = value(a)?;
+                let parsed = HookEvent::parse(&raw).ok_or_else(|| {
+                    format!("unknown hook event {raw:?}; expected before_tool, after_tool, on_yield, or after_turn")
+                })?;
+                event = Some(parsed);
+            }
+            "--tool" => {
+                let raw = value(a)?;
+                let trimmed = raw.trim();
+                tool = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            }
+            "--command" => {
+                if command.is_some() {
+                    return Err("specify either --command or -- <command...>, not both".into());
+                }
+                command = Some(value(a)?);
+            }
+            "--disabled" => enabled = false,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}").into()),
+            word => {
+                if name.is_none() {
+                    name = Some(word.to_string());
+                } else {
+                    return Err(format!("unexpected argument {word:?} (put the command after -- or --command)").into());
+                }
+            }
+        }
+    }
+
+    let name = name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("hook add needs a name")?;
+    let event = event.ok_or("--event is required (before_tool, after_tool, on_yield, or after_turn)")?;
+    let command = command
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("hook add needs a command via --command <cmd> or -- <command...>")?;
+
+    Ok(HookConfig { name, event, tool, command, enabled })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_hook_add_with_dash_dash_command() {
+        let cfg = parse_hook_add(&s(&[
+            "fmt_check",
+            "--event",
+            "after_tool",
+            "--tool",
+            "edit_file,write_file",
+            "--",
+            "cargo",
+            "fmt",
+            "--check",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg,
+            HookConfig {
+                name: "fmt_check".into(),
+                event: HookEvent::AfterTool,
+                tool: Some("edit_file,write_file".into()),
+                command: "cargo fmt --check".into(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hook_add_with_command_flag_and_disabled() {
+        let cfg = parse_hook_add(&s(&[
+            "test-gate",
+            "--event",
+            "on_yield",
+            "--disabled",
+            "--command",
+            "cargo test --quiet",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg,
+            HookConfig {
+                name: "test-gate".into(),
+                event: HookEvent::OnYield,
+                tool: None,
+                command: "cargo test --quiet".into(),
+                enabled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hook_add_rejects_invalid_and_missing_args() {
+        // Invalid event
+        let err = parse_hook_add(&s(&["h", "--event", "bogus", "--", "true"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown hook event"), "{err}");
+
+        // Missing event
+        let err = parse_hook_add(&s(&["h", "--", "true"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--event"), "{err}");
+
+        // Missing name
+        let err = parse_hook_add(&s(&["--event", "before_tool", "--", "true"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("name"), "{err}");
+
+        // Missing command
+        let err = parse_hook_add(&s(&["h", "--event", "after_turn"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("command"), "{err}");
+
+        // Empty command after --
+        let err = parse_hook_add(&s(&["h", "--event", "after_turn", "--"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("command"), "{err}");
+
+        // Both --command and --
+        let err = parse_hook_add(&s(&["h", "--event", "before_tool", "--command", "echo a", "--", "echo", "b"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not both"), "{err}");
+
+        // Unknown flag
+        let err = parse_hook_add(&s(&["h", "--event", "before_tool", "--nope", "--", "true"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn first_sentence_extracts_and_clips() {
+        assert_eq!(
+            first_sentence("Read a file in the attached folder. Second sentence here."),
+            "Read a file in the attached folder."
+        );
+        assert_eq!(
+            first_sentence("Single sentence without trailing text"),
+            "Single sentence without trailing text"
+        );
+        let long = "a".repeat(120);
+        let clipped = first_sentence(&long);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clipped.chars().count(), LISTED_TITLE + 1);
+    }
 }

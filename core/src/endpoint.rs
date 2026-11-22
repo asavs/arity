@@ -22,8 +22,8 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// The provider named in config.json. `conversation` fills its session header, if it has one.
-    pub fn open(data_dir: &Path, provider: &str, conversation: &str) -> Result<Self> {
+    /// The provider named in config.json. `session_id` fills its session header, if it has one.
+    pub fn open(data_dir: &Path, provider: &str, session_id: &str) -> Result<Self> {
         let providers = config::load(data_dir)?.providers;
         let Some(p) = providers.into_iter().find(|p| p.name == provider) else {
             let names: Vec<String> = config::load(data_dir)?.providers.into_iter().map(|p| p.name).collect();
@@ -33,8 +33,12 @@ impl Endpoint {
         if p.needs_key && key.is_none() {
             bail!("{provider} has no API key; run `arity key set {}` or add one in Settings", p.key_name);
         }
-        // Stable for the conversation, and says nothing about it.
-        let session: String = sha2::Sha256::digest(conversation.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect();
+        // Pass persisted 32-hex session IDs through unchanged; hash arbitrary names for backward compatibility.
+        let session: String = if is_hex_session_id(session_id) {
+            session_id.to_string()
+        } else {
+            sha2::Sha256::digest(session_id.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect()
+        };
         Ok(Endpoint {
             headers: p.session_header.into_iter().map(|h| (h, session.clone())).collect(),
             usage_dir: p.usage_headers.then(|| data_dir.to_path_buf()),
@@ -101,4 +105,43 @@ impl Endpoint {
 /// A client for short calls: model lists and key checks.
 pub fn quick() -> Client {
     Client::builder().user_agent(crate::model::USER_AGENT).timeout(Duration::from_secs(10)).build().expect("http client")
+}
+
+fn is_hex_session_id(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn persisted_hex_session_id_passes_through_and_arbitrary_names_hash() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-endpoint-sid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("config.json"), json!({ "workers": [], "providers": {} }).to_string())?;
+        crate::keys::set(&dir, "opencode", "sk-oc")?;
+
+        let persisted = "0123456789abcdef0123456789abcdef";
+        let ep_persisted = Endpoint::open(&dir, "opencode-go", persisted)?;
+        assert_eq!(ep_persisted.headers, vec![("x-opencode-session".into(), persisted.into())]);
+
+        let ep_name = Endpoint::open(&dir, "opencode-go", "chat-1")?;
+        assert_eq!(ep_name.headers.len(), 1);
+        assert_eq!(ep_name.headers[0].0, "x-opencode-session");
+        assert!(is_hex_session_id(&ep_name.headers[0].1));
+        assert_ne!(ep_name.headers[0].1, "chat-1");
+        assert!(!ep_name.headers[0].1.contains("chat"));
+
+        // Uppercase or wrong length still hashes instead of passing through raw.
+        let uppercase = "0123456789ABCDEF0123456789ABCDEF";
+        let ep_upper = Endpoint::open(&dir, "opencode-go", uppercase)?;
+        assert!(is_hex_session_id(&ep_upper.headers[0].1));
+        assert_ne!(ep_upper.headers[0].1, uppercase);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }

@@ -107,7 +107,7 @@ struct ThreadView: View {
         }
     }
 
-    /// The folder this chat may read, as a chip with × to detach it, or a button to attach one.
+    /// The folder attached to this chat, as a chip with × to detach it, or a button to attach one.
     @ViewBuilder private var folderButton: some View {
         if let folder = store.folder {
             HStack(spacing: 3) {
@@ -124,13 +124,13 @@ struct ThreadView: View {
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(.quaternary, in: Capsule())
             .fixedSize()
-            .help("Reads \(folder), and so do the tasks filed here. Nothing in it is changed.")
+            .help("Attached to \(folder). Gives this chat and the tasks filed here file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash).")
         } else {
             Button("Attach a Folder", systemImage: "folder.badge.plus") { chooseFolder() }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .disabled(busy)
-                .help("Let this chat, and the tasks filed in it, read a folder")
+                .help("Attach a folder to give this chat, and the tasks filed in it, file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash)")
         }
     }
 
@@ -140,7 +140,7 @@ struct ThreadView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Attach"
-        panel.message = "Arity can read this folder, but not change it."
+        panel.message = "Gives this chat, and tasks filed in it, file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash) in this folder."
         if panel.runModal() == .OK, let url = panel.url { store.setFolder(url.path) }
     }
 
@@ -398,6 +398,10 @@ struct MessageRow: View {
             Label(message.text, systemImage: "info.circle")
                 .font(.callout)
                 .foregroundStyle(.orange)
+        case .rating:
+            Label(message.text, systemImage: "star.fill")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         case .taskCard:
             Label(message.text, systemImage: "rectangle.and.pencil.and.ellipsis")
                 .font(.callout)

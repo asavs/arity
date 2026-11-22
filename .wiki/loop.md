@@ -20,7 +20,7 @@ A turn steps forward from the journal:
 
 1. **Stream reply.** Call the model on the chain so far and publish partial text as it arrives.
 2. **Run tools.** If the reply called tools, execute all of them as an atomic batch and call the model again.
-3. **End of turn.** A chat ends once the model answers with no tool calls, unless an **after turn** message is waiting to extend it. An agent's run ends only when it calls `finish` with its report (`done`, `blocked` or `needs review`); answering without `finish` pauses to wait if sub-tasks are still out, or reminds the run that nothing has been handed in.
+3. **End of turn.** A chat ends once the model answers with no tool calls, unless an **after turn** message is waiting to extend it. An agent's run ends only when it calls `finish` with its report (`done`, `blocked` or `needs review`); answering without `finish` pauses to wait if sub-tasks are still out, or reminds the run that nothing has been handed in. When a turn ends after integrating one or more returning child reports, the harness runs the post-use [grading hook](blind-testing.md#grading) on the parent before releasing the lease.
 
 Everything delivered to a thread—user messages, agent messages and returning reports—goes through one door with one of three [timings](agent-tiers.md#message):
 
@@ -40,10 +40,10 @@ Delegation is the same loop calling itself one level down through the [board](wo
 
 1. **Call.** A thread writes a task for an agent to the board—the same tool whether the caller is a chat or an agent's run—and says whether the result should return **after turn** or as a **steer**.
 2. **Claim and instantiate.** When the task has no open blockers, a dispatcher claims it under a lease, [instantiates](instantiate.md) a child thread with the task's brief as its opening entry, and runs the same turn loop on it. Meanwhile the parent may keep working, or pause waiting (holding no lease) until woken by a **steer** or once all its sub-tasks have reported.
-3. **Return.** When the child calls `finish`, its report comes back to whoever asked for the task as a graded [report](agent-tiers.md#report) at the timing requested—or to the origin chat's **inbox** when the task belongs to the user.
+3. **Return.** When the child calls `finish`, its report comes back to the parent thread—chat or worker run alike—at the timing requested, waking an idle or waiting parent once its sub-tasks settle (or immediately on **steer**). After the parent integrates the result in its turn, the post-use grading hook rates the child run.
 
 Capabilities narrow with depth so recursion stays safe and terminates:
 
 - **Clearance propagates down.** Tasks filed by a `private` run stay `private`, whatever the run asks for.
 - **The folder propagates down.** A folder attached to a chat passes to the tasks filed there and to their sub-tasks, unless the user gives a task its own. The file tools read only inside it, through symlinks and `..` too, and change nothing. A model cannot choose or change a task's folder.
-- **The floor is the base case.** At maximum depth, delegation is removed from the toolset: a task written there becomes the thread's own todo, which triggers no router, spawns no child and needs no rating.
+- **The floor is the base case.** At maximum depth, delegation is removed from the toolset, so a run at the floor does its work directly and calls `finish`.

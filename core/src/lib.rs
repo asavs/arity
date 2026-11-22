@@ -13,16 +13,19 @@ mod agent;
 mod board;
 mod catalog;
 mod codex_auth;
+mod coding;
 mod config;
 mod dispatch;
 mod draft;
 mod endpoint;
 mod files;
+mod hooks;
 mod journal;
 mod keys;
 mod leaderboard;
 mod model;
 mod papercut;
+mod prompt;
 mod tools;
 mod usage;
 mod turn;
@@ -30,12 +33,17 @@ mod turn;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use agent::Harness;
 pub use board::{Priority, RunState, TaskFields, TaskState};
-pub use turn::Delivery;
+pub use turn::{Delivery, Live};
 pub use catalog::KeyCheck;
+pub use config::{HookConfig, HookEvent};
+pub use hooks::{BeforeTool, Hook, HookCtx, HookRegistry, YieldAction};
 pub use leaderboard::{Choice, Figures, Pick, Standing};
+pub use model::{Reply, Sink, ToolCall};
+pub use tools::{Caller, Execution, Replay, Tool, ToolOutput, ToolRegistry, ToolSpec, ToolVisibility};
 pub use usage::{Limit, Usage};
-use journal::{Entry, Journal};
+pub use journal::{Entry, Journal};
 use model::tool_calls_of;
 
 uniffi::setup_scaffolding!();
@@ -71,8 +79,29 @@ pub enum MessageKind {
     Report,
     /// Arity speaking, for example a reminder to rate.
     Notice,
+    /// A post-use rating recorded by the parent hook.
+    Rating,
     /// The person opened, edited, added or dismissed the task card.
     TaskCard,
+}
+
+/// A built-in hook registered in Arity's default harness.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BuiltinHookInfo {
+    pub name: String,
+    pub event: HookEvent,
+    pub tool: Option<String>,
+    pub description: String,
+}
+
+/// A tool registered in Arity's harness, and whether it is available for a conversation.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ToolInfo {
+    pub name: String,
+    /// "atomic", "external/safe", or "external/unsafe".
+    pub execution: String,
+    pub available: bool,
+    pub description: String,
 }
 
 /// One row of the one list both front ends show.
@@ -578,6 +607,91 @@ impl Arity {
     pub fn sign_out_chatgpt(&self) -> Result<()> {
         Ok(codex_auth::logout(&self.dir.join("codex-auth.json"))?)
     }
+
+    // Hooks & tools
+
+    /// Built-in hooks that run automatically in Arity's harness.
+    pub fn builtin_hooks(&self) -> Vec<BuiltinHookInfo> {
+        vec![
+            BuiltinHookInfo {
+                name: "safety_guard".into(),
+                event: HookEvent::BeforeTool,
+                tool: Some("write_file,edit_file,bash".into()),
+                description: "Blocks .git and .env edits, destructive rm, and git force-push.".into(),
+            },
+            BuiltinHookInfo {
+                name: "unfinished_run".into(),
+                event: HookEvent::OnYield,
+                tool: None,
+                description: "Nudges a worker run that stops without calling finish (up to 2 times).".into(),
+            },
+            BuiltinHookInfo {
+                name: "rate".into(),
+                event: HookEvent::AfterTurn,
+                tool: None,
+                description: "Rates completed child runs after the parent integrates their report.".into(),
+            },
+        ]
+    }
+
+    /// User-configured hooks from `config.json`.
+    pub fn hooks(&self) -> Result<Vec<HookConfig>> {
+        Ok(config::load(&self.dir)?.hooks)
+    }
+
+    /// Add or replace a hook in `config.json`.
+    pub fn save_hook(&self, hook: HookConfig) -> Result<()> {
+        Ok(config::save_hook(&self.dir, &hook)?)
+    }
+
+    /// Remove a hook by name from `config.json`. Returns true if one was removed.
+    pub fn remove_hook(&self, name: String) -> Result<bool> {
+        Ok(config::remove_hook(&self.dir, &name)?)
+    }
+
+    /// Enable or disable a hook by name in `config.json`.
+    pub fn set_hook_enabled(&self, name: String, enabled: bool) -> Result<()> {
+        Ok(config::set_hook_enabled(&self.dir, &name, enabled)?)
+    }
+
+    /// Every tool registered in the default harness and whether it is offered to `conversation`
+    /// (or to a chat with no folder when `conversation` is None).
+    pub fn tools(&self, conversation: Option<String>) -> Result<Vec<ToolInfo>> {
+        let vis = match conversation {
+            Some(ref conv) => {
+                let db = self.journal()?;
+                tools::ToolVisibility {
+                    caller: tools::caller(db.conn(), conv)?,
+                    folder: board::folder_of(db.conn(), conv)?,
+                }
+            }
+            None => tools::ToolVisibility { caller: tools::Caller::Chat, folder: None },
+        };
+        let fallback_vis = tools::ToolVisibility {
+            caller: vis.caller,
+            folder: Some(std::path::PathBuf::from(".")),
+        };
+        let reg = tools::ToolRegistry::default();
+        Ok(reg
+            .all()
+            .iter()
+            .map(|t| {
+                let spec = t.spec(&vis);
+                let available = spec.is_some();
+                let description = spec
+                    .or_else(|| t.spec(&fallback_vis))
+                    .or_else(|| t.spec(&tools::ToolVisibility { caller: tools::Caller::Run, folder: Some(std::path::PathBuf::from(".")) }))
+                    .map(|s| s.description.to_string())
+                    .unwrap_or_default();
+                let execution = match t.execution() {
+                    tools::Execution::Atomic => "atomic",
+                    tools::Execution::External { replay: tools::Replay::Safe } => "external/safe",
+                    tools::Execution::External { replay: tools::Replay::Unsafe } => "external/unsafe",
+                };
+                ToolInfo { name: t.name().into(), execution: execution.into(), available, description }
+            })
+            .collect())
+    }
 }
 
 /// Rust-only variants that report text and messages as they come. The CLI
@@ -602,6 +716,7 @@ impl Arity {
     pub fn resume_with(&self, conv: &str, model: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
         let db = self.journal()?;
         let model = resolve_model(&db, conv, model)?;
+        board::clear_wake(db.conn(), conv)?;
         self.run_resolved(&db, conv, &model, None, on)
     }
 
@@ -784,6 +899,13 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
         "user" => vec![msg(0, MessageKind::User, text("text"))],
         "report" | "message" => vec![msg(0, MessageKind::Report, text("text"))],
         "notice" => vec![msg(0, MessageKind::Notice, text("text"))],
+        "rating" => {
+            let task = e.body["task"].as_i64().unwrap_or_default();
+            let score = e.body["score"].as_i64().unwrap_or_default();
+            let note = text("note");
+            let summary = if note.is_empty() { format!("Rated task {task}: {score}/5") } else { format!("Rated task {task}: {score}/5 — {note}") };
+            vec![Message { model: None, ..msg(0, MessageKind::Rating, summary) }]
+        }
         "draft" => draft::summary(&e.body).map(|t| msg(0, MessageKind::TaskCard, t)).into_iter().collect(),
         "assistant" => {
             let mut out = Vec::new();
@@ -829,7 +951,7 @@ mod tests {
         board::set_state(db.conn(), task, TaskState::Assigned)?;
 
         let scripted = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], out: &mut model::Sink| -> anyhow::Result<Reply> {
-            let last = chain.last().unwrap();
+            let last = chain.iter().rev().find(|e| e.kind != "system").unwrap();
             let said = last.body["text"].as_str().unwrap_or_default();
             if said == "start the server" {
                 Ok(Reply {
@@ -920,12 +1042,13 @@ mod tests {
         Ok(())
     }
 
-    /// The whole loop on scripted models: a chat delegates, a blindly picked
-    /// worker hands part on and waits, the sub-task's run is killed after a
-    /// committed tool call and taken over from the journal without repeating
-    /// it, the parent rates the sub-task and finishes, and the result waits in
-    /// the chat for the user. No model name shows before the user rates, except
-    /// through `reveal`.
+    /// The whole recursive loop on scripted models: a chat delegates, a blindly
+    /// picked worker hands part on and waits, the sub-task's run is killed
+    /// after a committed tool call and taken over from the journal without
+    /// repeating it, the parent worker integrates the result and finishes while
+    /// the post-use hook grades the sub-task, and then the dispatcher wakes the
+    /// chat to integrate the final result and grade the worker via the same
+    /// hook. No model name shows before rating, except through `reveal`.
     #[test]
     fn scripted_end_to_end_survives_a_crash_and_stays_blind_until_rated() -> anyhow::Result<()> {
         use crate::dispatch::{Did, work_once_scripted};
@@ -953,27 +1076,41 @@ mod tests {
         };
         let says = |text: &str| Reply { text: text.into(), tool_calls: vec![], interrupted: false };
         let last_tool = |chain: &[Entry]| {
-            let e = chain.last().unwrap();
-            (e.kind.clone(), e.body["name"].as_str().unwrap_or_default().to_string(), e.body["output"].as_str().unwrap_or_default().to_string())
+            let e = chain.iter().rev().find(|e| e.kind != "system").unwrap();
+            (e.kind.clone(), e.body["name"].as_str().unwrap_or_default().to_string())
         };
 
-        // The chat's model: hands the work to an agent, then says so.
+        // The chat's model: hands the work to an agent, later wakes to present the result,
+        // and answers the post-use rating hook.
         let chat_calls = Cell::new(0);
-        let chat = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+        let chat = |_: &str, chain: &[Entry], tools: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
             chat_calls.set(chat_calls.get() + 1);
-            Ok(match last_tool(chain).0.as_str() {
+            let last = chain.iter().rev().find(|e| e.kind != "system").unwrap();
+            if last.body["hook"] == "rate" {
+                assert_eq!(tools.iter().map(|t| t.name).collect::<Vec<_>>(), [hooks::SUBMIT_RATING]);
+                return Ok(call(hooks::SUBMIT_RATING, json!({ "score": 5, "note": "thorough" })));
+            }
+            assert!(!tools.iter().any(|t| t.name == "rate"), "rate is never in the normal toolset");
+            Ok(match last.kind.as_str() {
                 "user" => call("add_task", json!({ "title": "Check the sources", "brief": "Check every citation in draft.md.", "assignee": "agent" })),
                 "tool" => says("Handed to an agent."),
-                other => panic!("chat-1 woken by {other}"),
+                "report" => says("All sources verified; footnote 3 holds."),
+                other => panic!("chat-1 did not expect {other}"),
             })
         };
 
         // Both workers, told apart by their brief. Worker 2 is killed on its second call, once.
         let crash = Cell::new(true);
         let worker_2_calls = Cell::new(0);
-        let workers = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+        let workers = |_: &str, chain: &[Entry], tools: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            let last = chain.iter().rev().find(|e| e.kind != "system").unwrap();
+            if last.body["hook"] == "rate" {
+                assert_eq!(tools.iter().map(|t| t.name).collect::<Vec<_>>(), [hooks::SUBMIT_RATING]);
+                return Ok(call(hooks::SUBMIT_RATING, json!({ "score": 4, "note": "solid" })));
+            }
+            assert!(!tools.iter().any(|t| t.name == "rate"), "rate is never in the normal toolset");
             let brief = chain[0].body["text"].as_str().unwrap_or_default();
-            let (kind, name, output) = last_tool(chain);
+            let (kind, name) = last_tool(chain);
             if brief.starts_with("Check the sources") {
                 return Ok(match (kind.as_str(), name.as_str()) {
                     ("user", _) => call(
@@ -981,19 +1118,15 @@ mod tests {
                         json!({ "title": "Verify footnote 3", "brief": "Does footnote 3 match its source?", "assignee": "agent" }),
                     ),
                     ("tool", "add_task") => says("Waiting for the footnote check."),
-                    // Tries to finish before rating the sub-task's result.
-                    ("report", _) => call("finish", json!({ "report": "Sources verified." })),
-                    ("tool", "finish") if output.starts_with("error") => call("rate", json!({ "task": 2, "score": 4, "note": "solid" })),
-                    ("tool", "rate") => call("finish", json!({ "report": "All sources verified; footnote 3 holds." })),
+                    ("report", _) => call("finish", json!({ "report": "All sources verified; footnote 3 holds." })),
                     other => panic!("task-1 did not expect {other:?}"),
                 });
             }
             worker_2_calls.set(worker_2_calls.get() + 1);
             Ok(match (kind.as_str(), name.as_str()) {
-                ("user", _) => call("add_task", json!({ "title": "Note the page number" })),
-                ("tool", "add_task") if crash.replace(false) => panic!("the dispatcher's process is killed"),
-                ("tool", "add_task") => call("complete_task", json!({ "id": 3 })),
-                ("tool", "complete_task") => call("finish", json!({ "report": "Footnote 3 matches page 12." })),
+                ("user", _) => call("list_tasks", json!({})),
+                ("tool", "list_tasks") if crash.replace(false) => panic!("the dispatcher's process is killed"),
+                ("tool", "list_tasks") => call("finish", json!({ "report": "Footnote 3 matches page 12." })),
                 other => panic!("task-2 did not expect {other:?}"),
             })
         };
@@ -1003,7 +1136,7 @@ mod tests {
         arity.run_resolved(&db, "chat-1", "chat:front", Some(&chat), &mut |_| {})?;
         assert_eq!(chat_calls.get(), 2);
         let t1 = board::task(db.conn(), 1)?;
-        assert_eq!((t1.fields.assignee.as_str(), t1.origin.as_deref()), ("agent", Some("chat-1")));
+        assert_eq!((t1.fields.assignee.as_str(), t1.created_by.as_str(), t1.origin.as_deref()), ("agent", "conversations/chat-1", Some("chat-1")));
         let did = work_once_scripted(&db, &dir, &only("secret-a:alpha"), &workers)?;
         assert!(matches!(did, Did::Waiting { task: 1, trial: 1 }), "{:?}", did.describe());
 
@@ -1036,38 +1169,29 @@ mod tests {
         // Taken over from the journal: the committed call is not made again.
         let did = work_once_scripted(&db, &dir, &[], &workers)?;
         assert!(matches!(did, Did::Ran { task: 2, trial: 2 }), "{:?}", did.describe());
-        assert_eq!(worker_2_calls.get(), 4, "two calls after the restart, not three");
+        assert_eq!(worker_2_calls.get(), 3, "one call after the restart, not two");
         let chain2 = db.chain("task-2")?;
-        assert_eq!(chain2.iter().filter(|e| e.kind == "tool" && e.body["name"] == "add_task").count(), 1);
-        let todos: i64 = db.conn().query_row("SELECT count(*) FROM tasks WHERE title = 'Note the page number'", [], |r| r.get(0))?;
-        assert_eq!(todos, 1, "the todo was filed once");
+        assert_eq!(chain2.iter().filter(|e| e.kind == "tool" && e.body["name"] == "list_tasks").count(), 1);
         let trials: i64 = db.conn().query_row("SELECT count(*) FROM trials WHERE task = 2", [], |r| r.get(0))?;
         assert_eq!(trials, 1, "the same run carried on");
 
-        // 4. The report wakes task-1, which is turned back from finishing until it rates task 2.
+        // 4. The report wakes task-1, which finishes cleanly; the post-use hook grades task 2.
         let did = work_once_scripted(&db, &dir, &[], &workers)?;
-        assert!(matches!(&did, Did::Reported { task: 2, rater: Some(r) } if r == "task-1"), "{:?}", did.describe());
+        assert!(matches!(&did, Did::Reported { task: 2, parent: Some(p) } if p == "task-1"), "{:?}", did.describe());
         let did = work_once_scripted(&db, &dir, &[], &workers)?;
         assert!(matches!(did, Did::Ran { task: 1, trial: 1 }), "{:?}", did.describe());
-        let chain1 = db.chain("task-1")?;
-        let refused = chain1.iter().find(|e| e.kind == "tool" && e.body["name"] == "finish").unwrap();
-        assert!(refused.body["output"].as_str().unwrap().contains("rate the result of task 2"), "{:?}", refused.body);
         let (score, note, by): (i64, String, String) =
             db.conn().query_row("SELECT score, note, rated_by FROM ratings WHERE trial = 2", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         assert_eq!((score, note.as_str(), by.as_str()), (4, "solid", "conversations/task-1"));
-        // The final report lands in chat-1's inbox and wakes nothing.
-        let did = work_once_scripted(&db, &dir, &[], &workers)?;
-        assert!(matches!(did, Did::Reported { task: 1, rater: None }), "{:?}", did.describe());
-        assert!(matches!(work_once_scripted(&db, &dir, &[], &workers)?, Did::Nothing));
-        assert_eq!(chat_calls.get(), 2, "chat-1's model was not called again");
-        assert!(arity.running()?.is_empty());
-        let note = arity.messages("chat-1".into())?.pop().unwrap();
-        assert_eq!(note.kind, MessageKind::Report);
-        assert!(note.text.contains("All sources verified; footnote 3 holds."), "{}", note.text);
+        assert!(arity.messages("task-1".into())?.iter().any(|m| m.kind == MessageKind::Rating && m.text.contains("4/5")));
+
+        // 5. The report lands in chat-1, marked to wake. Before chat-1 runs its turn and hook,
+        //    nothing public names task 1's model.
+        let did = work_once_scripted(&db, &dir, &[], &chat)?;
+        assert!(matches!(&did, Did::Reported { task: 1, parent: Some(p) } if p == "chat-1"), "{:?}", did.describe());
         let t1 = thread("task-1");
         assert_eq!((t1.group, t1.task.as_ref().unwrap().run_state), (ThreadGroup::NeedsYou, Some(RunState::NeedsRating)));
 
-        // 5. Before the user rates, nothing public names task 1's model.
         let sweep = || -> anyhow::Result<String> {
             Ok(format!(
                 "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
@@ -1083,7 +1207,7 @@ mod tests {
         let public = sweep()?;
         assert!(!public.contains("secret-a") && !public.contains("alpha"), "{public}");
         assert_eq!(arity.last_model("task-1".into())?, None);
-        // Run 2 is rated, by task-1's agent, so its model is open: the rule is "rated", not "rated by the user".
+        // Run 2 is rated, by task-1's post-use hook, so its model is open.
         let runs = arity.runs()?;
         assert_eq!(runs.iter().find(|r| r.id == 2).unwrap().model.as_deref(), Some("secret-b:beta"));
         assert_eq!(runs.iter().find(|r| r.id == 1).unwrap().model, None);
@@ -1094,8 +1218,17 @@ mod tests {
         assert_eq!(thread("task-1").task.unwrap().run_state, Some(RunState::NeedsRating));
         assert!(!sweep()?.contains("alpha"));
 
-        // 6. The user's rating opens it everywhere.
-        arity.rate(1, 5, "great".into())?;
+        // 6. The dispatcher wakes chat-1; chat-1 presents the result, and its post-use hook grades task 1.
+        let did = work_once_scripted(&db, &dir, &[], &chat)?;
+        assert!(matches!(&did, Did::Woke { conv } if conv == "chat-1"), "{:?}", did.describe());
+        assert!(matches!(work_once_scripted(&db, &dir, &[], &chat)?, Did::Nothing));
+        assert_eq!(chat_calls.get(), 4, "reply + post-use rating hook");
+        assert!(arity.running()?.is_empty());
+        let chat_msgs = arity.messages("chat-1".into())?;
+        assert!(chat_msgs.iter().any(|m| m.kind == MessageKind::Assistant && m.text.contains("All sources verified")));
+        assert!(chat_msgs.iter().any(|m| m.kind == MessageKind::Rating && m.text.contains("5/5")));
+
+        // Task 1 is now done and rated by chat-1; its model opens everywhere.
         let t1 = thread("task-1");
         assert_eq!(t1.group, ThreadGroup::Done);
         assert_eq!(t1.task.unwrap().model.as_deref(), Some("secret-a:alpha"));
@@ -1103,6 +1236,10 @@ mod tests {
         assert_eq!(arity.runs()?.iter().find(|r| r.id == 1).unwrap().model.as_deref(), Some("secret-a:alpha"));
         assert_eq!(arity.last_model("task-1".into())?.as_deref(), Some("secret-a:alpha"));
         assert!(arity.scores()?.iter().any(|s| s.model == "secret-a:alpha" && s.rated == 1 && s.average == 5.0));
+
+        // The user can still override a rating directly.
+        assert_eq!(arity.rate(1, 4, "good".into())?, Some(5));
+        assert!(arity.scores()?.iter().any(|s| s.model == "secret-a:alpha" && s.rated == 1 && s.average == 4.0));
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

@@ -52,8 +52,8 @@ pub fn propose(c: &Connection, conv: &str, args: &Value) -> Result<TaskFields> {
 pub fn add(c: &Connection, conv: &str) -> Result<i64> {
     let fields = current(&journal::chain(c, conv)?).ok_or_else(|| anyhow!("{conv} has no task card open"))?;
     let id = board::add_task(c, &fields, Some(conv))?;
-    let text = if fields.assignee == AGENT {
-        format!("I added the task card to the board as task {id}, for an agent. One will be picked to do it, and I will rate its result.")
+        let text = if fields.assignee == AGENT {
+        format!("I added the task card to the board as task {id}, for an agent. Its result will come back here when it finishes.")
     } else {
         format!("I added the task card to the board as task {id}, assigned to {}.", fields.assignee)
     };
@@ -66,18 +66,6 @@ pub fn dismiss(c: &Connection, conv: &str) -> Result<()> {
         return Ok(());
     }
     write_closed(c, conv, "dismissed", json!({}), "I dismissed the task card.")
-}
-
-/// The chain as the model should read it: of several card edits in a row, only
-/// the last, since each one restates the whole card.
-pub fn collapse_edits(chain: &[Entry]) -> Vec<Entry> {
-    let is_edit = |e: &Entry| e.kind == "draft" && e.body["event"] == "edited";
-    chain
-        .iter()
-        .enumerate()
-        .filter(|(i, e)| !(is_edit(e) && chain.get(i + 1).is_some_and(is_edit)))
-        .map(|(_, e)| e.clone())
-        .collect()
 }
 
 fn write(c: &Connection, conv: &str, event: &str, fields: Option<&TaskFields>, text: Option<&str>) -> Result<()> {
@@ -135,7 +123,7 @@ mod tests {
         let id = add(c, "chat")?;
         assert!(current(&db.chain("chat")?).is_none(), "closed once added");
         let t = board::task(c, id)?;
-        assert_eq!((t.created_by, t.origin.as_deref(), t.fields.tags.clone()), (board::me(), Some("chat"), vec!["docs".to_string()]));
+        assert_eq!((t.created_by, t.origin.as_deref(), t.fields.tags.clone()), ("conversations/chat".into(), Some("chat"), vec!["docs".to_string()]));
         assert_eq!(t.state, board::TaskState::Ready);
         let _ = std::fs::remove_file(&path);
         Ok(())

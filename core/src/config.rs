@@ -25,11 +25,53 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HookEvent {
+    BeforeTool,
+    AfterTool,
+    OnYield,
+    AfterTurn,
+}
+
+impl HookEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookEvent::BeforeTool => "before_tool",
+            HookEvent::AfterTool => "after_tool",
+            HookEvent::OnYield => "on_yield",
+            HookEvent::AfterTurn => "after_turn",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "before_tool" => Some(HookEvent::BeforeTool),
+            "after_tool" => Some(HookEvent::AfterTool),
+            "on_yield" => Some(HookEvent::OnYield),
+            "after_turn" => Some(HookEvent::AfterTurn),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HookConfig {
+    pub name: String,
+    pub event: HookEvent,
+    /// Optional tool filter: None / "" / "*" matches all tools, or comma-separated tool names (e.g. "edit_file,write_file").
+    pub tool: Option<String>,
+    /// Shell command executed with JSON hook context on stdin.
+    pub command: String,
+    pub enabled: bool,
+}
+
 pub struct Config {
     /// Models a task for an agent may be given, picked blind and uniformly.
     pub workers: Vec<String>,
     /// Sorted by name.
     pub providers: Vec<Provider>,
+    /// User-configured shell hooks.
+    pub hooks: Vec<HookConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,7 +198,101 @@ fn parse(v: &Value) -> Result<Config> {
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Config { workers: strings(&v["workers"]), providers: out })
+    let mut hooks = vec![];
+    for h in v["hooks"].as_array().into_iter().flatten() {
+        let Some(name) = h["name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(event) = h["event"].as_str().and_then(HookEvent::parse) else {
+            continue;
+        };
+        let Some(command) = h["command"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let tool = h["tool"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let enabled = h["enabled"].as_bool().unwrap_or(true);
+        hooks.push(HookConfig {
+            name: name.into(),
+            event,
+            tool,
+            command: command.into(),
+            enabled,
+        });
+    }
+    Ok(Config { workers: strings(&v["workers"]), providers: out, hooks })
+}
+
+fn hook_to_json(h: &HookConfig) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".into(), json!(h.name));
+    obj.insert("event".into(), json!(h.event.as_str()));
+    if let Some(tool) = h.tool.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("tool".into(), json!(tool));
+    }
+    obj.insert("command".into(), json!(h.command));
+    obj.insert("enabled".into(), json!(h.enabled));
+    Value::Object(obj)
+}
+
+/// Add or update a user hook in `config.json`, keeping the rest of the file.
+pub fn save_hook(data_dir: &Path, hook: &HookConfig) -> Result<()> {
+    let name = hook.name.trim();
+    anyhow::ensure!(
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "a hook's name is non-empty letters, digits, dashes, or underscores"
+    );
+    let command = hook.command.trim();
+    anyhow::ensure!(!command.is_empty(), "a hook needs a non-empty command");
+    let normalized = HookConfig {
+        name: name.into(),
+        event: hook.event,
+        tool: hook.tool.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+        command: command.into(),
+        enabled: hook.enabled,
+    };
+    let mut v = read(data_dir)?;
+    let mut hooks = parse(&v)?.hooks;
+    if let Some(existing) = hooks.iter_mut().find(|h| h.name == name) {
+        *existing = normalized;
+    } else {
+        hooks.push(normalized);
+    }
+    v["hooks"] = Value::Array(hooks.iter().map(hook_to_json).collect());
+    std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
+/// Remove a user hook by name from `config.json`. Returns whether one was removed.
+pub fn remove_hook(data_dir: &Path, name: &str) -> Result<bool> {
+    let name = name.trim();
+    let mut v = read(data_dir)?;
+    let mut hooks = parse(&v)?.hooks;
+    let before = hooks.len();
+    hooks.retain(|h| h.name != name);
+    let removed = hooks.len() < before;
+    if removed {
+        v["hooks"] = Value::Array(hooks.iter().map(hook_to_json).collect());
+        std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    }
+    Ok(removed)
+}
+
+/// Enable or disable an existing hook in `config.json`. Fails if the hook does not exist.
+pub fn set_hook_enabled(data_dir: &Path, name: &str, enabled: bool) -> Result<()> {
+    let name = name.trim();
+    let mut v = read(data_dir)?;
+    let mut hooks = parse(&v)?.hooks;
+    let Some(h) = hooks.iter_mut().find(|h| h.name == name) else {
+        anyhow::bail!("no hook named {name:?} in config.json");
+    };
+    h.enabled = enabled;
+    v["hooks"] = Value::Array(hooks.iter().map(hook_to_json).collect());
+    std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
 }
 
 /// Add an OpenAI-compatible provider, or change one, keeping the rest of the file.
@@ -241,6 +377,85 @@ mod tests {
         remove_provider(&d, "groq")?;
         assert!(!load(&d)?.providers.iter().any(|p| p.name == "groq"));
         assert!(!load(&d)?.workers.is_empty(), "the rest of the file is kept");
+        std::fs::remove_dir_all(&d)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hooks_are_saved_toggled_and_removed() -> Result<()> {
+        let d = std::env::temp_dir().join(format!("arity-config-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // Absent "hooks" key parses as empty; malformed entries are skipped.
+        assert!(load(&d)?.hooks.is_empty());
+        let parsed = parse(&json!({
+            "hooks": [
+                { "name": "ok", "event": "after_tool", "command": "echo hi" },
+                { "name": "", "event": "after_tool", "command": "echo bad" },
+                { "name": "bad_ev", "event": "bogus", "command": "echo bad" },
+                { "name": "no_cmd", "event": "before_tool", "command": "   " }
+            ]
+        }))?;
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].name, "ok");
+        assert!(parsed.hooks[0].enabled, "enabled defaults to true");
+
+        // Validation on save.
+        assert!(save_hook(&d, &HookConfig {
+            name: "bad name".into(),
+            event: HookEvent::BeforeTool,
+            tool: None,
+            command: "true".into(),
+            enabled: true,
+        }).is_err());
+        assert!(save_hook(&d, &HookConfig {
+            name: "empty_cmd".into(),
+            event: HookEvent::BeforeTool,
+            tool: None,
+            command: "   ".into(),
+            enabled: true,
+        }).is_err());
+
+        // Save two hooks and replace the first in-place.
+        let h1 = HookConfig {
+            name: "fmt_check".into(),
+            event: HookEvent::AfterTool,
+            tool: Some("edit_file,write_file".into()),
+            command: "cargo fmt --check".into(),
+            enabled: true,
+        };
+        let h2 = HookConfig {
+            name: "test-gate".into(),
+            event: HookEvent::OnYield,
+            tool: None,
+            command: "cargo test".into(),
+            enabled: true,
+        };
+        save_hook(&d, &h1)?;
+        save_hook(&d, &h2)?;
+        assert_eq!(load(&d)?.hooks, vec![h1.clone(), h2.clone()]);
+
+        let h1_updated = HookConfig {
+            command: "cargo fmt".into(),
+            ..h1.clone()
+        };
+        save_hook(&d, &h1_updated)?;
+        assert_eq!(load(&d)?.hooks, vec![h1_updated.clone(), h2.clone()], "replace keeps position");
+
+        // Toggle enabled on/off, and fail on unknown hook.
+        set_hook_enabled(&d, "fmt_check", false)?;
+        assert!(!load(&d)?.hooks[0].enabled);
+        set_hook_enabled(&d, "fmt_check", true)?;
+        assert!(load(&d)?.hooks[0].enabled);
+        assert!(set_hook_enabled(&d, "missing", false).is_err());
+
+        // Remove returns true when present, false otherwise, keeping the rest of config.json.
+        assert!(remove_hook(&d, "fmt_check")?);
+        assert!(!remove_hook(&d, "fmt_check")?);
+        assert_eq!(load(&d)?.hooks, vec![h2]);
+        assert!(!load(&d)?.workers.is_empty(), "workers preserved");
+        assert!(!load(&d)?.providers.is_empty(), "providers preserved");
+
         std::fs::remove_dir_all(&d)?;
         Ok(())
     }

@@ -72,13 +72,13 @@ pub enum Model {
 impl Model {
     /// `codex:<model>`, or `<provider>:<model>` for a provider in config.json.
     /// A provider that needs a key and has none is refused here, before any call.
-    /// `conversation` fills a provider's session header, if it has one.
-    pub fn parse(spec: &str, data_dir: &std::path::Path, conversation: &str) -> Result<Self> {
+    /// `session_id` fills a provider's session header, if it has one.
+    pub fn parse(spec: &str, data_dir: &std::path::Path, session_id: &str) -> Result<Self> {
         let (kind, model) = spec.split_once(':').ok_or_else(|| anyhow!("model must be <provider>:<id>, e.g. mlx:<id>"))?;
         if kind == "codex" {
             return Ok(Model::Codex { model: model.into(), auth: data_dir.join("codex-auth.json") });
         }
-        Ok(Model::Chat { endpoint: Endpoint::open(data_dir, kind, conversation)?, model: model.into() })
+        Ok(Model::Chat { endpoint: Endpoint::open(data_dir, kind, session_id)?, model: model.into() })
     }
 
     /// The model's reply to the chain, streamed into `out` as it arrives.
@@ -169,6 +169,10 @@ pub(crate) fn chat_messages(system: &str, chain: &[Entry]) -> Vec<Value> {
             continue;
         }
         messages.push(match e.kind.as_str() {
+            "system" => match e.body["text"].as_str().filter(|t| !t.is_empty()) {
+                Some(text) => json!({"role": "system", "content": text}),
+                None => continue,
+            },
             "assistant" => {
                 let calls = tool_calls_of(&e.body);
                 let mut m = json!({"role": "assistant", "content": e.body["text"]});
@@ -181,6 +185,7 @@ pub(crate) fn chat_messages(system: &str, chain: &[Entry]) -> Vec<Value> {
                 m
             }
             "tool" => json!({"role": "tool", "tool_call_id": e.body["call_id"], "content": e.body["output"]}),
+            "tool_intent" | "rating" => continue,
             _ => continue,
         });
     }
@@ -249,6 +254,11 @@ pub(crate) fn codex_input(chain: &[Entry]) -> Vec<Value> {
             continue;
         }
         match e.kind.as_str() {
+            "system" => {
+                if let Some(text) = e.body["text"].as_str().filter(|t| !t.is_empty()) {
+                    input.push(json!({"role": "developer", "content": [{"type": "input_text", "text": text}]}));
+                }
+            }
             "assistant" => {
                 if let Some(text) = e.body["text"].as_str().filter(|t| !t.is_empty()) {
                     input.push(json!({"role": "assistant", "content": [{"type": "output_text", "text": text}]}));
@@ -258,6 +268,7 @@ pub(crate) fn codex_input(chain: &[Entry]) -> Vec<Value> {
                 }
             }
             "tool" => input.push(json!({"type": "function_call_output", "call_id": e.body["call_id"], "output": e.body["output"]})),
+            "tool_intent" | "rating" => {}
             _ => {}
         }
     }
@@ -404,5 +415,47 @@ mod tests {
             assert!(!std::fs::read_to_string(d.join("config.json"))?.contains(key));
         }
         Ok(())
+    }
+
+    #[test]
+    fn system_entries_render_and_tool_intent_is_omitted() {
+        let entry = |id: i64, kind: &str, body: Value| Entry {
+            id,
+            kind: kind.into(),
+            body,
+            model: None,
+        };
+        let chain = vec![
+            entry(1, "system", json!({ "sections": { "date": "Today is 2026-11-21." }, "text": "Today is 2026-11-21." })),
+            entry(2, "system", json!({ "sections": {}, "text": "" })),
+            entry(3, "user", json!({ "text": "Hello" })),
+            entry(4, "tool_intent", json!({ "call_id": "c1", "name": "list_tasks", "arguments": "{}" })),
+            entry(5, "rating", json!({ "task": 1, "score": 5, "note": "great" })),
+            entry(6, "assistant", json!({ "text": "Hi there.", "tool_calls": [] })),
+            entry(7, "system", json!({ "sections": { "card": null }, "text": "No task card is open now." })),
+        ];
+
+        let chat = chat_messages("STATIC PREFIX", &chain);
+        assert_eq!(
+            chat,
+            vec![
+                json!({ "role": "system", "content": "STATIC PREFIX" }),
+                json!({ "role": "system", "content": "Today is 2026-11-21." }),
+                json!({ "role": "user", "content": "Hello" }),
+                json!({ "role": "assistant", "content": "Hi there." }),
+                json!({ "role": "system", "content": "No task card is open now." }),
+            ]
+        );
+
+        let codex = codex_input(&chain);
+        assert_eq!(
+            codex,
+            vec![
+                json!({ "role": "developer", "content": [{ "type": "input_text", "text": "Today is 2026-11-21." }] }),
+                json!({ "role": "user", "content": [{ "type": "input_text", "text": "Hello" }] }),
+                json!({ "role": "assistant", "content": [{ "type": "output_text", "text": "Hi there." }] }),
+                json!({ "role": "developer", "content": [{ "type": "input_text", "text": "No task card is open now." }] }),
+            ]
+        );
     }
 }

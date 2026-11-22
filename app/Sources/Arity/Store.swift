@@ -16,12 +16,16 @@ final class Store {
     var messages: [Message] = []
     /// The task card open in the selected chat, as last edited here or in the core.
     var draft: TaskFields?
-    /// The folder attached to the selected chat: its file tools read it, never change it.
+    /// The folder attached to the selected chat, enabling file and shell tools in it.
     var folder: String?
     var scores: [Score] = []
     /// What the configured providers offer, and which of them tasks for agents are picked from.
     var models: [String] = []
     var workers: [String] = []
+    /// User-configured hooks from `config.json`, built-in hooks, and registered tools.
+    var hooks: [HookConfig] = []
+    var builtinHooks: [BuiltinHookInfo] = []
+    var tools: [ToolInfo] = []
     /// OpenAI, OpenCode, Nous, this Mac, and any the user added, each with its plans.
     var accounts: [Account] = []
     /// What checking each provider's key found. Missing while a check runs.
@@ -50,6 +54,9 @@ final class Store {
     var choosingWorker = false
     /// The add-provider form, open with these values.
     var addingProvider: ProviderPreset?
+    /// The hook editor sheet is open; `editingHook` holds the hook being edited, or nil for a new one.
+    var addingHook = false
+    var editingHook: HookConfig?
     /// Conversations with a turn running, here or in another process (the CLI, `arity work`).
     var running: Set<String> { starting.union(active) }
     /// Sends from this window not yet seen running in the core.
@@ -285,6 +292,7 @@ final class Store {
     func loadModels(refresh: Bool = false) {
         accounts = attempt { try core.accounts() } ?? []
         workers = attempt { try core.workerModels() } ?? []
+        loadHarness()
         let core = self.core
         Task.detached {
             let result = Result { try core.models(refresh: refresh) }
@@ -325,6 +333,32 @@ final class Store {
     func setWorker(_ model: String, _ on: Bool) {
         _ = attempt { try core.setWorker(model: model, on: on) }
         workers = attempt { try core.workerModels() } ?? workers
+    }
+
+    // Hooks & tools
+
+    func loadHarness() {
+        builtinHooks = core.builtinHooks()
+        hooks = attempt { try core.hooks() } ?? hooks
+        tools = attempt { try core.tools(conversation: selection) } ?? tools
+    }
+
+    @discardableResult
+    func saveHook(_ hook: HookConfig) -> Bool {
+        error = nil
+        guard attempt({ try core.saveHook(hook: hook) }) != nil else { return false }
+        hooks = attempt { try core.hooks() } ?? hooks
+        return true
+    }
+
+    func removeHook(_ name: String) {
+        _ = attempt { try core.removeHook(name: name) }
+        hooks = attempt { try core.hooks() } ?? hooks
+    }
+
+    func setHookEnabled(_ name: String, _ enabled: Bool) {
+        _ = attempt { try core.setHookEnabled(name: name, enabled: enabled) }
+        hooks = attempt { try core.hooks() } ?? hooks
     }
 
     /// Opens the browser; the sheet shows progress until the sign-in comes back or is cancelled.

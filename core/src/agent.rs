@@ -2,10 +2,10 @@
 //! without calling a tool. Each step is decided purely from the journal, so a
 //! fresh process after a crash makes the same decision the dead one would have.
 //!
-//! A chat ends when the model answers without a tool. A run ends only when it
-//! calls `finish`: answering without a tool hands nothing in. With sub-tasks
-//! still out it waits to be woken by their results; otherwise it is reminded,
-//! and after a few reminders it ends unfinished.
+//! Tools and lifecycle hooks live behind `Harness` (`ToolRegistry` + `HookRegistry`).
+//! The leading system prompt stays immutable for prompt caching; dynamic state
+//! (date, attached folder, worker follow-up status, open task card) is appended
+//! as `"system"` delta entries only when changed.
 
 use std::path::Path;
 use std::time::Instant;
@@ -14,42 +14,40 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use crate::board;
+use crate::hooks::{BeforeTool, HookCtx, HookRegistry, YieldAction};
 use crate::journal::{Entry, Journal};
 use crate::model::{Model, Reply, Sink, ToolCall, tool_calls_of};
-use crate::tools::{self, ToolSpec};
+use crate::prompt::{self, PromptState};
+use crate::tools::{self, ToolHookDecision, ToolRegistry, ToolSpec, ToolVisibility};
 use crate::turn::Lease;
 use crate::{Event, messages_of};
 
-const SYSTEM: &str = "You are an assistant inside Arity. You share a board of tasks with the user \
-and other agents, and you read and change it only through your tools.
-
-When there is a task, you have two ways to get it done:
-- Do it yourself: put the finished work itself in your reply. If the task is on the board, call complete_task \
-in that same reply, after the work, never before it.
-- Hand it to an agent: set its assignee to \"agent\". One is picked to do it, and the user rates its result. \
-A note of the result may show up here later; do not wait for it.
-
-When the user wants a task written, draft it with propose_task: that fills in the task card they see under \
-this conversation. Write the brief to whoever will do it: they see only the title and \
-brief, so say everything they need. Keep changing the card as the \
-user asks; they add it to the board themselves. Use add_task only when they ask you to add a task directly.
-
-The card holds one task. When the user wants work broken into several tasks, do not keep rewriting the card: \
-outline the tasks briefly in your reply, or, once they agree, add them with add_task, setting blocked_by where \
-one must wait for another.
-
-Be brief.";
-
-const WORKER: &str = "You are an agent inside Arity, doing one task from a shared board. The task was \
-handed to you: where it says an agent or someone else should do it, that means you. Do the work, then call \
-finish with your report. The report is all the person who wrote the task will see, so make it complete: the \
-outcome first, then what they need to use it. Ending your turn without finish hands nothing in. If you cannot go \
-on, finish with outcome blocked and say what you need. To tell whoever handed you the task something sooner, \
-use message. Be brief.";
-
 const MAX_STEPS: usize = 24;
-/// How many times a run that stops without calling finish is reminded before it ends unfinished.
-const MAX_NUDGES: usize = 2;
+
+/// The runtime harness: registered tools and write-capable lifecycle hooks.
+pub struct Harness {
+    pub tools: ToolRegistry,
+    pub hooks: HookRegistry,
+}
+
+impl Default for Harness {
+    fn default() -> Self {
+        Self {
+            tools: ToolRegistry::default(),
+            hooks: HookRegistry::default(),
+        }
+    }
+}
+
+impl Harness {
+    /// Build the default harness plus any enabled user-configured hooks from `data_dir/config.json`.
+    pub fn for_data_dir(data_dir: &Path) -> Self {
+        Self {
+            tools: ToolRegistry::default(),
+            hooks: HookRegistry::for_data_dir(data_dir),
+        }
+    }
+}
 
 /// How a call to `run` ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +82,7 @@ fn next_step(chain: &[Entry]) -> Step {
             return Step::RunTool(call.clone());
         }
         // Only for the reply that just finished; a later message starts a new turn.
-        if chain[pos + 1..].iter().all(|e| e.kind == "tool") {
+        if chain[pos + 1..].iter().all(|e| matches!(e.kind.as_str(), "tool" | "tool_intent" | "system")) {
             let accepted = |c: &&ToolCall| c.name == "finish" && output(&c.id).is_some_and(|o| o.starts_with(tools::FINISHED));
             if let Some(call) = calls.iter().find(accepted) {
                 let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
@@ -92,7 +90,7 @@ fn next_step(chain: &[Entry]) -> Step {
             }
         }
     }
-    if last.kind == "assistant" { Step::Done } else { Step::CallModel }
+    if matches!(last.kind.as_str(), "assistant" | "rating") { Step::Done } else { Step::CallModel }
 }
 
 /// A model call: system prompt, chain and tools in, the reply streamed into the
@@ -103,36 +101,37 @@ pub type Complete<'a> = dyn Fn(&str, &[Entry], &[ToolSpec], &mut Sink) -> Result
 /// it runs out of steps. `on` sees the reply's text as it arrives and every
 /// message as it is written.
 pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
-    let model = Model::parse(spec, data_dir, conv)?;
-    run_with(db, conv, spec, &|system, chain, tools, out| model.complete(system, chain, tools, out), on)
+    let session_id = crate::journal::session_id(db.conn(), conv)?;
+    let model = Model::parse(spec, data_dir, &session_id)?;
+    let harness = Harness::for_data_dir(data_dir);
+    run_with_harness(
+        db,
+        conv,
+        spec,
+        &harness,
+        &|system, chain, tools, out| model.complete(system, chain, tools, out),
+        on,
+    )
 }
 
 pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
+    run_with_harness(db, conv, spec, &Harness::default(), complete, on)
+}
+
+pub fn run_with_harness(
+    db: &Journal,
+    conv: &str,
+    spec: &str,
+    harness: &Harness,
+    complete: &Complete,
+    on: &mut dyn FnMut(Event),
+) -> Result<Outcome> {
     let Some(mut lease) = Lease::take(db, conv, spec)? else { return Ok(Outcome::Busy) };
     let trial = board::trial_state(db.conn(), conv)?;
     let worker = trial.is_some();
     let in_run = trial.as_ref().is_some_and(|(.., ended)| !*ended);
+    let system = prompt::leading_system(worker);
     let today: String = db.conn().query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
-    let base = match (worker, in_run) {
-        (true, true) => WORKER.to_string(),
-        (true, false) => format!(
-            "{WORKER}\n\nYou have already handed in your report for this task. Answer follow-up messages directly; \
-             call finish again only if you are replacing your report."
-        ),
-        (false, _) => SYSTEM.to_string(),
-    };
-    let folder = board::folder_of(db.conn(), conv)?;
-    let attached = match &folder {
-        // A path the user chose: it says nothing about the model, so blindness holds.
-        Some(dir) => format!(
-            "\n\nThe folder {} is attached{}. Read it with list_files, read_file and search_files; paths are \
-             relative to it. You can only read it, not change it.",
-            dir.display(),
-            if worker { " to your task" } else { " to this conversation" }
-        ),
-        None => String::new(),
-    };
-    let system = format!("{base}{attached}\n\nToday is {today}.");
     // Entries up to here were written before this turn; later ones are shown as they come.
     let mut shown = db.chain(conv)?.last().map_or(0, |e| e.id);
     let show = |shown: &mut i64, on: &mut dyn FnMut(Event)| -> Result<()> {
@@ -160,15 +159,18 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
         show(&mut shown, on)?;
         match next_step(&chain) {
             Step::CallModel => {
-                let system = match crate::draft::current(&chain) {
-                    Some(card) if !worker => format!(
-                        "{system}\n\nA task card is open under this conversation. It is not on the board yet and has \
-                         no id; change it only with propose_task, never with update_task. It reads:\n{}",
-                        card.describe()
-                    ),
-                    _ => system.clone(),
+                let folder = board::folder_of(db.conn(), conv)?;
+                let state = PromptState {
+                    worker,
+                    in_run,
+                    today: today.clone(),
+                    folder: folder.clone(),
+                    draft_card: (!worker).then(|| crate::draft::current(&chain).map(|c| c.describe())).flatten(),
                 };
-                let can_rate = !board::unrated_for(db.conn(), conv, spec)?.is_empty();
+                if prompt::sync(db, conv, &state)? {
+                    chain = db.chain(conv)?;
+                }
+                let vis = ToolVisibility { caller: tools::caller(db.conn(), conv)?, folder };
                 let live = lease.live.clone();
                 let mut clock = Stopwatch::start();
                 let mut out = |text: &str| {
@@ -179,7 +181,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                     }
                     !live.stopped()
                 };
-                let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate, folder.is_some()), &mut out)?;
+                let reply = complete(system, &chain, &harness.tools.specs(&vis), &mut out)?;
                 let mut body = reply.to_json();
                 if reply.interrupted && lease.live.cut_for_steer() {
                     body["cut_for_message"] = json!(true);
@@ -197,52 +199,64 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 }
             }
             Step::RunTool(call) => {
-                db.run_tool(conv, spec, &call)?;
+                harness.tools.run_with_hooks(
+                    db,
+                    conv,
+                    spec,
+                    &call,
+                    |call, args| {
+                        let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };
+                        Ok(match harness.hooks.run_before_tool(&mut ctx, call, args.clone())? {
+                            BeforeTool::Continue => ToolHookDecision::Continue,
+                            BeforeTool::RewriteArgs(v) => ToolHookDecision::RewriteArgs(v),
+                            BeforeTool::Block(reason) => ToolHookDecision::Block(reason),
+                        })
+                    },
+                    |call, out| {
+                        let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };
+                        harness.hooks.run_after_tool(&mut ctx, call, &mut out.text, &mut out.is_error)
+                    },
+                )?;
             }
             Step::Finished(report) => {
+                let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };
+                harness.hooks.run_after_turn(&mut ctx)?;
                 // Anything still on its way stays in the journal; the run is over.
                 lease.release(db, true)?;
                 show(&mut shown, on)?;
                 return Ok(Outcome::Finished(report));
             }
-            Step::Done if in_run => {
-                // Stopped without finish. Its inbox first: that may be what it needs.
+            Step::Done => {
+                // Drain queued follow-ups before asking on_yield hooks or ending the turn.
                 if lease.drain_all(db)? > 0 {
                     continue;
                 }
-                let waiting = !board::children_out(db.conn(), conv)?.is_empty();
-                let reminded = chain.iter().rev().take_while(|e| !matches!(e.kind.as_str(), "user" | "report" | "message")).filter(|e| e.kind == "notice").count();
-                if !waiting && reminded < MAX_NUDGES {
-                    db.append(conv, "notice", &json!({ "text": unfinished(db, conv)? }), None)?;
+                chain = db.chain(conv)?;
+                let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };
+                if let YieldAction::Continue(text) = harness.hooks.run_on_yield(&mut ctx, &chain)? {
+                    db.append(conv, "notice", &json!({ "text": text }), None)?;
                     continue;
                 }
-                if lease.release(db, false)? {
-                    show(&mut shown, on)?;
-                    return Ok(if waiting { Outcome::Waiting } else { Outcome::Unfinished });
-                }
-            }
-            Step::Done => {
-                if lease.release(db, false)? {
-                    show(&mut shown, on)?;
-                    return Ok(Outcome::Ended);
+                if in_run {
+                    let waiting = !board::children_out(db.conn(), conv)?.is_empty();
+                    if waiting {
+                        harness.hooks.run_after_turn(&mut ctx)?;
+                    }
+                    if lease.release(db, false)? {
+                        show(&mut shown, on)?;
+                        return Ok(if waiting { Outcome::Waiting } else { Outcome::Unfinished });
+                    }
+                } else {
+                    harness.hooks.run_after_turn(&mut ctx)?;
+                    if lease.release(db, false)? {
+                        show(&mut shown, on)?;
+                        return Ok(Outcome::Ended);
+                    }
                 }
             }
         }
     }
     bail!("stopped after {MAX_STEPS} steps")
-}
-
-/// The reminder for a run that stopped without calling finish.
-fn unfinished(db: &Journal, conv: &str) -> Result<String> {
-    let todos: Vec<String> = board::open_todos(db.conn(), conv)?.iter().map(|(id, t)| format!("{id} \"{t}\"")).collect();
-    let open = match todos.len() {
-        0 => String::new(),
-        1 => format!(" Your todo {} is still open: do it in your reply and mark it done with complete_task.", todos[0]),
-        _ => format!(" Your todos {} are still open: do them in your reply and mark each done with complete_task.", todos.join(", ")),
-    };
-    Ok(format!(
-        "You stopped without calling finish, so nothing is handed in.{open} Write the work itself, then call finish with your report."
-    ))
 }
 
 /// Times a streamed reply: how long until its first text, and how fast the rest came.
@@ -316,7 +330,11 @@ mod tests {
     }
 
     fn kinds(db: &Journal, conv: &str) -> Vec<String> {
-        db.chain(conv).unwrap().into_iter().map(|e| e.kind).collect()
+        db.chain(conv).unwrap().into_iter().filter(|e| e.kind != "system").map(|e| e.kind).collect()
+    }
+
+    fn last_content(chain: &[Entry]) -> &Entry {
+        chain.iter().rev().find(|e| e.kind != "system").unwrap()
     }
 
     /// A reply that calls one tool.
@@ -325,36 +343,31 @@ mod tests {
         Reply { text: String::new(), tool_calls: vec![call], interrupted: false }
     }
 
-    /// A run at the floor that answers its todo with the todo's id is not let
-    /// off: it is reminded, finish turns it back while the todo is open, and
-    /// it ends only when it has done the todo and handed in its report.
+    /// After a chat integrates a child's report in its reply, the post-use
+    /// rating hook fires automatically without `rate` ever entering the toolset.
     #[test]
-    fn a_run_finishes_only_with_its_todos_done() -> Result<()> {
-        let db = Journal::open(&scratch("finish"))?;
+    fn a_chat_rates_a_child_via_post_use_hook() -> Result<()> {
+        let db = Journal::open(&scratch("hook"))?;
         let c = db.conn();
-        let agent = |title: &str| board::TaskFields { title: title.into(), assignee: board::AGENT.into(), ..Default::default() };
-        board::add_task(c, &agent("Middle step"), None)?;
-        c.execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'a')", [])?;
-        board::add_task(c, &agent("Bottom step"), Some("task-1"))?;
-        c.execute("INSERT INTO trials (task, conversation, model) VALUES (2, 'task-2', 'b')", [])?;
-        db.append("task-2", "user", &json!({ "text": "Bottom step\n\nWrite one haiku about snow." }), None)?;
-        let model = |_: &str, chain: &[Entry], _: &[ToolSpec], _: &mut Sink| {
-            let replies = chain.iter().filter(|e| e.kind == "assistant").count();
-            Ok(match replies {
-                0 => calls("add_task", json!({ "title": "Write the haiku" })),
-                1 => says("3"),
-                2 => calls("finish", json!({ "report": "done" })),
-                3 => calls("complete_task", json!({ "id": 3 })),
-                _ => calls("finish", json!({ "report": "Snow on the cedar" })),
-            })
+        db.append("chat-1", "user", &json!({ "text": "write a haiku" }), None)?;
+        db.append("chat-1", "assistant", &json!({ "text": "Handed off." }), Some("chat:m"))?;
+        board::add_task(c, &board::TaskFields { title: "Snow haiku".into(), assignee: board::AGENT.into(), ..Default::default() }, Some("chat-1"))?;
+        c.execute("INSERT INTO trials (task, conversation, model, ended, result, reported) VALUES (1, 'task-1', 'worker:w', datetime('now'), 'Snow on the cedar', 1)", [])?;
+        board::set_state(c, 1, board::TaskState::InGates)?;
+        db.append("chat-1", "report", &json!({ "text": "Task 1 done: Snow on the cedar", "task": 1, "trial": 1 }), None)?;
+        let model = |_: &str, chain: &[Entry], tools: &[ToolSpec], _: &mut Sink| {
+            let last = last_content(chain);
+            if last.body["hook"] == "rate" {
+                assert_eq!(tools.iter().map(|t| t.name).collect::<Vec<_>>(), [crate::hooks::SUBMIT_RATING]);
+                return Ok(calls(crate::hooks::SUBMIT_RATING, json!({ "score": 5, "note": "crisp imagery" })));
+            }
+            assert!(!tools.iter().any(|t| t.name == "rate"), "rate is never in the normal toolset");
+            Ok(says("Here is your haiku: Snow on the cedar."))
         };
-        assert_eq!(run_with(&db, "task-2", "b", &model, &mut |_| {})?, Outcome::Finished("Snow on the cedar".into()));
-        let chain = db.chain("task-2")?;
-        let notice = chain.iter().find(|e| e.kind == "notice").expect("reminded");
-        assert!(notice.body["text"].as_str().unwrap().contains("3 \"Write the haiku\""), "{}", notice.body);
-        let refused = chain.iter().filter(|e| e.kind == "tool" && e.body["name"] == "finish").next().unwrap();
-        assert!(refused.body["output"].as_str().unwrap().contains("todo 3"), "{}", refused.body);
-        assert_eq!(board::task(c, 3)?.state, board::TaskState::Done);
+        assert_eq!(run_with(&db, "chat-1", "chat:m", &model, &mut |_| {})?, Outcome::Ended);
+        let t = board::task(c, 1)?;
+        assert_eq!((t.state, t.score, t.note.as_deref()), (board::TaskState::Done, Some(5), Some("crisp imagery")));
+        assert_eq!(kinds(&db, "chat-1"), ["user", "assistant", "report", "assistant", "rating"]);
         Ok(())
     }
 
@@ -372,7 +385,7 @@ mod tests {
             Ok(says("ok"))
         };
         assert_eq!(run_with(&db, "task-1", "a", &model, &mut |_| {})?, Outcome::Unfinished);
-        assert_eq!(asked.load(SeqCst), 1 + MAX_NUDGES);
+        assert_eq!(asked.load(SeqCst), 1 + crate::hooks::MAX_NUDGES);
         // A chat is not a run: it ends when it answers.
         db.append("chat", "user", &json!({ "text": "hi" }), None)?;
         assert_eq!(run_with(&db, "chat", "a", &|_, _, _, _| Ok(says("hello")), &mut |_| {})?, Outcome::Ended);
@@ -442,7 +455,7 @@ mod tests {
         assert_eq!(turn.join().unwrap()?, ["Hel", "lo ", "world"]);
         assert!(seen.len() >= 2 && seen.last().unwrap().starts_with("Hello"), "saw {seen:?}");
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
-        assert_eq!(db.chain("c")?[1].body["text"], "Hello world");
+        assert_eq!(db.chain("c")?.iter().find(|e| e.kind == "assistant").unwrap().body["text"], "Hello world");
         assert!(turn::partial(db.conn(), "c")?.is_none() && turn::running(db.conn())?.is_empty());
         // The reply was timed: its first text came about immediately, and it was too short for a speed.
         let (ttft, tps): (f64, Option<f64>) = db.conn().query_row("SELECT ttft_ms, tps FROM speeds WHERE model = 'test:m'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -474,11 +487,12 @@ mod tests {
         assert!(turn::stop(db.conn(), "c")?, "a turn was running");
         assert!(turn.join().unwrap()?);
         let chain = db.chain("c")?;
+        let first_reply = chain.iter().find(|e| e.kind == "assistant").unwrap();
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
-        assert_eq!(chain[1].body["text"], "Once upon");
-        assert_eq!(chain[1].body["interrupted"], true);
-        assert!(tool_calls_of(&chain[1].body).is_empty());
-        assert!(messages_of(&chain[1]).iter().any(|m| m.text == "Stopped."));
+        assert_eq!(first_reply.body["text"], "Once upon");
+        assert_eq!(first_reply.body["interrupted"], true);
+        assert!(tool_calls_of(&first_reply.body).is_empty());
+        assert!(messages_of(first_reply).iter().any(|m| m.text == "Stopped."));
         assert!(!turn::stop(db.conn(), "c")?, "nothing left running");
 
         // The next message is answered as usual, and both wire formats read the chain cleanly.
@@ -486,7 +500,7 @@ mod tests {
         assert!(turn_on(&db, "c", "test:m", &|_, _, _, _| Ok(says("The end.")), &mut |_| {})?);
         assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant"]);
         let roles: Vec<Value> = crate::model::chat_messages("s", &db.chain("c")?).iter().map(|m| m["role"].clone()).collect();
-        assert_eq!(roles, ["system", "user", "assistant", "user", "assistant"]);
+        assert_eq!(roles, ["system", "user", "system", "assistant", "user", "assistant"]);
         assert!(crate::model::codex_input(&db.chain("c")?).iter().all(|i| i["type"] != "function_call"));
         Ok(())
     }
@@ -503,7 +517,7 @@ mod tests {
             move || -> Result<Outcome> {
                 let db = Journal::open(&path)?;
                 let model = |_: &str, chain: &[Entry], _: &[ToolSpec], out: &mut Sink| {
-                    if chain.last().unwrap().body["text"] == "make it short" {
+                    if last_content(chain).body["text"] == "make it short" {
                         return Ok(says("Short."));
                     }
                     out("Once upon");
@@ -520,9 +534,10 @@ mod tests {
         assert_eq!(turn.join().unwrap()?, Outcome::Ended);
         assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant"]);
         let chain = db.chain("c")?;
-        assert_eq!((chain[1].body["text"].clone(), chain[1].body["cut_for_message"].clone()), (json!("Once upon"), json!(true)));
-        assert_eq!(chain[3].body["text"], "Short.");
-        assert!(messages_of(&chain[1]).iter().any(|m| m.text == "Cut off by a new message."));
+        let replies: Vec<&Entry> = chain.iter().filter(|e| e.kind == "assistant").collect();
+        assert_eq!((replies[0].body["text"].clone(), replies[0].body["cut_for_message"].clone()), (json!("Once upon"), json!(true)));
+        assert_eq!(replies[1].body["text"], "Short.");
+        assert!(messages_of(replies[0]).iter().any(|m| m.text == "Cut off by a new message."));
         assert!(turn::running(db.conn())?.is_empty());
         
         Ok(())
@@ -544,7 +559,7 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(20));
                     }
                     calls.fetch_add(1, SeqCst);
-                    let asked = chain.last().unwrap().body["text"].as_str().unwrap().to_string();
+                    let asked = last_content(chain).body["text"].as_str().unwrap().to_string();
                     Ok(says(&format!("re: {asked}")))
                 };
                 turn_on(&db, "c", "test:m", &model, &mut |_| {})
@@ -559,7 +574,12 @@ mod tests {
         assert_eq!(turn::queued(db.conn(), "c")?.len(), 1);
         go.store(true, SeqCst);
         assert!(turn.join().unwrap()?);
-        let texts: Vec<String> = db.chain("c")?.iter().map(|e| e.body["text"].as_str().unwrap().to_string()).collect();
+        let texts: Vec<String> = db
+            .chain("c")?
+            .iter()
+            .filter(|e| e.kind != "system")
+            .map(|e| e.body["text"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(texts, ["first", "re: first", "second", "re: second"]);
         assert_eq!(calls.load(SeqCst), 2);
         assert!(turn::queued(db.conn(), "c")?.is_empty() && turn::running(db.conn())?.is_empty());
@@ -580,6 +600,80 @@ mod tests {
         assert!(turn_on(&db, "c", "test:m", &|_, _, _, _| Ok(says("here")), &mut |_| {})?);
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
         assert!(turn::running(db.conn())?.is_empty());
+        Ok(())
+    }
+
+    /// End-to-end harness test: custom write-capable hooks (`before_tool`,
+    /// `after_tool`, `on_yield`) run inside the real loop, and the leading
+    /// system prompt stays byte-identical while a task card opens and changes.
+    #[test]
+    fn harness_hooks_and_cache_safe_prefix_work_end_to_end() -> Result<()> {
+        struct AuditAndVerifyHook;
+        impl crate::hooks::Hook for AuditAndVerifyHook {
+            fn name(&self) -> &'static str {
+                "audit_verify"
+            }
+            fn before_tool(&self, ctx: &mut HookCtx, call: &ToolCall, args: &Value) -> Result<BeforeTool> {
+                if call.name == "propose_task" {
+                    ctx.db.append(ctx.conv, "audit", &json!({ "stage": "before", "title": args["title"] }), None)?;
+                    let mut rewritten = args.clone();
+                    rewritten["priority"] = json!("high");
+                    return Ok(BeforeTool::RewriteArgs(rewritten));
+                }
+                Ok(BeforeTool::Continue)
+            }
+            fn after_tool(&self, _ctx: &mut HookCtx, call: &ToolCall, output: &mut String, _is_error: &mut bool) -> Result<()> {
+                if call.name == "propose_task" {
+                    output.push_str("\n[audited]");
+                }
+                Ok(())
+            }
+            fn on_yield(&self, _ctx: &mut HookCtx, chain: &[Entry]) -> Result<YieldAction> {
+                let verified = chain.iter().any(|e| e.kind == "notice" && e.body["text"] == "Please confirm.");
+                if !verified {
+                    return Ok(YieldAction::Continue("Please confirm.".into()));
+                }
+                Ok(YieldAction::Accept)
+            }
+        }
+
+        let db = Journal::open(&scratch("harness-e2e"))?;
+        turn::send(&db, "chat-1", "draft a task")?;
+        let mut harness = Harness::default();
+        harness.hooks.register(Box::new(AuditAndVerifyHook));
+
+        let seen_systems = std::cell::RefCell::new(Vec::<String>::new());
+        let seen_prefix_len = std::cell::RefCell::new(Vec::<usize>::new());
+        let model = |system: &str, chain: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            seen_systems.borrow_mut().push(system.to_string());
+            seen_prefix_len.borrow_mut().push(chain.len());
+            let last = last_content(chain);
+            Ok(match last.kind.as_str() {
+                "user" => calls("propose_task", json!({ "title": "Ship harness" })),
+                "tool" => {
+                    assert!(last.body["output"].as_str().unwrap().contains("[audited]"));
+                    says("Drafted.")
+                }
+                "notice" => says("Confirmed."),
+                other => panic!("unexpected {other}"),
+            })
+        };
+
+        assert_eq!(run_with_harness(&db, "chat-1", "test:m", &harness, &model, &mut |_| {})?, Outcome::Ended);
+
+        let systems = seen_systems.borrow();
+        assert_eq!(systems.len(), 3);
+        assert_eq!(systems[0], prompt::CHAT_SYSTEM);
+        assert_eq!(systems[1], systems[0], "leading system prompt stays byte-identical after card opens");
+        assert_eq!(systems[2], systems[0], "leading system prompt stays byte-identical on on_yield retry");
+
+        let card = crate::draft::current(&db.chain("chat-1")?).expect("card is open");
+        assert_eq!(card.priority, board::Priority::High, "before_tool rewrote args");
+        assert!(db.chain("chat-1")?.iter().any(|e| e.kind == "audit" && e.body["title"] == "Ship harness"));
+        // Card delta was emitted as a trailing "system" entry rather than mutating the prefix.
+        let sys_entries: Vec<Entry> = db.chain("chat-1")?.into_iter().filter(|e| e.kind == "system").collect();
+        assert_eq!(sys_entries.len(), 2, "initial date delta + card-opened delta only");
+        assert!(sys_entries[1].body["text"].as_str().unwrap().contains("Ship harness"));
         Ok(())
     }
 }

@@ -6,17 +6,6 @@ What is undecided. Each question links back to the section that raises it.
 
 ## To decide
 
-### Blocking ratings
-
-Must a parent rate a subagent's work before carrying on? Leaning yes, with only a one-sentence review and a 1 to 5 required. Raised in [Blind testing](blind-testing.md#grading).
-
-| | Must rate before continuing | Can rate later, or not at all |
-|---|---|---|
-| Coverage | Every exchange gets a rating | Gaps, and biased ones: strong opinions get recorded, average ones do not |
-| Quality | A first impression, before the result has been used | Informed by whether the result worked |
-| Cost | A little time and tokens on every exchange | Nothing unless a rating is given |
-| Risk | Raters learn to answer by rote | The rater may be cold or finished by the time the outcome is known |
-
 ### Model on wake
 
 Does a woken agent keep its previous model? Keeping it helps consistency and cache reuse; picking again helps cost and exploration. Raised in [Agents](agent-tiers.md#agent-lifecycle).

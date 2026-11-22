@@ -47,7 +47,7 @@ The router picks one option per slot. A run can differ from the role's defaults 
 
 **When.** On any exchange, a single reply or a final report. Not necessarily every turn; how often is [not fixed](open-questions.md#rating-frequency). A long-running agent collects many ratings; a short subagent may collect one.
 
-**The grading hook.** An agent that creates a subagent is hooked to rate what comes back. Whether it must do so before carrying on is [undecided](open-questions.md#blocking-ratings).
+**The grading hook.** Rating is not part of an agent's normal toolset. When a parent thread (chat, project agent or worker run) finishes a turn that integrated a returning child report, the harness fires an isolated post-use grading hook on the parent's model to collect a structured rating (`score` and `note`) while the turn's context is warm in cache. If the parent ran on the same model as the child, has no model, or fails to return a valid rating, the hook never traps the parent and leaves the result open for the user.
 
 **Who rates the secretary and project agents.** The user, and the secretary for project agents.
 

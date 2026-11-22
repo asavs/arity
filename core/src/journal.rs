@@ -8,9 +8,6 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-use crate::model::ToolCall;
-use crate::tools;
-
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: i64,
@@ -42,10 +39,36 @@ impl Journal {
                  created TEXT NOT NULL DEFAULT (datetime('now'))
              );
              CREATE TABLE IF NOT EXISTS conversations (
-                 name TEXT PRIMARY KEY,
-                 head INTEGER NOT NULL REFERENCES entries(id)
+                 name       TEXT PRIMARY KEY,
+                 head       INTEGER NOT NULL REFERENCES entries(id),
+                 wake_at    INTEGER NOT NULL DEFAULT 0, -- 0 idle; -1 waiting on children; >0 eligible unix ts to wake
+                 session_id TEXT NOT NULL DEFAULT ''    -- stable provider cache/session id; fresh on fork
+             );
+             CREATE TABLE IF NOT EXISTS hook_runs (
+                 conversation TEXT NOT NULL,
+                 anchor_entry INTEGER NOT NULL,
+                 hook         TEXT NOT NULL,
+                 created      TEXT NOT NULL DEFAULT (datetime('now')),
+                 PRIMARY KEY (conversation, anchor_entry, hook)
              );",
         )?;
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('conversations')")?;
+        let conv_cols: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        if !conv_cols.iter().any(|c| c == "wake_at") {
+            conn.execute_batch("ALTER TABLE conversations ADD COLUMN wake_at INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !conv_cols.iter().any(|c| c == "session_id") {
+            conn.execute_batch("ALTER TABLE conversations ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")?;
+        }
+        // Backfill legacy conversations with a stable random session id.
+        let missing_sid: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM conversations WHERE session_id = ''")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        for name in missing_sid {
+            conn.execute("UPDATE conversations SET session_id = ?2 WHERE name = ?1", params![name, new_session_id()])?;
+        }
         conn.execute_batch(crate::turn::TABLES)?;
         crate::turn::migrate(&conn)?;
         conn.execute_batch(crate::leaderboard::TABLES)?;
@@ -56,20 +79,6 @@ impl Journal {
     /// Append one entry under the conversation's head and move the head, atomically.
     pub fn append(&self, conv: &str, kind: &str, body: &Value, model: Option<&str>) -> Result<i64> {
         self.immediate(|c| insert(c, conv, kind, body, model))
-    }
-
-    /// Run a tool and record its result in one transaction. If the process dies
-    /// before commit, neither the tool's effect on the board nor the entry exists,
-    /// so a resume runs it again exactly once.
-    pub fn run_tool(&self, conv: &str, model: &str, call: &ToolCall) -> Result<String> {
-        // Immediate, so the write lock is taken up front: a transaction that read
-        // first could not take it once the turn's heartbeat had written.
-        self.immediate(|c| {
-            let output = tools::execute(c, conv, model, &call.name, &call.arguments);
-            let body = serde_json::json!({ "call_id": call.id, "name": call.name, "output": output });
-            insert(c, conv, "tool", &body, None)?;
-            Ok(output)
-        })
     }
 
     /// The conversation's entries, oldest first, following parent links from the head.
@@ -87,7 +96,10 @@ impl Journal {
             bail!("no entry {entry}");
         }
         self.conn
-            .execute("INSERT INTO conversations (name, head) VALUES (?1, ?2)", params![new_conv, entry])
+            .execute(
+                "INSERT INTO conversations (name, head, session_id) VALUES (?1, ?2, ?3)",
+                params![new_conv, entry, new_session_id()],
+            )
             .with_context(|| format!("conversation {new_conv} already exists?"))?;
         // The fork reads the folder of the conversation it branched from.
         let folders: Vec<(String, String)> = {
@@ -181,9 +193,59 @@ pub fn insert(tx: &Connection, conv: &str, kind: &str, body: &Value, model: Opti
     )?;
     let id = tx.last_insert_rowid();
     tx.execute(
-        "INSERT INTO conversations (name, head) VALUES (?1, ?2)
+        "INSERT INTO conversations (name, head, session_id) VALUES (?1, ?2, ?3)
          ON CONFLICT(name) DO UPDATE SET head = excluded.head",
-        params![conv, id],
+        params![conv, id, new_session_id()],
     )?;
     Ok(id)
+}
+
+/// Generate a fresh random 32-hex provider session id.
+pub fn new_session_id() -> String {
+    let a: u64 = rand::random();
+    let b: u64 = rand::random();
+    format!("{a:016x}{b:016x}")
+}
+
+/// The persisted provider session id for `conv`, or a deterministic fallback if
+/// `conv` has no row in `conversations` yet.
+pub fn session_id(conn: &Connection, conv: &str) -> Result<String> {
+    let sid: Option<String> = conn
+        .query_row("SELECT session_id FROM conversations WHERE name = ?1", params![conv], |r| r.get(0))
+        .optional()?;
+    Ok(match sid {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            use sha2::Digest;
+            sha2::Sha256::digest(conv.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect()
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_id_persists_across_appends_and_is_fresh_on_fork() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-journal-sid-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = Journal::open(&path)?;
+        let e1 = db.append("chat-1", "user", &json!({ "text": "hi" }), None)?;
+        let sid1 = session_id(db.conn(), "chat-1")?;
+        assert_eq!(sid1.len(), 32);
+        db.append("chat-1", "assistant", &json!({ "text": "hello" }), Some("m"))?;
+        assert_eq!(session_id(db.conn(), "chat-1")?, sid1, "stable across turns");
+        db.fork(e1, "chat-2")?;
+        let sid2 = session_id(db.conn(), "chat-2")?;
+        assert_eq!(sid2.len(), 32);
+        assert_ne!(sid1, sid2, "fork receives a fresh session id");
+        drop(db);
+        let reopened = Journal::open(&path)?;
+        assert_eq!(session_id(reopened.conn(), "chat-1")?, sid1, "survives reopen");
+        assert_eq!(session_id(reopened.conn(), "chat-2")?, sid2);
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
 }
