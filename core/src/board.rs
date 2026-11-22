@@ -90,6 +90,10 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              rated_by TEXT NOT NULL,              -- people/<login>, or conversations/<name>
              rater_model TEXT,                    -- the model that rated; NULL for a person
              rated_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE TABLE IF NOT EXISTS folders (
+             conversation TEXT PRIMARY KEY,
+             dir          TEXT NOT NULL      -- the folder the conversation's file tools read
          );",
     )?;
     let columns = |table: &str| -> Result<Vec<String>> {
@@ -133,6 +137,9 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
             tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE when_done = 'interrupt'")?;
         }
     }
+    if !columns("tasks")?.iter().any(|c| c == "dir") {
+        tx.execute_batch("ALTER TABLE tasks ADD COLUMN dir TEXT")?;
+    }
     if !columns("ratings")?.iter().any(|c| c == "rater_model") {
         migrate_authorship(&tx)?;
     }
@@ -157,6 +164,7 @@ fn create_tasks(c: &Connection, name: &str) -> Result<()> {
              priority   INTEGER NOT NULL DEFAULT 1, -- 0 low, 1 normal, 2 high, 3 urgent
              due        TEXT,                     -- YYYY-MM-DD
              tags       TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
+             dir        TEXT,                     -- the folder its run's file tools read, if any
              created    TEXT NOT NULL DEFAULT (datetime('now')),
              edits      INTEGER NOT NULL DEFAULT 0  -- bumped on every change, for polling
          )"
@@ -301,6 +309,9 @@ pub struct TaskFields {
     /// Tasks that must be done before this one is ready.
     pub blocked_by: Vec<i64>,
     pub tags: Vec<String>,
+    /// The folder its run may read, if any. Left out, it is the folder of the
+    /// conversation it is filed in.
+    pub dir: Option<String>,
 }
 
 impl Default for TaskFields {
@@ -314,6 +325,7 @@ impl Default for TaskFields {
             due: None,
             blocked_by: vec![],
             tags: vec![],
+            dir: None,
         }
     }
 }
@@ -329,6 +341,7 @@ impl TaskFields {
             "due": self.due,
             "blocked_by": self.blocked_by,
             "tags": self.tags,
+            "dir": self.dir,
         })
     }
 
@@ -398,6 +411,7 @@ impl TaskFields {
                     };
                     self.tags = clean_tags(&self.tags);
                 }
+                "dir" => self.dir = Some(s()).filter(|d| !d.is_empty() && d != "null"),
                 "id" => {}
                 other => bail!("unknown field {other}"),
             }
@@ -430,6 +444,9 @@ impl TaskFields {
         }
         if !self.tags.is_empty() {
             out.push(format!("tags: {}", self.tags.join(", ")));
+        }
+        if let Some(d) = &self.dir {
+            out.push(format!("folder: {d}"));
         }
         out.join("\n")
     }
@@ -556,7 +573,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.choice,
                 t.priority, t.due, t.tags,
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
-                t.origin, t.created, r.note, tr.model, tr.waiting
+                t.origin, t.created, r.note, tr.model, tr.waiting, t.dir
          FROM tasks t
          LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id AND abandoned = 0)
          LEFT JOIN ratings r ON r.trial = tr.id
@@ -588,6 +605,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 due: r.get(8)?,
                 blocked_by: blockers.iter().filter(|(t, _)| *t == id).map(|(_, b)| *b).collect(),
                 tags: serde_json::from_str(&tags).unwrap_or_default(),
+                dir: r.get(21)?,
             },
             created_by: r.get(4)?,
             origin: r.get(16)?,
@@ -670,13 +688,19 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
     let (depth, parent) = parent_of(conn, origin)?;
     // Private work stays private all the way down: a private run's tasks are private too.
     let choice = if parent == Some(Choice::Private) { Choice::Private } else { f.choice };
+    // So does the folder, unless one is given.
+    let dir = match (&f.dir, origin) {
+        (Some(d), _) => Some(d.clone()),
+        (None, Some(conv)) => folder_of(conn, conv)?.map(|p| p.to_string_lossy().into_owned()),
+        (None, None) => None,
+    };
     // The tools never offer delegation at the floor; this only guards the rule.
     if depth > MAX_DEPTH && normalize_assignee(&f.assignee)? == AGENT {
         bail!("a run at the floor cannot hand work to an agent");
     }
     conn.execute(
-        "INSERT INTO tasks (title, brief, assignee, created_by, choice, priority, due, tags, origin, depth)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO tasks (title, brief, assignee, created_by, choice, priority, due, tags, origin, depth, dir)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             f.title.trim(),
             Some(f.brief.trim()).filter(|b| !b.is_empty()),
@@ -688,12 +712,54 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
             serde_json::to_string(&clean_tags(&f.tags))?,
             origin,
             depth,
+            dir,
         ],
     )?;
     let id = conn.last_insert_rowid();
     write_links(conn, id, f)?;
     refresh_ready(conn)?;
     Ok(id)
+}
+
+/// The folder a conversation's file tools read: the one set for it, or for a
+/// run, its task's.
+pub fn folder_of(conn: &Connection, conv: &str) -> Result<Option<std::path::PathBuf>> {
+    let dir: Option<String> = conn
+        .query_row("SELECT dir FROM folders WHERE conversation = ?1", params![conv], |r| r.get(0))
+        .optional()?;
+    let dir = match dir {
+        Some(d) => Some(d),
+        None => conn
+            .query_row(
+                "SELECT t.dir FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1 ORDER BY tr.id DESC LIMIT 1",
+                params![conv],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten(),
+    };
+    Ok(dir.map(std::path::PathBuf::from))
+}
+
+/// Set or clear the folder a conversation reads. It must be an existing directory.
+pub fn set_folder(conn: &Connection, conv: &str, dir: Option<&str>) -> Result<()> {
+    match dir.map(str::trim).filter(|d| !d.is_empty()) {
+        None => {
+            conn.execute("DELETE FROM folders WHERE conversation = ?1", params![conv])?;
+        }
+        Some(d) => {
+            let path = std::fs::canonicalize(d).map_err(|e| anyhow!("no folder {d}: {e}"))?;
+            if !path.is_dir() {
+                bail!("{d} is not a folder");
+            }
+            conn.execute(
+                "INSERT INTO folders (conversation, dir) VALUES (?1, ?2)
+                 ON CONFLICT(conversation) DO UPDATE SET dir = excluded.dir",
+                params![conv, path.to_string_lossy()],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The level of the task whose run `conv` is, or None for a conversation that is not a run.
@@ -731,7 +797,7 @@ pub fn update_task(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
     }
     conn.execute(
         "UPDATE tasks SET title = ?2, brief = ?3, assignee = ?4, choice = ?5, priority = ?6, due = ?7, tags = ?8,
-             edits = edits + 1
+             dir = ?9, edits = edits + 1
          WHERE id = ?1",
         params![
             id,
@@ -742,6 +808,7 @@ pub fn update_task(conn: &Connection, id: i64, f: &TaskFields) -> Result<()> {
             f.priority.rank(),
             f.due,
             serde_json::to_string(&clean_tags(&f.tags))?,
+            f.dir,
         ],
     )?;
     write_links(conn, id, f)?;
@@ -1100,6 +1167,50 @@ mod tests {
 
     fn for_agent(title: &str) -> TaskFields {
         TaskFields { assignee: AGENT.into(), ..fields(title) }
+    }
+
+    /// A chat's folder passes down to the tasks filed in it and to theirs, down
+    /// to the floor, as the choice does. A folder given for a task is kept.
+    #[test]
+    fn a_folder_passes_down_to_the_floor() -> Result<()> {
+        let path = temp("folders");
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let repo = std::env::temp_dir().join(format!("arity-folder-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&repo)?;
+        let repo = std::fs::canonicalize(&repo)?;
+        assert!(set_folder(c, "chat", Some("/no/such/folder")).is_err());
+        assert_eq!(folder_of(c, "chat")?, None);
+        set_folder(c, "chat", Some(repo.to_str().unwrap()))?;
+        assert_eq!(folder_of(c, "chat")?, Some(repo.clone()));
+        let run = |task: i64| {
+            c.execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-' || ?1, 'lab:m')", params![task])
+        };
+        // Chat → task 1 → task 2, at the floor.
+        let one = add_task(c, &for_agent("top"), Some("chat"))?;
+        run(one)?;
+        assert_eq!(folder_of(c, "task-1")?, Some(repo.clone()));
+        let two = add_task(c, &for_agent("sub"), Some("task-1"))?;
+        run(two)?;
+        assert_eq!(task(c, two)?.fields.dir.as_deref(), repo.to_str());
+        assert_eq!(folder_of(c, "task-2")?, Some(repo.clone()));
+        let todo = add_task(c, &TaskFields { assignee: conversation_page("task-2"), ..fields("todo") }, Some("task-2"))?;
+        assert_eq!(task(c, todo)?.fields.dir.as_deref(), repo.to_str());
+        // An explicit folder is not overwritten.
+        let other = add_task(c, &TaskFields { dir: Some("/elsewhere".into()), ..for_agent("other") }, Some("chat"))?;
+        assert_eq!(task(c, other)?.fields.dir.as_deref(), Some("/elsewhere"));
+        // No folder, nothing inherited; clearing the chat's stops new tasks getting it.
+        assert_eq!(task(c, add_task(c, &fields("mine"), None)?)?.fields.dir, None);
+        set_folder(c, "chat", None)?;
+        assert_eq!(task(c, add_task(c, &fields("later"), Some("chat"))?)?.fields.dir, None);
+        // A fork keeps its conversation's folder.
+        set_folder(c, "chat", Some(repo.to_str().unwrap()))?;
+        let head = db.append("chat", "user", &json!({ "text": "hi" }), None)?;
+        db.fork(head, "chat-2")?;
+        assert_eq!(folder_of(c, "chat-2")?, Some(repo.clone()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&repo);
+        Ok(())
     }
 
     #[test]

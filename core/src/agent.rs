@@ -34,6 +34,10 @@ this conversation. Write the brief to whoever will do it: they see only the titl
 brief, so say everything they need. Keep changing the card as the \
 user asks; they add it to the board themselves. Use add_task only when they ask you to add a task directly.
 
+The card holds one task. When the user wants work broken into several tasks, do not keep rewriting the card: \
+outline the tasks briefly in your reply, or, once they agree, add them with add_task, setting blocked_by where \
+one must wait for another.
+
 Be brief.";
 
 const WORKER: &str = "You are an agent inside Arity, doing one task from a shared board. The task was \
@@ -117,7 +121,18 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
         ),
         (false, _) => SYSTEM.to_string(),
     };
-    let system = format!("{base}\n\nToday is {today}.");
+    let folder = board::folder_of(db.conn(), conv)?;
+    let attached = match &folder {
+        // A path the user chose: it says nothing about the model, so blindness holds.
+        Some(dir) => format!(
+            "\n\nThe folder {} is attached{}. Read it with list_files, read_file and search_files; paths are \
+             relative to it. You can only read it, not change it.",
+            dir.display(),
+            if worker { " to your task" } else { " to this conversation" }
+        ),
+        None => String::new(),
+    };
+    let system = format!("{base}{attached}\n\nToday is {today}.");
     // Entries up to here were written before this turn; later ones are shown as they come.
     let mut shown = db.chain(conv)?.last().map_or(0, |e| e.id);
     let show = |shown: &mut i64, on: &mut dyn FnMut(Event)| -> Result<()> {
@@ -164,7 +179,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                     }
                     !live.stopped()
                 };
-                let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate), &mut out)?;
+                let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate, folder.is_some()), &mut out)?;
                 let mut body = reply.to_json();
                 if reply.interrupted && lease.live.cut_for_steer() {
                     body["cut_for_message"] = json!(true);

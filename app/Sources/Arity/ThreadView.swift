@@ -107,6 +107,43 @@ struct ThreadView: View {
         }
     }
 
+    /// The folder this chat may read, as a chip with × to detach it, or a button to attach one.
+    @ViewBuilder private var folderButton: some View {
+        if let folder = store.folder {
+            HStack(spacing: 3) {
+                Image(systemName: "folder")
+                Text(URL(fileURLWithPath: folder).lastPathComponent).lineLimit(1)
+                Button("Detach Folder", systemImage: "xmark.circle.fill") { store.setFolder(nil) }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(busy)
+                    .help("Detach the folder")
+            }
+            .font(.caption)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
+            .fixedSize()
+            .help("Reads \(folder), and so do the tasks filed here. Nothing in it is changed.")
+        } else {
+            Button("Attach a Folder", systemImage: "folder.badge.plus") { chooseFolder() }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .disabled(busy)
+                .help("Let this chat, and the tasks filed in it, read a folder")
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Attach"
+        panel.message = "Arity can read this folder, but not change it."
+        if panel.runModal() == .OK, let url = panel.url { store.setFolder(url.path) }
+    }
+
     private func workerPrompt(_ task: BoardTask) -> String {
         switch task.runState {
         case .needsRating?: "Ask the agent before rating"
@@ -121,6 +158,7 @@ struct ThreadView: View {
         return HStack(alignment: .bottom, spacing: 8) {
             if !store.isWorkerRun {
                 modelChoice
+                folderButton
 
                 if store.draft == nil {
                     Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }

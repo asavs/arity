@@ -16,6 +16,8 @@ final class Store {
     var messages: [Message] = []
     /// The task card open in the selected chat, as last edited here or in the core.
     var draft: TaskFields?
+    /// The folder attached to the selected chat: its file tools read it, never change it.
+    var folder: String?
     var scores: [Score] = []
     /// What the configured providers offer, and which of them tasks for agents are picked from.
     var models: [String] = []
@@ -102,6 +104,7 @@ final class Store {
         if let selection {
             messages = attempt { try core.messages(conversation: selection) } ?? []
             if pendingCard?.conv != selection { draft = thread?.card }
+            folder = attempt { try core.folder(conversation: selection) } ?? nil
         }
     }
 
@@ -110,8 +113,9 @@ final class Store {
         flushCard()
         pickReason = nil
         choiceChanged = false
-        guard let selection else { messages = []; draft = nil; return }
+        guard let selection else { messages = []; draft = nil; folder = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
+        folder = attempt { try core.folder(conversation: selection) } ?? nil
         draft = thread?.card
         if let last = attempt({ try core.lastModel(conversation: selection) }), let last {
             model = last
@@ -183,6 +187,13 @@ final class Store {
 
     /// Attach an empty task card to the selected chat. The model's next job
     /// there is to help fill it in.
+    /// Attach a folder to the selected chat, or with nil take it away. Works before the first message.
+    func setFolder(_ dir: String?) {
+        guard let conv = selection else { return }
+        _ = attempt { try core.setFolder(conversation: conv, dir: dir) }
+        folder = attempt { try core.folder(conversation: conv) } ?? nil
+    }
+
     func attachCard() {
         guard let conv = selection else { return }
         _ = attempt { try core.openDraft(conversation: conv) }

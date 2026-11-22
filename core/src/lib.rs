@@ -17,6 +17,7 @@ mod config;
 mod dispatch;
 mod draft;
 mod endpoint;
+mod files;
 mod journal;
 mod keys;
 mod leaderboard;
@@ -442,6 +443,19 @@ impl Arity {
     /// A new conversation sharing history up to and including `entry`.
     pub fn fork(&self, entry: i64, new_conversation: String) -> Result<()> {
         Ok(self.journal()?.fork(entry, &new_conversation)?)
+    }
+
+    /// Attach a folder to a conversation, or with None take it away. Its file
+    /// tools read only inside it, and tasks filed there take it with them. The
+    /// folder must exist; it can be set before the first message.
+    pub fn set_folder(&self, conversation: String, dir: Option<String>) -> Result<()> {
+        Ok(board::set_folder(self.journal()?.conn(), &conversation, dir.as_deref())?)
+    }
+
+    /// The folder attached to a conversation, or for a run, to its task.
+    pub fn folder(&self, conversation: String) -> Result<Option<String>> {
+        let db = self.journal()?;
+        Ok(board::folder_of(db.conn(), &conversation)?.map(|p| p.to_string_lossy().into_owned()))
     }
 
     // Tasks

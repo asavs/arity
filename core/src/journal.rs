@@ -89,6 +89,17 @@ impl Journal {
         self.conn
             .execute("INSERT INTO conversations (name, head) VALUES (?1, ?2)", params![new_conv, entry])
             .with_context(|| format!("conversation {new_conv} already exists?"))?;
+        // The fork reads the folder of the conversation it branched from.
+        let folders: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare("SELECT conversation, dir FROM folders")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (conv, dir) in folders {
+            if conv != new_conv && chain(&self.conn, &conv)?.iter().any(|e| e.id == entry) {
+                self.conn.execute("INSERT OR REPLACE INTO folders (conversation, dir) VALUES (?1, ?2)", params![new_conv, dir])?;
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -110,7 +121,8 @@ impl Journal {
                  || '.' || (SELECT count(*) + count(ended) + count(error) FROM trials)
                  || '.' || (SELECT count(*) FROM ratings)
                  || '.' || (SELECT count(*) || ':' || ifnull(sum(seq), 0) FROM turns)
-                 || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)",
+                 || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(length(dir)), 0) FROM folders)",
             [],
             |r| r.get(0),
         )?)
