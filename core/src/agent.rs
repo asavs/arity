@@ -19,7 +19,7 @@ use crate::hooks::{BeforeTool, HookCtx, HookRegistry, YieldAction};
 use crate::journal::{Entry, Journal};
 use crate::model::{Model, Reply, Sink, ToolCall, tool_calls_of};
 use crate::prompt::{self, PromptState};
-use crate::tools::{self, ToolHookDecision, ToolRegistry, ToolSpec, ToolVisibility};
+use crate::tools::{self, ToolHookDecision, ToolRegistry, ToolRun, ToolSpec, ToolVisibility};
 use crate::turn::Lease;
 use crate::{Event, messages_of};
 
@@ -175,6 +175,9 @@ pub enum Outcome {
     Waiting,
     /// A run stopped without finishing, even after being reminded.
     Unfinished,
+    /// A tool call waits for the user to allow or deny it. The turn's lease is
+    /// released; deciding the call wakes a run, or lets a chat be continued.
+    NeedsApproval,
 }
 
 enum Step {
@@ -293,8 +296,7 @@ pub fn run_turn(
         if matches!(next_step(&chain), Step::CallModel | Step::Done) {
             if lease.live.cut_for_steer() {
                 lease.go_on(db)?;
-            } else if lease.live.stopped() {
-                lease.release(db, true)?;
+            } else if lease.live.stopped() {                lease.release(db, true)?;
                 show(&mut shown, on)?;
                 return Ok(Outcome::Stopped);
             }
@@ -382,8 +384,7 @@ pub fn run_turn(
                     Called::Reply(reply) => reply,
                     // A steer: the top of the loop takes it in and asks again.
                     Called::Interrupted if lease.live.cut_for_steer() => continue,
-                    Called::Interrupted => {
-                        lease.release(db, true)?;
+                    Called::Interrupted => {                        lease.release(db, true)?;
                         show(&mut shown, on)?;
                         return Ok(Outcome::Stopped);
                     }
@@ -398,24 +399,24 @@ pub fn run_turn(
                     crate::leaderboard::record_speed(db.conn(), spec, ttft, tps)?;
                 }
                 // Cut for a steer: the top of the loop takes it in and goes on.
-                if reply.interrupted && !lease.live.cut_for_steer() {
-                    lease.release(db, true)?;
+                if reply.interrupted && !lease.live.cut_for_steer() {                    lease.release(db, true)?;
                     show(&mut shown, on)?;
                     return Ok(Outcome::Stopped);
                 }
             }
             Step::RunTool(call) => {
-                harness.tools.run_with_hooks(
+                let ran = harness.tools.run_with_hooks(
                     db,
                     conv,
                     spec,
                     &call,
-                    |call, args| {
+                    |call, args, approved| {
                         let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };
-                        Ok(match harness.hooks.run_before_tool(&mut ctx, call, args.clone())? {
+                        Ok(match harness.hooks.run_before_tool_approved(&mut ctx, call, args.clone(), approved)? {
                             BeforeTool::Continue => ToolHookDecision::Continue,
                             BeforeTool::RewriteArgs(v) => ToolHookDecision::RewriteArgs(v),
                             BeforeTool::Block(reason) => ToolHookDecision::Block(reason),
+                            BeforeTool::AskApproval { hook, reason } => ToolHookDecision::AskApproval { hook, reason },
                         })
                     },
                     |call, out| {
@@ -423,6 +424,12 @@ pub fn run_turn(
                         harness.hooks.run_after_tool(&mut ctx, call, &mut out.text, &mut out.is_error)
                     },
                 )?;
+                if let ToolRun::Parked(_) = ran {
+                    // The turn is over until the user decides; deciding wakes or continues it.
+                    lease.park(db)?;
+                    show(&mut shown, on)?;
+                    return Ok(Outcome::NeedsApproval);
+                }
             }
             Step::Finished(report) => {
                 let mut ctx = HookCtx { db, conv, model: spec, system, complete, live: &lease.live, in_run };

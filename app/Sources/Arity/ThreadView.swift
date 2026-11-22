@@ -54,6 +54,11 @@ struct ThreadView: View {
                 continueBar
             }
 
+            if let approval = store.pendingApprovals.first {
+                Divider()
+                ApprovalBanner(approval: approval, more: store.pendingApprovals.count - 1).id(approval.id)
+            }
+
             Divider()
             if let task = store.thread?.task {
                 if task.runState != nil {
@@ -499,6 +504,98 @@ private struct WorktreeDiffBar: View {
     }
 }
 
+extension Color {
+    /// Tool calls waiting for the user's approval.
+    static let amber = Color(red: 1.0, green: 0.69, blue: 0.0)
+}
+
+/// A tool call a hook parked, above the composer: which tool, the hook that asked and why, its
+/// arguments folded away, and Allow or Deny with an optional note the model reads.
+private struct ApprovalBanner: View {
+    @Environment(Store.self) private var store
+    let approval: PendingApproval
+    /// Calls waiting behind this one in the same thread.
+    let more: Int
+    @State private var expanded = false
+    @State private var note = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.amber)
+                Text("Approval needed · \(approval.tool)").fontWeight(.semibold)
+                Text(approval.hook)
+                    .font(.caption.monospaced())
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.amber.opacity(0.18), in: Capsule())
+                    .help("The hook that asked")
+                if more > 0 {
+                    Text("+\(more) more").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            Text(approval.reason).font(.callout).textSelection(.enabled)
+            Button { withAnimation(.snappy(duration: 0.18)) { expanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    if expanded {
+                        Text("Arguments").font(.caption)
+                    } else {
+                        Text(approval.args).font(.caption.monospaced()).lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Hide the arguments" : "Show the arguments in full")
+            if expanded {
+                ScrollView([.horizontal, .vertical]) {
+                    Text(prettyArgs)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize()
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+                .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            HStack(spacing: 8) {
+                TextField("Note for the model (optional)", text: $note)
+                    .textFieldStyle(.roundedBorder)
+                Button("Deny", role: .destructive) { store.denyTool(approval, note: note) }
+                    .help("The model is told the call was denied, with your note")
+                Button("Allow") { store.approveTool(approval, note: note) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.amber)
+                    .help("Run this call once, as it is")
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.amber.opacity(0.08))
+    }
+
+    private var prettyArgs: String {
+        guard let data = approval.args.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(
+                  withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let text = String(data: pretty, encoding: .utf8)
+        else { return approval.args }
+        return text
+    }
+}
+
 /// What sits under a task's thread instead of a composer.
 private struct TaskDock: View {
     @Environment(Store.self) private var store
@@ -511,6 +608,9 @@ private struct TaskDock: View {
             case nil: card
             case .running?: Label("An agent is on it", systemImage: "sparkles").foregroundStyle(.secondary)
             case .waiting?: Label("Waiting on its sub-tasks", systemImage: "hourglass").foregroundStyle(.secondary)
+            case .needsApproval?:
+                Label("Waiting for you to allow or deny a tool call", systemImage: "exclamationmark.shield")
+                    .foregroundStyle(Color.amber)
             case .failing?:
                 Label(task.error ?? "The last attempt failed", systemImage: "exclamationmark.arrow.circlepath")
                     .foregroundStyle(.orange).textSelection(.enabled)

@@ -53,17 +53,28 @@ private struct ThreadRow: View {
     }
 
     private var caption: String {
+        if thread.pendingApprovals > 0 && thread.task == nil {
+            let n = thread.pendingApprovals
+            return n == 1 ? "A tool call needs your approval" : "\(n) tool calls need your approval"
+        }
         if let task = thread.task { return details(task, me: store.me) }
         return thread.card != nil ? "Task card open" : relative(thread.updated)
     }
 
     @ViewBuilder private var icon: some View {
-        if store.running.contains(thread.name) {
+        if thread.pendingApprovals > 0 {
+            Image(systemName: "exclamationmark.shield.fill")
+                .foregroundStyle(Color.amber)
+                .help("A tool call waits for you to allow or deny it")
+        } else if store.running.contains(thread.name) {
             ProgressView().controlSize(.mini)
         } else if let task = thread.task {
             switch (task.state, task.runState) {
             case (_, .running?): ProgressView().controlSize(.mini)
             case (_, .waiting?): Image(systemName: "hourglass").foregroundStyle(.secondary).help("Waiting on its sub-tasks")
+            case (_, .needsApproval?):
+                Image(systemName: "exclamationmark.shield.fill").foregroundStyle(Color.amber)
+                    .help("A tool call waits for you to allow or deny it")
             case (_, .failing?): Image(systemName: "exclamationmark.arrow.circlepath").foregroundStyle(.orange)
             case (_, .paused?): Image(systemName: "pause.circle").foregroundStyle(.secondary).help("Stopped; continue it to carry on")
             case (.done, _): Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -89,6 +100,7 @@ func details(_ task: BoardTask, me: String) -> String {
         switch task.runState {
         case .running?: parts.append("running")
         case .waiting?: parts.append("waiting on sub-tasks")
+        case .needsApproval?: parts.append("needs your approval")
         case .failing?: parts.append("retrying")
         case .paused?: parts.append("stopped")
         case .needsRating? where task.state != .done: parts.append("needs rating")

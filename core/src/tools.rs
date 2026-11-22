@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use crate::board::{self, AGENT, RunState, TaskFields, TaskState};
 use crate::journal::Journal;
 use crate::model::ToolCall;
+use crate::approvals::{self, PriorDecision};
 use crate::{draft, turn};
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,17 @@ pub enum ToolHookDecision {
     Continue,
     RewriteArgs(Value),
     Block(String),
+    /// Park the call until the user allows or denies it; `hook` is who asked.
+    AskApproval { hook: String, reason: String },
+}
+
+/// What became of a tool call.
+#[derive(Debug, Clone)]
+pub enum ToolRun {
+    /// It has a `tool` entry: it ran, or was refused, blocked or denied.
+    Executed(ToolOutput),
+    /// It waits for the user to allow or deny it, with no `tool` entry yet.
+    Parked(approvals::Approval),
 }
 
 pub trait Tool: Send + Sync {
@@ -199,9 +211,16 @@ impl ToolRegistry {
     }
 
     pub fn execute_call(&self, db: &Journal, conv: &str, model: &str, call: &ToolCall) -> Result<ToolOutput> {
-        self.run_with_hooks(db, conv, model, call, |_, _| Ok(ToolHookDecision::Continue), |_, _| Ok(()))
+        match self.run_with_hooks(db, conv, model, call, |_, _, _| Ok(ToolHookDecision::Continue), |_, _| Ok(()))? {
+            ToolRun::Executed(output) => Ok(output),
+            ToolRun::Parked(approval) => anyhow::bail!("{} waits for approval #{}", call.name, approval.id),
+        }
     }
 
+    /// Run `call` and commit its `tool` entry, unless it waits for the user.
+    /// `before` gets whether the user already allowed this call; once they
+    /// have, it should not ask again. A denied call is answered with an error
+    /// without asking `before` at all.
     pub fn run_with_hooks<B, A>(
         &self,
         db: &Journal,
@@ -210,9 +229,9 @@ impl ToolRegistry {
         call: &ToolCall,
         mut before: B,
         mut after: A,
-    ) -> Result<ToolOutput>
+    ) -> Result<ToolRun>
     where
-        B: FnMut(&ToolCall, &Value) -> Result<ToolHookDecision>,
+        B: FnMut(&ToolCall, &Value, bool) -> Result<ToolHookDecision>,
         A: FnMut(&ToolCall, &mut ToolOutput) -> Result<()>,
     {
         let mut args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
@@ -224,11 +243,8 @@ impl ToolRegistry {
         };
 
         let Some(tool) = self.get(&call.name) else {
-            let mut output = ToolOutput::err(format!("error: unknown tool {}", call.name));
-            after(call, &mut output)?;
-            output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-            db.append(conv, "tool", &tool_entry_body(call, &output), None)?;
-            return Ok(output);
+            let output = ToolOutput::err(format!("error: unknown tool {}", call.name));
+            return record(db, conv, call, output, &mut after);
         };
 
         if tool.spec(&vis).is_none() {
@@ -240,43 +256,55 @@ impl ToolRegistry {
             } else {
                 format!("error: {reason}")
             };
-            let mut output = ToolOutput::err(msg);
-            after(call, &mut output)?;
-            output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-            db.append(conv, "tool", &tool_entry_body(call, &output), None)?;
-            return Ok(output);
+            return record(db, conv, call, ToolOutput::err(msg), &mut after);
         }
 
         // If a crash interrupted a non-replay-safe external tool after its intent committed,
         // emit an interrupted error without running `before` or re-executing the tool.
         if let Execution::External { replay: Replay::Unsafe } = tool.execution() {
             if has_tool_intent(db, conv, &call.id)? {
-                let mut output = ToolOutput::err(
+                let output = ToolOutput::err(
                     "error: interrupted by a crash before completing; not retried because this tool is not replay-safe",
                 );
-                after(call, &mut output)?;
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                db.append(conv, "tool", &tool_entry_body(call, &output), None)?;
-                return Ok(output);
+                return record(db, conv, call, output, &mut after);
             }
         }
 
-        match before(call, &args)? {
+        let approved = match approvals::check(db.conn(), conv, &call.id)? {
+            PriorDecision::None => false,
+            PriorDecision::Approved => true,
+            PriorDecision::Pending(id) => {
+                let approval = approvals::get(db.conn(), id)?
+                    .ok_or_else(|| anyhow::anyhow!("approval #{id} disappeared"))?;
+                return Ok(ToolRun::Parked(approval));
+            }
+            PriorDecision::Denied(note) => {
+                let note = note.trim();
+                let text = if note.is_empty() {
+                    "Tool call denied by user".to_string()
+                } else {
+                    format!("Tool call denied by user: {note}")
+                };
+                return record(db, conv, call, ToolOutput::err(text), &mut after);
+            }
+        };
+
+        match before(call, &args, approved)? {
             ToolHookDecision::Continue => {}
             ToolHookDecision::RewriteArgs(new_args) => {
                 args = new_args;
                 strip_dir(&mut args);
             }
             ToolHookDecision::Block(reason) => {
-                let mut output = ToolOutput::err(format!("error: blocked: {reason}"));
-                after(call, &mut output)?;
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                db.append(conv, "tool", &tool_entry_body(call, &output), None)?;
-                return Ok(output);
+                return record(db, conv, call, ToolOutput::err(format!("error: blocked: {reason}")), &mut after);
+            }
+            ToolHookDecision::AskApproval { hook, reason } => {
+                let approval = approvals::request(db.conn(), conv, &call.id, &call.name, &args, &hook, &reason)?;
+                return Ok(ToolRun::Parked(approval));
             }
         }
 
-        match tool.execution() {
+        let output = match tool.execution() {
             Execution::Atomic => db.immediate(|c| {
                 c.execute_batch("SAVEPOINT arity_tool_run")?;
                 let mut output = match tool.run_atomic(c, conv, model, &args) {
@@ -292,9 +320,10 @@ impl ToolRegistry {
                 output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
                 after(call, &mut output)?;
                 output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
+                approvals::consume(c, conv, &call.id)?;
                 crate::journal::insert(c, conv, "tool", &tool_entry_body(call, &output), None)?;
                 Ok(output)
-            }),
+            })?,
             Execution::External { replay } => {
                 if !has_tool_intent(db, conv, &call.id)? {
                     db.append(
@@ -316,13 +345,26 @@ impl ToolRegistry {
                     Err(e) => ToolOutput::err(format!("error: {e:#}")),
                 };
                 output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                after(call, &mut output)?;
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                db.append(conv, "tool", &tool_entry_body(call, &output), None)?;
-                Ok(output)
+                return record(db, conv, call, output, &mut after);
             }
-        }
+        };
+        Ok(ToolRun::Executed(output))
     }
+}
+
+/// Pass `output` through `after` and commit it as the call's `tool` entry,
+/// settling any decision the user made on the call in the same transaction.
+fn record<A>(db: &Journal, conv: &str, call: &ToolCall, mut output: ToolOutput, after: &mut A) -> Result<ToolRun>
+where
+    A: FnMut(&ToolCall, &mut ToolOutput) -> Result<()>,
+{
+    after(call, &mut output)?;
+    output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
+    db.immediate(|c| {
+        approvals::consume(c, conv, &call.id)?;
+        crate::journal::insert(c, conv, "tool", &tool_entry_body(call, &output), None)
+    })?;
+    Ok(ToolRun::Executed(output))
 }
 
 fn strip_dir(args: &mut Value) {
@@ -837,6 +879,7 @@ fn line(t: &board::TaskRow) -> String {
             match run {
                 RunState::Running => "an agent is on it",
                 RunState::Waiting => "an agent is waiting on its sub-tasks",
+                RunState::NeedsApproval => "an agent waits for the user to allow a tool call",
                 RunState::Failing => "an agent is retrying it",
                 RunState::Paused => "stopped by the user part way",
                 RunState::NeedsRating => "finished, needs rating",
@@ -1138,7 +1181,7 @@ mod tests {
             "chat",
             "m",
             &rewrite_call,
-            |_call, args| {
+            |_call, args, _| {
                 assert_eq!(args["val"], "orig");
                 Ok(ToolHookDecision::RewriteArgs(json!({ "val": "rewritten" })))
             },
@@ -1148,6 +1191,7 @@ mod tests {
                 Ok(())
             },
         )?;
+        let out = executed(out);
         assert!(!out.is_error);
         assert_eq!(out.text, "ran:ext_hook:rewritten:1 [audited]");
         assert_eq!(runs.load(SeqCst), 1);
@@ -1167,7 +1211,7 @@ mod tests {
             "chat",
             "m",
             &block_call,
-            |_call, _args| Ok(ToolHookDecision::Block("policy denied".into())),
+            |_call, _args, _| Ok(ToolHookDecision::Block("policy denied".into())),
             |_call, out| {
                 assert!(out.is_error);
                 assert_eq!(out.text, "error: blocked: policy denied");
@@ -1175,6 +1219,7 @@ mod tests {
                 Ok(())
             },
         )?;
+        let out = executed(out);
         assert!(out.is_error);
         assert_eq!(out.text, "error: blocked: policy denied (logged)");
         assert_eq!(runs.load(SeqCst), 1, "blocked tool must not execute");
@@ -1200,17 +1245,100 @@ mod tests {
             "chat",
             "m",
             &atomic_call,
-            |_call, _args| Ok(ToolHookDecision::RewriteArgs(json!({ "title": "new title" }))),
+            |_call, _args, _| Ok(ToolHookDecision::RewriteArgs(json!({ "title": "new title" }))),
             |_call, out| {
                 out.text.push_str(" [hooked]");
                 Ok(())
             },
         )?;
+        let out = executed(out);
         assert!(!out.is_error);
         assert!(out.text.starts_with("added task 1") && out.text.ends_with(" [hooked]"), "{}", out.text);
         assert_eq!(board::task(db.conn(), 1)?.fields.title, "new title");
         let last = db.chain("chat")?.pop().unwrap();
         assert_eq!(last.body["output"], out.text);
+
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    fn executed(run: ToolRun) -> ToolOutput {
+        match run {
+            ToolRun::Executed(output) => output,
+            ToolRun::Parked(approval) => panic!("expected the call to run, it parked: {approval:?}"),
+        }
+    }
+
+    #[test]
+    fn run_with_hooks_parks_asked_calls_until_the_user_decides() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-hooks-ask-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = Journal::open(&path)?;
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let reg = ToolRegistry::default_registry().with(Box::new(MockExternalTool {
+            name: "ext_ask",
+            replay: Replay::Unsafe,
+            runs: runs.clone(),
+            db_path: None,
+        }));
+        let call = |id: &str| ToolCall { id: id.into(), name: "ext_ask".into(), arguments: json!({ "val": "x", "dir": "/" }).to_string() };
+        let asked = Arc::new(AtomicUsize::new(0));
+        let run = |id: &str| {
+            let asked = asked.clone();
+            reg.run_with_hooks(
+                &db,
+                "chat",
+                "m",
+                &call(id),
+                move |_, _, approved| {
+                    asked.fetch_add(1, SeqCst);
+                    Ok(if approved {
+                        ToolHookDecision::Continue
+                    } else {
+                        ToolHookDecision::AskApproval { hook: "guard".into(), reason: "looks risky".into() }
+                    })
+                },
+                |_, _| Ok(()),
+            )
+        };
+
+        // Asked: parked, nothing run, nothing in the journal for the call.
+        let ToolRun::Parked(first) = run("call-ask")? else { panic!("expected the call to park") };
+        assert_eq!((first.tool.as_str(), first.hook.as_str(), first.reason.as_str()), ("ext_ask", "guard", "looks risky"));
+        assert_eq!(serde_json::from_str::<Value>(&first.args)?, json!({ "val": "x" }), "a model never picks a dir");
+        assert_eq!(runs.load(SeqCst), 0);
+        assert!(db.chain("chat")?.iter().all(|e| e.body["call_id"] != "call-ask"));
+
+        // Still pending: parked again on the same approval, without asking the hooks.
+        let ToolRun::Parked(again) = run("call-ask")? else { panic!("expected the call to stay parked") };
+        assert_eq!(again.id, first.id);
+        assert_eq!(asked.load(SeqCst), 1);
+
+        // Allowed: runs once, the hooks told it was allowed, the decision consumed.
+        approvals::decide(db.conn(), first.id, true, "")?;
+        let out = executed(run("call-ask")?);
+        assert_eq!(out.text, "ran:ext_ask:x:1");
+        assert_eq!(runs.load(SeqCst), 1);
+        assert_eq!(approvals::check(db.conn(), "chat", "call-ask")?, PriorDecision::None);
+
+        // Denied: an error result with the note, the tool not run, the hooks not asked.
+        let ToolRun::Parked(second) = run("call-deny")? else { panic!("expected the call to park") };
+        let asked_before = asked.load(SeqCst);
+        approvals::decide(db.conn(), second.id, false, "not on main")?;
+        let out = executed(run("call-deny")?);
+        assert!(out.is_error);
+        assert_eq!(out.text, "Tool call denied by user: not on main");
+        assert_eq!(runs.load(SeqCst), 1);
+        assert_eq!(asked.load(SeqCst), asked_before);
+        let last = db.chain("chat")?.pop().unwrap();
+        assert_eq!((last.kind.as_str(), last.body["call_id"].as_str()), ("tool", Some("call-deny")));
+        assert!(!approvals::has_decided(db.conn(), "chat")?);
+
+        // Denied without a note.
+        let ToolRun::Parked(third) = run("call-deny-bare")? else { panic!("expected the call to park") };
+        approvals::decide(db.conn(), third.id, false, "  ")?;
+        assert_eq!(executed(run("call-deny-bare")?).text, "Tool call denied by user");
 
         let _ = std::fs::remove_file(&path);
         Ok(())

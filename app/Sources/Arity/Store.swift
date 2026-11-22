@@ -14,6 +14,8 @@ final class Store {
     /// The selected thread's name.
     var selection: String? { didSet { if selection != oldValue { loadSelection() } } }
     var messages: [Message] = []
+    /// Tool calls in the selected thread a hook parked until the user allows or denies them.
+    var pendingApprovals: [PendingApproval] = []
     /// The task card open in the selected chat, as last edited here or in the core.
     var draft: TaskFields?
     /// The folder attached to the selected chat, enabling file and shell tools in it.
@@ -126,6 +128,7 @@ final class Store {
         scores = attempt { try core.scores() } ?? []
         if let selection {
             messages = attempt { try core.messages(conversation: selection) } ?? []
+            pendingApprovals = attempt { try core.pendingApprovals(conversation: selection) } ?? []
             if pendingCard?.conv != selection { draft = thread?.card }
             folder = attempt { try core.folder(conversation: selection) } ?? nil
             conversationUsage = attempt { try core.usage(conversation: selection) }
@@ -193,8 +196,12 @@ final class Store {
         pickReason = nil
         choiceChanged = false
         worktreeDiff = nil
-        guard let selection else { messages = []; draft = nil; folder = nil; conversationUsage = nil; return }
+        guard let selection else {
+            messages = []; pendingApprovals = []; draft = nil; folder = nil; conversationUsage = nil
+            return
+        }
         messages = attempt { try core.messages(conversation: selection) } ?? []
+        pendingApprovals = attempt { try core.pendingApprovals(conversation: selection) } ?? []
         folder = attempt { try core.folder(conversation: selection) } ?? nil
         conversationUsage = attempt { try core.usage(conversation: selection) }
         loadWorktreeDiff()
@@ -270,6 +277,32 @@ final class Store {
         let worker = isWorkerRun
         run(conv, fixedModel: worker ? "" : nil) { core, model in
             _ = try core.continueTurn(conversation: conv, model: model.isEmpty ? nil : model)
+        }
+    }
+
+    /// Allow a tool call a hook parked. A chat carries on here at once; a run is woken
+    /// for the dispatcher, which carries it on.
+    func approveTool(_ approval: PendingApproval, note: String = "") {
+        decide(approval, allow: true, note: note)
+    }
+
+    /// Deny a tool call a hook parked: the model is told it was denied, and why if `note` says.
+    func denyTool(_ approval: PendingApproval, note: String = "") {
+        decide(approval, allow: false, note: note)
+    }
+
+    private func decide(_ approval: PendingApproval, allow: Bool, note: String) {
+        let conv = approval.conversation
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = trimmed.isEmpty ? nil : trimmed
+        let decided = attempt {
+            allow ? try core.approveTool(id: approval.id, note: note) : try core.denyTool(id: approval.id, note: note)
+        }
+        refresh(force: true)
+        guard decided != nil, attempt({ try core.canContinue(conversation: conv) }) == true else { return }
+        // The chat keeps its own model; the core picks it when none is named.
+        run(conv, fixedModel: "") { core, _ in
+            _ = try core.continueTurn(conversation: conv, model: nil)
         }
     }
 

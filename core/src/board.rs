@@ -545,6 +545,8 @@ pub enum RunState {
     Running,
     /// The run handed part of its task on and waits for those results.
     Waiting,
+    /// The run asked to make a tool call the user must allow or deny first.
+    NeedsApproval,
     /// The last attempt failed; it will be retried.
     Failing,
     /// The user stopped it part way. It waits to be continued.
@@ -579,7 +581,8 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.choice,
                 t.priority, t.due, t.tags,
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
-                t.origin, t.created, r.note, tr.model, tr.waiting, t.dir, tr.paused
+                t.origin, t.created, r.note, tr.model, tr.waiting, t.dir, tr.paused,
+                EXISTS(SELECT 1 FROM approvals a WHERE a.conversation = tr.conversation AND a.status = 'pending')
          FROM tasks t
          LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id AND abandoned = 0)
          LEFT JOIN ratings r ON r.trial = tr.id
@@ -594,8 +597,10 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         let score: Option<i64> = r.get(15)?;
         let waiting: Option<bool> = r.get(20)?;
         let paused: Option<bool> = r.get(22)?;
+        let asks: bool = r.get(23)?;
         let run_state = trial.map(|_| match (ended.is_some(), error.is_some(), score.is_some()) {
             (false, _, _) if paused == Some(true) => RunState::Paused,
+            (false, _, _) if asks => RunState::NeedsApproval,
             (false, _, _) if waiting == Some(true) => RunState::Waiting,
             (false, true, _) => RunState::Failing,
             (false, false, _) => RunState::Running,
@@ -845,7 +850,12 @@ pub fn set_state(conn: &Connection, id: i64, state: TaskState) -> Result<()> {
 /// Tick a task off, or reopen it. Not while an agent is still on it.
 pub fn set_done(conn: &Connection, id: i64, done: bool) -> Result<()> {
     let t = task(conn, id)?;
-    if done && matches!(t.run_state, Some(RunState::Running | RunState::Failing | RunState::Waiting)) {
+    if done
+        && matches!(
+            t.run_state,
+            Some(RunState::Running | RunState::Failing | RunState::Waiting | RunState::NeedsApproval)
+        )
+    {
         bail!("an agent is still working on task {id}");
     }
     if done {
@@ -962,7 +972,11 @@ pub fn parent_model(conn: &Connection, conv: &str) -> Result<Option<String>> {
 
 /// Wake `conv` so the dispatcher runs it: a waiting run is taken up like one
 /// whose lease ran out, and an idle chat with a model is marked ready to wake.
+/// Not while a tool call there waits for the user: deciding it wakes it.
 pub fn wake(conn: &Connection, conv: &str) -> Result<()> {
+    if crate::approvals::has_pending(conn, conv)? {
+        return Ok(());
+    }
     if let Some((_, _, _, ended)) = trial_state(conn, conv)? {
         if !ended {
             conn.execute(
@@ -1039,10 +1053,10 @@ pub fn pause(conn: &Connection, conv: &str) -> Result<bool> {
 }
 
 /// Stop `conv` and everything below it, from any process: turns running are
-/// stopped, open runs paused, wakes cleared, and tasks handed to an agent that
-/// no run picked up yet go back to the user, so nothing below starts again on
-/// its own. Returns how many conversations were stopped, and how many tasks
-/// went back to the user.
+/// stopped, open runs paused, wakes cleared, tool calls waiting for approval
+/// denied, and tasks handed to an agent that no run picked up yet go back to
+/// the user, so nothing below starts again on its own. Returns how many
+/// conversations were stopped, and how many tasks went back to the user.
 pub fn stop_subtree(conn: &Connection, conv: &str) -> Result<(u32, u32)> {
     let mut stopped = 0;
     let mut convs = vec![conv.to_string()];
@@ -1053,7 +1067,8 @@ pub fn stop_subtree(conn: &Connection, conv: &str) -> Result<(u32, u32)> {
         let waking: bool =
             conn.query_row("SELECT count(*) > 0 FROM conversations WHERE name = ?1 AND wake_at != 0", params![c], |r| r.get(0))?;
         clear_wake(conn, c)?;
-        if turn || run || waking {
+        let asked = crate::approvals::cancel_pending_for(conn, c, "stopped by the user")? > 0;
+        if turn || run || waking || asked {
             stopped += 1;
         }
     }

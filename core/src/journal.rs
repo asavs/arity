@@ -79,6 +79,7 @@ impl Journal {
         conn.execute_batch(crate::turn::TABLES)?;
         crate::turn::migrate(&conn)?;
         conn.execute_batch(crate::leaderboard::TABLES)?;
+        conn.execute_batch(crate::approvals::TABLES)?;
         crate::board::migrate(&conn)?;
         conn.execute_batch(crate::worktree::TABLES)?;
         Ok(Self { conn })
@@ -138,7 +139,8 @@ impl Journal {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Changes whenever anything is written: an entry, a fork, a task, or a turn's text so far. Cheap enough to poll.
+    /// Changes whenever anything is written: an entry, a fork, a task, a turn's text so far, or an
+    /// approval asked for or decided. Cheap enough to poll.
     pub fn revision(&self) -> Result<String> {
         Ok(self.conn.query_row(
             "SELECT (SELECT ifnull(max(id), 0) FROM entries) || '.' || (SELECT count(*) FROM conversations)
@@ -149,7 +151,9 @@ impl Journal {
                  || '.' || (SELECT count(*) || ':' || ifnull(sum(seq), 0) FROM turns)
                  || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)
                  || '.' || (SELECT count(*) || ':' || ifnull(sum(length(dir)), 0) FROM folders)
-                 || '.' || (SELECT count(*) || ':' || ifnull(sum(status != 'active'), 0) FROM worktrees)",
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(status != 'active'), 0) FROM worktrees)
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(status = 'pending'), 0) || ':' || ifnull(sum(status = 'consumed'), 0)
+                            FROM approvals)",
             [],
             |r| r.get(0),
         )?)

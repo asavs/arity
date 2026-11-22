@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arity_core::{Access, Arity, Choice, Delivery, Event, Figures, HookConfig, HookEvent, KeyCheck, Message, MessageKind, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup, Usage};
+use arity_core::{Access, Arity, Choice, Delivery, Event, Figures, HookConfig, HookEvent, KeyCheck, Message, MessageKind, PendingApproval, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup, Usage};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
@@ -23,7 +23,13 @@ const USAGE: &str = "usage:
                                              carry on where it stopped short, writing nothing to ask: a reply
                                              cut off by stop, an unanswered message or report, a stopped run
   arity stop   <conv> [--all | --subtree]    stop the turn running in a conversation, from anywhere; --all also
-                                             stops every task it handed out, at any depth, until continued
+                                             stops every task it handed out, at any depth, until continued, and
+                                             denies the tool calls waiting for approval there
+  arity approvals [conv]                     tool calls a hook parked until you allow or deny them
+  arity approve <id> [--no-resume] [note...] allow one; a chat carries on here at once (unless --no-resume),
+                                             a run carries on with the dispatcher (the app or arity work)
+  arity deny   <id> [--no-resume] [note...]  deny one; the model is told \"Tool call denied by user: <note>\"
+                                             and carries on the same way
   arity fork   <entry> <new-conv>            branch a conversation at an entry
   arity usage  <conv>                        tokens used, how full the context is, and how much was cached
   arity compact <conv> [instructions...]     replace the model's context with a summary it writes;
@@ -66,7 +72,9 @@ const USAGE: &str = "usage:
   arity hook   add <name> --event <e> [--tool <t>] -- <command...>
                                              add or replace a hook; event is before_tool, after_tool,
                                              on_yield or after_turn; --tool filters by tool name(s)
-  arity hook   rm | enable | disable <name>  remove, enable or disable a hook
+  arity hook   rm | enable | disable <name>  remove, enable or disable a hook; a before_tool hook may print
+                                             {\"action\":\"block\"|\"rewrite\"|\"ask\",\"reason\":...}, and ask
+                                             parks the call for arity approve / deny
   arity login | logout                       sign in to ChatGPT, or out
 
 fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
@@ -164,6 +172,8 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             stop_on_ctrl_c(&conv);
             if !arity.send_as_with(&conv, &model, &words.join(" "), how, &mut streamer(&who))? {
                 println!("a turn is running in {conv}; the message joins it");
+            } else if !arity.pending_approvals(Some(conv.clone()))?.is_empty() {
+                println!("{conv} waits for you to allow or deny a tool call (arity approvals {conv}); the message joins after");
             } else if how == Delivery::Inbox {
                 println!("left in {conv} for its next turn");
             }
@@ -204,6 +214,45 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             0 => println!("nothing is running in {} or below it", arg(1)),
             n => println!("stopped {n} conversation{} in and below {}; `arity continue` carries any of them on", if n == 1 { "" } else { "s" }, arg(1)),
         },
+        ("approvals", 1 | 2) => {
+            let conv = (args.len() == 2).then(|| arg(1));
+            let pending = arity.pending_approvals(conv.clone())?;
+            if pending.is_empty() {
+                match conv {
+                    Some(c) => println!("nothing waits for your approval in {c}"),
+                    None => println!("nothing waits for your approval"),
+                }
+            }
+            for a in &pending {
+                println!("{}", approval_line(a));
+            }
+            if !pending.is_empty() {
+                println!("\n`arity approve <id> [note]` or `arity deny <id> [note]`");
+            }
+        }
+        ("approve" | "deny", n) if n >= 2 => {
+            let id: i64 = arg(1).trim_start_matches('#').parse().map_err(|_| format!("{:?} is not an approval id; see `arity approvals`", arg(1)))?;
+            let mut rest = &args[2..];
+            let resume = rest.first().is_none_or(|a| a != "--no-resume");
+            if !resume {
+                rest = &rest[1..];
+            }
+            let note = (!rest.is_empty()).then(|| rest.join(" "));
+            let allow = arg(0) == "approve";
+            let a = if allow { arity.approve_tool(id, note)? } else { arity.deny_tool(id, note)? };
+            let conv = a.conversation.clone();
+            println!("{} {} in {conv}", if allow { "allowed" } else { "denied" }, a.tool);
+            if !arity.can_continue(conv.clone())? {
+                println!("{conv} carries on with the dispatcher: the app, or `arity work`");
+            } else if !resume {
+                println!("`arity continue {conv}` carries it on");
+            } else {
+                let who = who_for(&conv, "-")?;
+                stop_on_ctrl_c(&conv);
+                let ended = arity.continue_with(&conv, None, &mut streamer(&who))?;
+                println!("{conv}: {ended}");
+            }
+        }
         ("fork", 3) => {
             arity.fork(arg(1).parse()?, arg(2))?;
             println!("{} now branches from entry #{}", arg(2), arg(1));
@@ -697,8 +746,26 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
 
 /// `  task-3    3 ready     for agent   write a poem  · high · due 2026-12-01 · blocked by 2 · #fun`
 /// `  chat-1                              how do I ...  · card open`
+/// `  #4   chat-1        bash · safety_guard · 2m ago: git push publishes commits to a remote`
+/// `       {"command":"git push origin main"}`
+fn approval_line(a: &PendingApproval) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let age = match (now - a.created_at).max(0) {
+        s @ 0..60 => format!("{s}s ago"),
+        s @ 60..3600 => format!("{}m ago", s / 60),
+        s @ 3600..86400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86400),
+    };
+    let args = clip(&a.args.replace('\n', " "));
+    format!("  {:<4} {:<12}  {} · {} · {age}: {}\n       {args}", format!("#{}", a.id), a.conversation, a.tool, a.hook, a.reason)
+}
+
 fn thread_line(thread: &Thread, me: &str) -> String {
     let mut flow = String::new();
+    if thread.pending_approvals > 0 {
+        let n = thread.pending_approvals;
+        flow.push_str(&format!("  · {n} tool call{} to allow or deny; arity approvals {}", if n == 1 { "" } else { "s" }, thread.name));
+    }
     if thread.can_continue {
         flow.push_str("  · stopped short; arity continue");
     }
@@ -722,6 +789,7 @@ fn thread_line(thread: &Thread, me: &str) -> String {
     match t.run_state {
         Some(RunState::Running) => extra.push("running".to_string()),
         Some(RunState::Waiting) => extra.push("waiting on sub-tasks".into()),
+        Some(RunState::NeedsApproval) => extra.push("needs your approval".into()),
         Some(RunState::Failing) => extra.push("retrying".into()),
         Some(RunState::Paused) => extra.push("stopped; arity continue".into()),
         Some(RunState::NeedsRating) => extra.push(format!("needs rating (run {})", t.run.unwrap_or_default())),

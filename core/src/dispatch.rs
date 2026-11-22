@@ -77,6 +77,8 @@ pub enum Did {
     Waiting { task: i64, trial: i64 },
     /// Someone stopped the run part way; it waits to be continued.
     Paused { task: i64, trial: i64 },
+    /// The run asked to make a tool call; it waits for the user to allow or deny it.
+    NeedsApproval { task: i64, trial: i64 },
     Failed { task: i64, trial: i64, error: String },
     WakeFailed { conv: String, error: String },
 }
@@ -90,6 +92,9 @@ impl Did {
             Did::Woke { conv } => format!("{conv}: handled returning results"),
             Did::Waiting { task, trial } => format!("task {task}: run {trial} waits for its sub-tasks"),
             Did::Paused { task, trial } => format!("task {task}: run {trial} was stopped; continue it to carry on"),
+            Did::NeedsApproval { task, trial } => {
+                format!("task {task}: run {trial} waits for your approval (arity approvals)")
+            }
             Did::Failed { task, trial, error } => format!("task {task}: run {trial} {error}"),
             Did::WakeFailed { conv, error } => format!("{conv}: {error}"),
             Did::Reported { task, parent: Some(conv) } => format!("task {task}: reported to {conv}"),
@@ -253,6 +258,16 @@ pub(crate) fn settle(db: &Journal, trial: i64, task: i64, conv: &str, ended_befo
                 params![trial],
             )?;
             Ok(Did::Waiting { task, trial })
+        }
+        // A follow-up after a finished run parked on a tool call: the run's result stands.
+        agent::Outcome::NeedsApproval if ended_before => Ok(Did::Nothing),
+        // Unclaimed until the user decides; deciding wakes it (see `board::wake`).
+        agent::Outcome::NeedsApproval => {
+            db.conn().execute(
+                "UPDATE trials SET waiting = 1, lease_until = 0, retries = 0, error = NULL WHERE id = ?1 AND ended IS NULL",
+                params![trial],
+            )?;
+            Ok(Did::NeedsApproval { task, trial })
         }
         agent::Outcome::Unfinished => {
             abandon(db, trial, task, UNFINISHED)?;
@@ -438,12 +453,13 @@ pub(crate) fn deliver_report(db: &Journal) -> Result<Option<Did>> {
 }
 
 /// Wake runs and chats that are waiting with nothing left out: their sub-tasks
-/// have all reported, or were closed without a result.
+/// have all reported, or were closed without a result. One whose tool call
+/// waits for the user's approval stays put until it is decided.
 fn wake_settled(c: &Connection) -> Result<()> {
     let mut stmt = c.prepare("SELECT id, conversation FROM trials WHERE waiting = 1 AND ended IS NULL")?;
     let waiting: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     for (trial, conv) in waiting {
-        if !crate::board::children_out(c, &conv)?.is_empty() {
+        if crate::approvals::has_pending(c, &conv)? || !crate::board::children_out(c, &conv)?.is_empty() {
             continue;
         }
         // A result is what it waited for; if none came, say so, so it does not stop again at once.
@@ -456,7 +472,7 @@ fn wake_settled(c: &Connection) -> Result<()> {
     let mut stmt = c.prepare("SELECT name FROM conversations WHERE wake_at = -1")?;
     let chats: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     for conv in chats {
-        if crate::board::children_out(c, &conv)?.is_empty() {
+        if !crate::approvals::has_pending(c, &conv)? && crate::board::children_out(c, &conv)?.is_empty() {
             c.execute("UPDATE conversations SET wake_at = 1 WHERE name = ?1", params![conv])?;
         }
     }

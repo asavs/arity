@@ -10,6 +10,7 @@
 //! nobody has started is a thread with nothing said in it yet.
 
 mod agent;
+mod approvals;
 mod board;
 mod catalog;
 mod codex_auth;
@@ -149,12 +150,45 @@ pub struct Thread {
     pub can_continue: bool,
     /// Runs below it that are going or about to start, at any depth. See `stop_subtree`.
     pub active_children: u32,
+    /// Tool calls in it waiting for the user to allow or deny. See `pending_approvals`.
+    pub pending_approvals: u32,
+}
+
+/// A tool call a hook parked until the user allows or denies it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PendingApproval {
+    pub id: i64,
+    pub conversation: String,
+    pub call_id: String,
+    pub tool: String,
+    /// The call's arguments, as JSON.
+    pub args: String,
+    /// The hook that asked.
+    pub hook: String,
+    pub reason: String,
+    /// When it was asked, UTC, as Unix seconds.
+    pub created_at: i64,
+}
+
+impl From<approvals::Approval> for PendingApproval {
+    fn from(a: approvals::Approval) -> Self {
+        Self {
+            id: a.id,
+            conversation: a.conversation,
+            call_id: a.call_id,
+            tool: a.tool,
+            args: a.args,
+            hook: a.hook,
+            reason: a.reason,
+            created_at: a.created_at,
+        }
+    }
 }
 
 /// Where a thread sits in the list, most pressing first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
 pub enum ThreadGroup {
-    /// A result to rate, or a task card left open.
+    /// A result to rate, a tool call to allow or deny, or a task card left open.
     NeedsYou,
     /// An agent is on it.
     Running,
@@ -467,9 +501,11 @@ impl Arity {
         for t in board::tasks(db.conn())?.into_iter().filter(|t| !t.fields.assignee.starts_with("conversations/")) {
             let name = t.conversation.clone().unwrap_or_else(|| format!("task-{}", t.id));
             let updated = conversations.iter().find(|c| c.0 == name).map_or(&t.created, |c| &c.1).clone();
+            let pending_approvals = pending_count(&db, &name)?;
             let group = match (t.state, t.run_state) {
+                (_, _) if pending_approvals > 0 => ThreadGroup::NeedsYou,
                 (TaskState::Done, _) => ThreadGroup::Done,
-                (_, Some(RunState::NeedsRating | RunState::Paused)) => ThreadGroup::NeedsYou,
+                (_, Some(RunState::NeedsRating | RunState::Paused | RunState::NeedsApproval)) => ThreadGroup::NeedsYou,
                 (_, Some(RunState::Running | RunState::Failing | RunState::Waiting)) => ThreadGroup::Running,
                 _ => ThreadGroup::Open,
             };
@@ -484,6 +520,7 @@ impl Arity {
                 card: None,
                 can_continue,
                 active_children,
+                pending_approvals,
             });
         }
         // Whatever is left is a chat. Earlier runs of a task that was run again are not listed.
@@ -494,10 +531,21 @@ impl Arity {
             let card = draft::current(&chain);
             let said = chain.iter().find(|e| e.kind == "user").and_then(|e| e.body["text"].as_str());
             let title = said.and_then(|s| s.lines().next()).map_or(name.clone(), |l| l.chars().take(60).collect());
-            let group = if card.is_some() { ThreadGroup::NeedsYou } else { ThreadGroup::Chat };
+            let pending_approvals = pending_count(&db, &name)?;
+            let group = if card.is_some() || pending_approvals > 0 { ThreadGroup::NeedsYou } else { ThreadGroup::Chat };
             let can_continue = can_continue(&db, &name, &chain, &running)?;
             let active_children = board::active_children(db.conn(), &name)?;
-            out.push(Thread { name, title, group, updated, task: None, card, can_continue, active_children });
+            out.push(Thread {
+                name,
+                title,
+                group,
+                updated,
+                task: None,
+                card,
+                can_continue,
+                active_children,
+                pending_approvals,
+            });
         }
         out.sort_by_key(|t| t.group);
         Ok(out)
@@ -571,6 +619,33 @@ impl Arity {
     pub fn stop_subtree(&self, conversation: String) -> Result<u32> {
         let db = self.journal()?;
         Ok(db.immediate(|c| board::stop_subtree(c, &conversation))?.0)
+    }
+
+    // Approvals
+
+    /// Tool calls waiting for the user to allow or deny, oldest first: in one
+    /// conversation, or everywhere when None.
+    pub fn pending_approvals(&self, conversation: Option<String>) -> Result<Vec<PendingApproval>> {
+        let db = self.journal()?;
+        let pending = match conversation {
+            Some(conv) => approvals::pending_for(db.conn(), &conv)?,
+            None => approvals::list_pending(db.conn())?,
+        };
+        Ok(pending.into_iter().map(PendingApproval::from).collect())
+    }
+
+    /// Allow a parked tool call. A run is woken for the dispatcher to carry on;
+    /// a chat is not woken, and is carried on with `continue_turn` (see
+    /// `can_continue`), which runs the call. `note` is kept with the decision.
+    pub fn approve_tool(&self, id: i64, note: Option<String>) -> Result<PendingApproval> {
+        self.decide_tool(id, true, note)
+    }
+
+    /// Deny a parked tool call: the model is told "Tool call denied by user",
+    /// with `note` after it if there is one, once the conversation carries on
+    /// as after `approve_tool`.
+    pub fn deny_tool(&self, id: i64, note: Option<String>) -> Result<PendingApproval> {
+        self.decide_tool(id, false, note)
     }
 
     /// Take back the user's messages still waiting for the turn running in a
@@ -807,7 +882,9 @@ impl Arity {
                 name: "safety_guard".into(),
                 event: HookEvent::BeforeTool,
                 tool: Some("write_file,edit_file,bash".into()),
-                description: "Blocks .git and .env edits, destructive rm, and git force-push.".into(),
+                description: "Blocks .git and .env edits, rm -rf of / or ~, fork bombs, and git force-push. \
+                              Asks before git push, sudo, chmod 777, curl | sh, and other rm -rf."
+                    .into(),
             },
             BuiltinHookInfo {
                 name: "unfinished_run".into(),
@@ -910,6 +987,21 @@ impl Arity {
         self.run_resolved(&db, conv, &model, None, on)
     }
 
+    fn decide_tool(&self, id: i64, approve: bool, note: Option<String>) -> Result<PendingApproval> {
+        let db = self.journal()?;
+        let note = note.unwrap_or_default();
+        let decided = db.immediate(|c| {
+            let decided = approvals::decide(c, id, approve, note.trim())?;
+            // A run goes back to the dispatcher. A chat is left to whoever decided, so the
+            // dispatcher does not race them for the turn; `can_continue` says it may go on.
+            if board::trial_state(c, &decided.conversation)?.is_some_and(|(.., ended)| !ended) {
+                board::wake(c, &decided.conversation)?;
+            }
+            Ok(decided)
+        })?;
+        Ok(decided.into())
+    }
+
     /// As `continue_turn`, reporting text and messages as they come.
     pub fn continue_with(&self, conv: &str, model: Option<&str>, on: &mut dyn FnMut(Event)) -> Result<String> {
         self.continue_in(&self.journal()?, conv, model, None, on)
@@ -925,7 +1017,16 @@ impl Arity {
     ) -> Result<String> {
         let running = turn::running(db.conn())?;
         if running.iter().any(|r| r == conv) {
+            // Another front end, or the dispatcher, already took up a decided call.
+            if approvals::has_decided(db.conn(), conv)? {
+                return Ok("a turn is already running".into());
+            }
             return Err(busy(conv));
+        }
+        if approvals::has_pending(db.conn(), conv)? {
+            return Err(ArityError::Failed(format!(
+                "{conv} waits for you to allow or deny a tool call: see `arity approvals {conv}`"
+            )));
         }
         if !can_continue(db, conv, &db.chain(conv)?, &running)? {
             return Err(ArityError::Failed(format!("Nothing to continue in {conv}: it is not waiting on anything")));
@@ -939,6 +1040,7 @@ impl Arity {
             Some(agent::Outcome::Finished(_)) => "finished",
             Some(agent::Outcome::Waiting) => "waiting on its sub-tasks",
             Some(agent::Outcome::Unfinished) => "stopped without finishing",
+            Some(agent::Outcome::NeedsApproval) => "waiting for your approval",
         }
         .to_string())
     }
@@ -989,7 +1091,9 @@ impl Arity {
             }
         };
         let ran = match scripted {
-            Some(complete) => agent::run_turn(db, conv, model, &agent::Harness::default(), complete, continuing, &mut on_event),
+            Some(complete) => {
+                agent::run_turn(db, conv, model, &agent::Harness::for_data_dir(&self.dir), complete, continuing, &mut on_event)
+            }
             None => agent::run_from(db, &self.dir, conv, model, continuing, &mut on_event),
         };
         match ran {
@@ -1204,10 +1308,11 @@ fn conversation_usage(chain: &[Entry]) -> ConversationUsage {
 
 /// Whether `conv`, whose chain is `chain`, stopped short and nothing else will
 /// carry it on: no turn runs there (`running`), the dispatcher is not about to
-/// wake it, and it is a run the user stopped or that is failing, or its chain
-/// ends on a cut-off reply or something not answered yet.
+/// wake it, and it is a run the user stopped or that is failing, a chat whose
+/// tool call the user just allowed or denied, or its chain ends on a cut-off
+/// reply or something not answered yet. Never while a tool call waits for the user.
 fn can_continue(db: &Journal, conv: &str, chain: &[Entry], running: &[String]) -> anyhow::Result<bool> {
-    if running.iter().any(|r| r == conv) {
+    if running.iter().any(|r| r == conv) || approvals::has_pending(db.conn(), conv)? {
         return Ok(false);
     }
     let open: Option<(bool, bool)> = db
@@ -1223,10 +1328,18 @@ fn can_continue(db: &Journal, conv: &str, chain: &[Entry], running: &[String]) -
     if let Some((paused, failing)) = open {
         return Ok(paused || failing);
     }
+    // Deciding a call wakes a chat too; whoever decided it may carry it on at once.
+    if approvals::has_decided(db.conn(), conv)? {
+        return Ok(true);
+    }
     let waking: bool = db
         .conn()
         .query_row("SELECT count(*) > 0 FROM conversations WHERE name = ?1 AND wake_at > 0", [conv], |r| r.get(0))?;
     Ok(!waking && (agent::cut_short(chain) || agent::owes_a_step(chain)))
+}
+
+fn pending_count(db: &Journal, conv: &str) -> anyhow::Result<u32> {
+    Ok(approvals::pending_for(db.conn(), conv)?.len() as u32)
 }
 
 /// An unrated run's thread, where the model stays hidden.
@@ -1803,6 +1916,235 @@ mod tests {
         assert_eq!(arity.stop_subtree("chat-1".into())?, 2, "two runs; the idle chat had nothing to stop");
         assert_eq!((active("chat-1"), active("task-1")), (0, 0));
         assert_eq!(arity.stop_subtree("chat-1".into())?, 0, "nothing left to stop");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A folder outside git for a conversation's shell tool, where `runs.txt`
+    /// gets a line each time the scripted command actually runs.
+    fn plain_folder(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("arity-shell-folder-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::canonicalize(&p).unwrap()
+    }
+
+    fn runs_in(folder: &Path) -> usize {
+        std::fs::read_to_string(folder.join("runs.txt")).map_or(0, |s| s.lines().count())
+    }
+
+    /// A chat model that runs `command` in bash when asked to "do it", and
+    /// otherwise answers with what the last tool result said. Counts its calls.
+    fn shell_chat<'a>(
+        command: &'static str,
+        calls: &'a std::cell::Cell<usize>,
+    ) -> impl Fn(&str, &[Entry], &[tools::ToolSpec], &mut model::Sink) -> anyhow::Result<Reply> + 'a {
+        move |_, view, _, _| {
+            calls.set(calls.get() + 1);
+            let last = view.iter().rev().find(|e| e.kind != "system").unwrap();
+            if last.kind == "user" && last.body["text"] == "do it" {
+                let call = ToolCall { id: "sh-1".into(), name: "bash".into(), arguments: json!({ "command": command }).to_string() };
+                return Ok(Reply { text: String::new(), tool_calls: vec![call], interrupted: false, usage: None });
+            }
+            let tool = view.iter().rev().find(|e| e.kind == "tool").unwrap();
+            Ok(says(&format!("Done: {}", tool.body["output"].as_str().unwrap_or_default().lines().next().unwrap_or_default())))
+        }
+    }
+
+    /// Ask, park, approve and carry on, in a chat: the turn parks with its
+    /// lease released and the command not run, then allowing it runs it once
+    /// and the reply completes. A message sent while it waits joins after the
+    /// tool result, never between the call and its result.
+    fn approve_flow(arity: &Arity, db: &Journal, conv: &str, folder: &Path, command: &'static str, hook: &str) -> anyhow::Result<()> {
+        arity.set_folder(conv.into(), Some(folder.to_string_lossy().into_owned()))?;
+        let calls = std::cell::Cell::new(0);
+        let model = shell_chat(command, &calls);
+        let thread = |name: &str| arity.threads().unwrap().into_iter().find(|t| t.name == name).unwrap();
+
+        db.append(conv, "user", &json!({ "text": "do it" }), None)?;
+        let outcome = arity.run_outcome(db, conv, "test:m", Some(&model), false, &mut |_| {})?;
+        assert_eq!(outcome, Some(agent::Outcome::NeedsApproval), "{:#?}", db.chain(conv)?);
+        assert!(!turn::running(db.conn())?.contains(&conv.to_string()), "the lease is released");
+        assert_eq!(runs_in(folder), 0, "the command has not run");
+        assert!(db.chain(conv)?.iter().all(|e| e.kind != "tool"), "no tool entry while it waits");
+
+        let pending = arity.pending_approvals(Some(conv.into()))?;
+        assert_eq!(pending.len(), 1);
+        let a = &pending[0];
+        assert_eq!((a.conversation.as_str(), a.call_id.as_str(), a.tool.as_str(), a.hook.as_str()), (conv, "sh-1", "bash", hook));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&a.args)?["command"], command);
+        assert!(arity.pending_approvals(None)?.iter().any(|p| p.id == a.id));
+        let t = thread(conv);
+        assert_eq!((t.group, t.pending_approvals, t.can_continue), (ThreadGroup::NeedsYou, 1, false));
+        let waits = arity.continue_in(db, conv, None, Some(&model), &mut |_| {}).unwrap_err().to_string();
+        assert!(waits.contains("allow or deny"), "{waits}");
+
+        // Sent while it waits: queued for the turn that carries on.
+        turn::send_as(db, conv, "and thanks", Delivery::Steer)?;
+        assert!(db.chain(conv)?.iter().all(|e| e.body["text"] != "and thanks"));
+
+        let before = db.revision()?;
+        let decided = arity.approve_tool(a.id, Some("ok".into()))?;
+        assert_eq!(decided.id, a.id);
+        assert_ne!(db.revision()?, before, "the app sees the decision");
+        assert!(arity.pending_approvals(Some(conv.into()))?.is_empty());
+        assert!(arity.approve_tool(a.id, None).is_err(), "decided once");
+        assert!(arity.can_continue(conv.into())?, "a decided chat can be carried on");
+        let wake: i64 = db.conn().query_row("SELECT wake_at FROM conversations WHERE name = ?1", [conv], |r| r.get(0))?;
+        assert_eq!(wake, 0, "left to whoever decided, not raced by the dispatcher");
+
+        assert_eq!(arity.continue_in(db, conv, None, Some(&model), &mut |_| {})?, "answered");
+        assert_eq!(runs_in(folder), 1, "it ran exactly once");
+        let kinds: Vec<String> = db.chain(conv)?.into_iter().filter(|e| !matches!(e.kind.as_str(), "system" | "tool_intent")).map(|e| e.kind).collect();
+        assert_eq!(kinds, ["user", "assistant", "tool", "user", "assistant"]);
+        let chain = db.chain(conv)?;
+        let tool = chain.iter().find(|e| e.kind == "tool").unwrap();
+        assert!(!tool.body["output"].as_str().unwrap().contains("denied"));
+        assert!(chain.last().unwrap().body["text"].as_str().unwrap().starts_with("Done:"));
+        assert_eq!(calls.get(), 2, "one call to ask for the tool, one to answer");
+        let t = thread(conv);
+        assert_eq!((t.group, t.pending_approvals, t.can_continue), (ThreadGroup::Chat, 0, false));
+        assert!(!approvals::has_decided(db.conn(), conv)?, "the decision is consumed");
+        Ok(())
+    }
+
+    #[test]
+    fn a_chat_parks_on_the_safety_guard_and_an_allowed_push_runs_once() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("approve-guard")?;
+        let folder = plain_folder("guard");
+        approve_flow(&arity, &db, "chat-1", &folder, "echo run >> runs.txt && git push origin main", "safety_guard")?;
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok(())
+    }
+
+    #[test]
+    fn a_chat_parks_on_a_command_hook_that_asks_and_an_allowed_call_runs_once() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("approve-hook")?;
+        let folder = plain_folder("hook");
+        arity.save_hook(HookConfig {
+            name: "ask_bash".into(),
+            event: HookEvent::BeforeTool,
+            tool: Some("bash".into()),
+            command: r#"printf '%s\n' '{"action":"ask","reason":"every shell command needs a look"}'"#.into(),
+            enabled: true,
+        })?;
+        approve_flow(&arity, &db, "chat-1", &folder, "echo run >> runs.txt", "ask_bash")?;
+        assert_eq!(db.chain("chat-1")?.iter().filter(|e| e.kind == "tool").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok(())
+    }
+
+    #[test]
+    fn a_denied_call_never_runs_and_the_model_hears_why() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("approve-deny")?;
+        let folder = plain_folder("deny");
+        arity.set_folder("chat-1".into(), Some(folder.to_string_lossy().into_owned()))?;
+        let calls = std::cell::Cell::new(0);
+        let model = shell_chat("echo run >> runs.txt; sudo true", &calls);
+        db.append("chat-1", "user", &json!({ "text": "do it" }), None)?;
+        assert_eq!(arity.run_outcome(&db, "chat-1", "test:m", Some(&model), false, &mut |_| {})?, Some(agent::Outcome::NeedsApproval));
+        let a = arity.pending_approvals(Some("chat-1".into()))?.remove(0);
+        assert!(a.reason.contains("sudo"), "{}", a.reason);
+
+        arity.deny_tool(a.id, Some("  not with sudo ".into()))?;
+        assert!(arity.can_continue("chat-1".into())?);
+        assert_eq!(arity.continue_in(&db, "chat-1", None, Some(&model), &mut |_| {})?, "answered");
+        assert_eq!(runs_in(&folder), 0, "a denied call never runs");
+        let chain = db.chain("chat-1")?;
+        let tool = chain.iter().find(|e| e.kind == "tool").unwrap();
+        assert_eq!((tool.body["output"].as_str(), tool.body["is_error"].as_bool()), (Some("Tool call denied by user: not with sudo"), Some(true)));
+        assert_eq!(chain.last().unwrap().body["text"], "Done: Tool call denied by user: not with sudo");
+        assert!(chain.iter().all(|e| e.kind != "tool_intent"));
+        assert!(!arity.can_continue("chat-1".into())?);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok(())
+    }
+
+    /// A worker run that asks parks as waiting, is not woken by the dispatcher
+    /// or anything else while it waits, and allowing the call wakes it for the
+    /// next pass, which runs the call once and finishes.
+    #[test]
+    fn a_worker_run_parks_until_allowed_and_then_finishes() -> anyhow::Result<()> {
+        use crate::dispatch::{Did, work_once_scripted};
+        use crate::leaderboard::{Candidate, Reach};
+        let (dir, arity, db) = scratch_arity("approve-worker")?;
+        std::fs::write(dir.join("config.json"), json!({ "workers": [] }).to_string())?;
+        let folder = plain_folder("worker");
+        let only = vec![Candidate { model: "lab:worker".into(), reach: Reach::Local }];
+        let f = TaskFields { title: "push it".into(), assignee: board::AGENT.into(), dir: Some(folder.to_string_lossy().into_owned()), ..Default::default() };
+        let task = board::add_task(db.conn(), &f, None)?;
+        let worker = |_: &str, view: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            let last = view.iter().rev().find(|e| e.kind != "system").unwrap();
+            let (name, args) = match last.kind.as_str() {
+                "user" => ("bash", json!({ "command": "echo run >> runs.txt && git push origin main" })),
+                "tool" => ("finish", json!({ "report": "pushed" })),
+                other => panic!("the worker did not expect {other}"),
+            };
+            let call = ToolCall { id: format!("{name}-1"), name: name.into(), arguments: args.to_string() };
+            Ok(Reply { text: String::new(), tool_calls: vec![call], interrupted: false, usage: None })
+        };
+        let trial_flags = || -> anyhow::Result<(bool, i64)> {
+            Ok(db.conn().query_row("SELECT waiting, lease_until FROM trials WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        };
+        let thread = || arity.threads().unwrap().into_iter().find(|t| t.name == "task-1").unwrap();
+
+        let did = work_once_scripted(&db, &dir, &only, &worker)?;
+        assert!(matches!(did, Did::NeedsApproval { task: 1, trial: 1 }), "{:?}", did.describe());
+        assert_eq!(trial_flags()?, (true, 0));
+        assert_eq!(board::task(db.conn(), task)?.run_state, Some(RunState::NeedsApproval));
+        let t = thread();
+        assert_eq!((t.group, t.pending_approvals, t.can_continue), (ThreadGroup::NeedsYou, 1, false));
+        assert_eq!(runs_in(&folder), 0);
+        assert!(!turn::running(db.conn())?.contains(&"task-1".to_string()));
+        assert!(board::set_done(db.conn(), task, true).is_err(), "an agent is still on it");
+
+        // Nothing wakes it while it waits: not the dispatcher, not a report's wake.
+        assert!(matches!(work_once_scripted(&db, &dir, &only, &worker)?, Did::Nothing));
+        board::wake(db.conn(), "task-1")?;
+        assert_eq!(trial_flags()?, (true, 0));
+        assert!(matches!(work_once_scripted(&db, &dir, &only, &worker)?, Did::Nothing));
+        assert!(db.chain("task-1")?.iter().all(|e| e.kind != "notice"), "not told its sub-tasks settled");
+
+        let a = arity.pending_approvals(Some("task-1".into()))?.remove(0);
+        assert_eq!(a.hook, "safety_guard");
+        arity.approve_tool(a.id, None)?;
+        assert!(!trial_flags()?.0, "allowing it wakes the run");
+        assert!(!arity.can_continue("task-1".into())?, "the dispatcher carries it on");
+
+        let did = work_once_scripted(&db, &dir, &only, &worker)?;
+        assert!(matches!(did, Did::Ran { task: 1, trial: 1 }), "{:?}", did.describe());
+        assert_eq!(runs_in(&folder), 1, "it ran exactly once");
+        assert_eq!(board::task(db.conn(), task)?.run_state, Some(RunState::NeedsRating));
+        assert_eq!(board::task(db.conn(), task)?.result.as_deref(), Some("pushed"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok(())
+    }
+
+    #[test]
+    fn stopping_a_subtree_denies_the_calls_waiting_below_it() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("approve-stop")?;
+        db.append("chat-1", "assistant", &json!({ "text": "Handed off." }), Some("chat:front"))?;
+        let agent = |t: &str| TaskFields { title: t.into(), assignee: board::AGENT.into(), ..Default::default() };
+        board::add_task(db.conn(), &agent("parent"), Some("chat-1"))?;
+        db.conn().execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'w:a')", [])?;
+        board::set_state(db.conn(), 1, TaskState::Assigned)?;
+        board::add_task(db.conn(), &agent("child"), Some("task-1"))?;
+        db.conn().execute("INSERT INTO trials (task, conversation, model, waiting) VALUES (2, 'task-2', 'w:b', 1)", [])?;
+        board::set_state(db.conn(), 2, TaskState::Assigned)?;
+        let ask = json!({ "command": "git push" });
+        approvals::request(db.conn(), "task-2", "c-2", "bash", &ask, "safety_guard", "git push")?;
+        approvals::request(db.conn(), "elsewhere", "c-3", "bash", &ask, "safety_guard", "git push")?;
+        assert_eq!(board::task(db.conn(), 2)?.run_state, Some(RunState::NeedsApproval));
+
+        assert_eq!(arity.stop_subtree("task-1".into())?, 2);
+        assert_eq!(approvals::check(db.conn(), "task-2", "c-2")?, approvals::PriorDecision::Denied("stopped by the user".into()));
+        let left: Vec<String> = arity.pending_approvals(None)?.into_iter().map(|a| a.conversation).collect();
+        assert_eq!(left, ["elsewhere"], "only the subtree's calls are denied");
+        assert_eq!(board::task(db.conn(), 2)?.run_state, Some(RunState::Paused));
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

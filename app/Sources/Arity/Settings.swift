@@ -525,7 +525,7 @@ private struct HooksSection: View {
         } header: {
             Text("Hooks")
         } footer: {
-            Text("Custom hooks run as shell commands with JSON context on stdin: exit non-zero to block before_tool or retry on_yield, or print JSON on stdout to rewrite args or write journal notes.")
+            Text("Custom hooks run as shell commands with JSON context on stdin: exit non-zero to block before_tool or retry on_yield, or print JSON on stdout to rewrite args or write journal notes. A before_tool hook that prints {\"action\":\"ask\",\"reason\":\"…\"} holds the call until you allow or deny it in the thread.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -656,6 +656,13 @@ private struct HookPreset: Identifiable {
             event: .beforeTool,
             tool: "write_file,edit_file,bash",
             command: #"echo "Read-only mode: edits and shell commands are disabled." >&2; exit 1"#
+        ),
+        HookPreset(
+            title: "Ask before bash",
+            name: "ask-bash",
+            event: .beforeTool,
+            tool: "bash",
+            command: #"echo '{"action":"ask","reason":"Shell commands need your approval."}'"#
         ),
         HookPreset(
             title: "Cargo check on yield",

@@ -224,6 +224,15 @@ impl Lease {
         self.released = end;
         Ok(end)
     }
+
+    /// End the turn while a tool call waits for approval. Nothing queued is
+    /// drained: it would land between the call and its result, so it waits
+    /// for the turn that carries on once the call is decided.
+    pub fn park(&mut self, db: &Journal) -> Result<()> {
+        db.conn().execute("DELETE FROM turns WHERE conversation = ?1 AND owner = ?2", params![self.conv, self.owner])?;
+        self.released = true;
+        Ok(())
+    }
 }
 
 impl Drop for Lease {
@@ -273,8 +282,7 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
                     live.steer.store(true, Relaxed);
                     live.stop.store(true, Relaxed);
                 }
-                Ok(Some(1) | None) => {
-                    live.steer.store(false, Relaxed);
+                Ok(Some(1) | None) => {                    live.steer.store(false, Relaxed);
                     live.stop.store(true, Relaxed);
                 }
                 _ => {}
@@ -304,6 +312,8 @@ fn drain(c: &Connection, conv: &str, all: bool) -> Result<usize> {
 
 /// Deliver an entry to `conv`: into the journal at once when no turn is
 /// running there, otherwise to the running turn, joining it when `how` says.
+/// A conversation whose tool call waits for approval queues it too, for the
+/// turn that carries on once the call is decided.
 /// Returns true if it went straight into the journal.
 pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delivery) -> Result<bool> {
     let running: bool = c.query_row(
@@ -311,7 +321,7 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
         params![conv, now()],
         |r| r.get(0),
     )?;
-    if running {
+    if running || crate::approvals::has_pending(c, conv)? {
         let text = body["text"].as_str().unwrap_or_default();
         c.execute(
             "INSERT INTO queued (conversation, text, kind, body, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
