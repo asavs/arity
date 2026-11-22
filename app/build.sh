@@ -27,9 +27,20 @@ cp $OUT/gen/arity_core.swift app/Sources/ArityCore/arity_core.swift
 # 3. The SwiftUI app, wrapped in a minimal bundle so macOS treats it as a real app.
 swift build -q --package-path app -c $PROFILE
 APP=$OUT/Arity.app
-mkdir -p $APP/Contents/MacOS
-cp "$(swift build --package-path app -c $PROFILE --show-bin-path)/Arity" $APP/Contents/MacOS/Arity
-cp app/Info.plist $APP/Contents/Info.plist
+BIN_DIR=$(swift build --package-path app -c $PROFILE --show-bin-path)
+ICON_NAME="Arity Adaptive"
+ICON_OUT=$(mktemp -d "$OUT/icon.XXXXXX")
+trap 'rm -rf "$ICON_OUT"' EXIT
+MACOS_MINIMUM=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' app/Info.plist)
+xcrun actool --compile "$ICON_OUT" --platform macosx \
+  --minimum-deployment-target "$MACOS_MINIMUM" --app-icon "$ICON_NAME" \
+  --output-format human-readable-text --output-partial-info-plist "$ICON_OUT/Info.plist" \
+  "app/Design/$ICON_NAME.icon"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN_DIR/Arity" "$APP/Contents/MacOS/Arity"
+cp "$ICON_OUT/Assets.car" "$ICON_OUT/$ICON_NAME.icns" "$APP/Contents/Resources/"
+cp app/Info.plist "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Merge $ICON_OUT/Info.plist" "$APP/Contents/Info.plist"
 codesign --force --sign - $APP 2>/dev/null
 
 if [ "${1:-}" != "--no-open" ]; then

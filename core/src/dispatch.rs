@@ -93,26 +93,55 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
         agent::Outcome::Busy => Err(anyhow::anyhow!("another turn is running in {conv}")),
         outcome => Ok(outcome),
     });
-    let end_unscored = |error: &str| {
-        db.immediate(|c| {
-            c.execute(
-                "UPDATE trials SET ended = datetime('now'), error = ?2, abandoned = 1, reported = 1 WHERE id = ?1",
-                params![trial, error],
-            )?;
-            c.execute("UPDATE tasks SET state = 'open', edits = edits + 1 WHERE id = ?1", params![task])?;
-            crate::board::refresh_ready(c)
-        })
-    };
     match ran {
-        Ok(agent::Outcome::Waiting) => {
+        Ok(outcome) => settle(db, trial, task, &conv, false, outcome),
+        Err(e) => {
+            let detail = format!("{e:#}");
+            if !reach.iter().any(|c| c.model == model) {
+                // Its model is out of reach: end this run unscored and let the task be picked again.
+                abandon(db, trial, task, &detail)?;
+                return Ok(Did::Failed { task, trial, error: ABANDONED.into() });
+            }
+            // Leave the run open and retry it in a minute; the journal knows where it stopped.
+            db.conn().execute(
+                "UPDATE trials SET error = ?2, lease_until = ?3 WHERE id = ?1",
+                params![trial, detail, now() + 60],
+            )?;
+            Ok(Did::Failed { task, trial, error: RETRYING.into() })
+        }
+    }
+}
+
+fn abandon(db: &Journal, trial: i64, task: i64, error: &str) -> Result<()> {
+    db.immediate(|c| {
+        c.execute(
+            "UPDATE trials SET ended = datetime('now'), error = ?2, abandoned = 1, reported = 1 WHERE id = ?1",
+            params![trial, error],
+        )?;
+        c.execute("UPDATE tasks SET state = 'open', edits = edits + 1 WHERE id = ?1", params![task])?;
+        crate::board::refresh_ready(c)
+    })
+}
+
+/// Record how a turn of `conv`'s trial ended, whether run by the dispatcher or
+/// when the user messages a worker directly.
+pub(crate) fn settle(db: &Journal, trial: i64, task: i64, conv: &str, ended_before: bool, outcome: agent::Outcome) -> Result<Did> {
+    match outcome {
+        agent::Outcome::Busy => Ok(Did::Nothing),
+        // Follow-up reply after a finished run, without replacing its report.
+        agent::Outcome::Ended if ended_before => {
+            db.conn().execute("UPDATE trials SET error = NULL WHERE id = ?1", params![trial])?;
+            Ok(Did::Nothing)
+        }
+        agent::Outcome::Waiting => {
             db.conn().execute("UPDATE trials SET waiting = 1, lease_until = 0, error = NULL WHERE id = ?1", params![trial])?;
             Ok(Did::Waiting { task, trial })
         }
-        Ok(agent::Outcome::Unfinished) => {
-            end_unscored(UNFINISHED)?;
+        agent::Outcome::Unfinished => {
+            abandon(db, trial, task, UNFINISHED)?;
             Ok(Did::Failed { task, trial, error: UNFINISHED.into() })
         }
-        Ok(outcome) => {
+        outcome => {
             // Finished with a report; or stopped by someone, when the last reply is all there is.
             let result = match outcome {
                 // The outcome heads the result, so every place that shows it says so.
@@ -125,7 +154,7 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
                     }
                 }
                 _ => db
-                    .chain(&conv)?
+                    .chain(conv)?
                     .iter()
                     .rev()
                     .find(|e| e.kind == "assistant")
@@ -134,28 +163,14 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
             };
             db.immediate(|c| {
                 c.execute(
-                    "UPDATE trials SET ended = datetime('now'), result = ?2, error = NULL WHERE id = ?1",
+                    "UPDATE trials SET ended = coalesce(ended, datetime('now')), result = ?2, error = NULL, waiting = 0, reported = 0 WHERE id = ?1",
                     params![trial, result],
                 )?;
                 // Reported work waits in gates; the rating is the one gate for now.
-                c.execute("UPDATE tasks SET state = 'in_gates', edits = edits + 1 WHERE id = ?1", params![task])?;
+                c.execute("UPDATE tasks SET state = 'in_gates', edits = edits + 1 WHERE id = ?1 AND state != 'done'", params![task])?;
                 Ok(())
             })?;
             Ok(Did::Ran { task, trial })
-        }
-        Err(e) => {
-            let detail = format!("{e:#}");
-            if !reach.iter().any(|c| c.model == model) {
-                // Its model is out of reach: end this run unscored and let the task be picked again.
-                end_unscored(&detail)?;
-                return Ok(Did::Failed { task, trial, error: ABANDONED.into() });
-            }
-            // Leave the run open and retry it in a minute; the journal knows where it stopped.
-            db.conn().execute(
-                "UPDATE trials SET error = ?2, lease_until = ?3 WHERE id = ?1",
-                params![trial, detail, now() + 60],
-            )?;
-            Ok(Did::Failed { task, trial, error: RETRYING.into() })
         }
     }
 }
@@ -227,7 +242,7 @@ fn claim(c: &Connection, data_dir: &Path, reachable: &[Candidate]) -> Result<Opt
 /// too, but the rating is left to the user. A task filed in a chat leaves the
 /// chat a note in its inbox: plain information, read on its next turn, waking
 /// nothing.
-fn deliver_report(db: &Journal) -> Result<Option<Did>> {
+pub(crate) fn deliver_report(db: &Journal) -> Result<Option<Did>> {
     db.immediate(|c| {
         let row: Option<(i64, i64, String, String, Option<String>, String, String, String)> = c
             .query_row(

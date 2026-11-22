@@ -568,21 +568,77 @@ impl Arity {
 
     /// As `send_as`. Inbox runs nothing and returns true.
     pub fn send_as_with(&self, conv: &str, model: &str, text: &str, how: Delivery, on: &mut dyn FnMut(Event)) -> Result<bool> {
-        turn::send_as(&self.journal()?, conv, text, how)?;
+        let db = self.journal()?;
+        turn::send_as(&db, conv, text, how)?;
         if how == Delivery::Inbox {
             return Ok(true);
         }
+        board::wake(db.conn(), conv)?;
         self.resume_with(conv, model, on)
     }
 
     pub fn resume_with(&self, conv: &str, model: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
         let db = self.journal()?;
-        let hidden = hidden(&db, conv)?;
-        let mut masked = |e: Event| match e {
-            Event::Message(m) if hidden => on(Event::Message(&Message { model: None, ..m.clone() })),
-            e => on(e),
+        let model = resolve_model(&db, conv, model)?;
+        self.run_resolved(&db, conv, &model, None, on)
+    }
+
+    pub(crate) fn run_resolved(
+        &self,
+        db: &Journal,
+        conv: &str,
+        model: &str,
+        scripted: Option<&agent::Complete>,
+        on: &mut dyn FnMut(Event),
+    ) -> Result<bool> {
+        let trial = board::trial_state(db.conn(), conv)?;
+        let hidden = hidden(db, conv)?;
+        let mut on_event = |e: Event| {
+            if let Some((tr_id, _, _, false)) = &trial {
+                let _ = db.conn().execute(
+                    "UPDATE trials SET lease_until = ?2 WHERE id = ?1",
+                    rusqlite::params![tr_id, board::now() + board::LEASE_SECS],
+                );
+            }
+            match e {
+                Event::Message(m) if hidden => on(Event::Message(&Message { model: None, ..m.clone() })),
+                e => on(e),
+            }
         };
-        Ok(agent::run(&db, &self.dir, conv, model, &mut masked)? != agent::Outcome::Busy)
+        let ran = match scripted {
+            Some(complete) => agent::run_with(db, conv, model, complete, &mut on_event),
+            None => agent::run(db, &self.dir, conv, model, &mut on_event),
+        };
+        match ran {
+            Ok(agent::Outcome::Busy) => Ok(false),
+            Ok(outcome) => {
+                if let Some((tr_id, task_id, _, ended_before)) = trial {
+                    if matches!(dispatch::settle(db, tr_id, task_id, conv, ended_before, outcome)?, dispatch::Did::Ran { .. }) {
+                        let _ = dispatch::deliver_report(db)?;
+                    }
+                }
+                Ok(true)
+            }
+            Err(e) => {
+                if let Some((tr_id, _, _, ended_before)) = trial {
+                    let detail = format!("{e:#}");
+                    if ended_before {
+                        let _ = db.conn().execute("UPDATE trials SET error = ?2 WHERE id = ?1", rusqlite::params![tr_id, detail]);
+                    } else {
+                        let _ = db.conn().execute(
+                            "UPDATE trials SET error = ?2, lease_until = ?3 WHERE id = ?1",
+                            rusqlite::params![tr_id, detail, board::now() + 60],
+                        );
+                    }
+                }
+                if hidden {
+                    return Err(ArityError::Failed(
+                        "could not reach the model for this task; rate first or use reveal to see why".into(),
+                    ));
+                }
+                Err(e.into())
+            }
+        }
     }
 
     fn standings(&self, candidates: &[leaderboard::Candidate]) -> Result<Vec<Standing>> {
@@ -658,6 +714,25 @@ pub(crate) fn candidates(dir: &std::path::Path) -> anyhow::Result<Vec<leaderboar
     Ok(out)
 }
 
+/// Which model `conv` runs on: a task's run always keeps the model its trial
+/// picked (resolved inside the core so an unrated run stays blind); a chat uses
+/// `given`, or the model it last spoke with when `given` is empty or `-`.
+fn resolve_model(db: &Journal, conv: &str, given: &str) -> anyhow::Result<String> {
+    if let Some((_, _, model, _)) = board::trial_state(db.conn(), conv)? {
+        return Ok(model);
+    }
+    if !given.is_empty() && given != "-" {
+        return Ok(given.to_string());
+    }
+    if let Some(m) = db.chain(conv)?.into_iter().rev().find_map(|e| e.model) {
+        return Ok(m);
+    }
+    if let Some(m) = turn::model(db.conn(), conv)? {
+        return Ok(m);
+    }
+    anyhow::bail!("{conv} has no model yet; name one")
+}
+
 /// An unrated run's thread, where the model stays hidden.
 fn hidden(db: &Journal, conv: &str) -> anyhow::Result<bool> {
     Ok(match board::trial_of_conversation(db.conn(), conv)? {
@@ -704,5 +779,122 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
         }
         "tool" => vec![msg(0, MessageKind::ToolResult, text("output"))],
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Reply, ToolCall};
+    use serde_json::json;
+
+    #[test]
+    fn talking_to_a_worker_directly_keeps_it_blind_until_rated() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("arity-worker-talk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let arity = Arity::new(Some(dir.to_string_lossy().into_owned()));
+        let db = arity.journal()?;
+
+        // A chat delegates task 1; a blindly picked worker ("secret:worker-7b") finishes blocked.
+        db.append("chat-1", "assistant", &json!({ "text": "Handed off." }), Some("chat:front"))?;
+        let f = TaskFields { title: "start the server".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(db.conn(), &f, Some("chat-1"))?;
+        db.conn().execute(
+            "INSERT INTO trials (task, conversation, model, lease_until) VALUES (?1, 'task-1', 'secret:worker-7b', ?2)",
+            rusqlite::params![task, board::now() + 60],
+        )?;
+        db.append("task-1", "user", &json!({ "text": "start the server" }), None)?;
+        board::set_state(db.conn(), task, TaskState::Assigned)?;
+
+        let scripted = |_: &str, chain: &[Entry], _: &[tools::ToolSpec], out: &mut model::Sink| -> anyhow::Result<Reply> {
+            let last = chain.last().unwrap();
+            let said = last.body["text"].as_str().unwrap_or_default();
+            if said == "start the server" {
+                Ok(Reply {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "f1".into(),
+                        name: "finish".into(),
+                        arguments: json!({ "report": "which port?", "outcome": "blocked" }).to_string(),
+                    }],
+                    interrupted: false,
+                })
+            } else if said.contains("why") {
+                out("Ports below 1024 need root.");
+                Ok(Reply { text: "Ports below 1024 need root.".into(), tool_calls: vec![], interrupted: false })
+            } else {
+                Ok(Reply {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "f2".into(),
+                        name: "finish".into(),
+                        arguments: json!({ "report": "Listening on 8080.", "outcome": "done" }).to_string(),
+                    }],
+                    interrupted: false,
+                })
+            }
+        };
+
+        let mut seen_models: Vec<Option<String>> = vec![];
+        let send_blind = |text: &str, complete: &agent::Complete, seen: &mut Vec<Option<String>>| -> Result<bool> {
+            turn::send_as(&db, "task-1", text, Delivery::Steer)?;
+            board::wake(db.conn(), "task-1")?;
+            let resolved = resolve_model(&db, "task-1", "-")?;
+            arity.run_resolved(&db, "task-1", &resolved, Some(complete), &mut |e| {
+                if let Event::Message(m) = e {
+                    seen.push(m.model.clone());
+                }
+            })
+        };
+
+        // Initial run finishes blocked and reports to chat-1's inbox.
+        arity.run_resolved(&db, "task-1", "secret:worker-7b", Some(&scripted), &mut |e| {
+            if let Event::Message(m) = e {
+                seen_models.push(m.model.clone());
+            }
+        })?;
+        assert_eq!(arity.last_model("task-1".into())?, None);
+
+        // 1) Plain follow-up question after the run: answers directly with no finish nudges, stays NeedsRating.
+        send_blind("why not pick a default?", &scripted, &mut seen_models)?;
+        let notices = arity.messages("task-1".into())?.into_iter().filter(|m| m.kind == MessageKind::Notice).count();
+        assert_eq!(notices, 0, "a finished worker answers follow-ups without finish nudges");
+        let speeds: i64 = db.conn().query_row("SELECT count(*) FROM speeds", [], |r| r.get(0))?;
+        assert_eq!(speeds, 0, "worker replies never record speed before or after finishing");
+
+        // 2) Unblock the worker: it calls finish again, replacing the blocked report and updating chat-1's inbox.
+        send_blind("use 8080", &scripted, &mut seen_models)?;
+        let t = arity.threads()?.into_iter().find(|t| t.name == "task-1").unwrap().task.unwrap();
+        assert_eq!((t.run_state, t.result.as_deref(), t.model), (Some(RunState::NeedsRating), Some("Listening on 8080."), None));
+        assert!(arity.messages("chat-1".into())?.last().unwrap().text.contains("Listening on 8080."));
+
+        // 3) Failing call while unrated scrubs the model/provider from the surfaced error, keeping it for reveal.
+        let failing = |_: &str, _: &[Entry], _: &[tools::ToolSpec], _: &mut model::Sink| -> anyhow::Result<Reply> {
+            anyhow::bail!("secret:worker-7b refused connection on 127.0.0.1:9999")
+        };
+        let err = send_blind("one more thing", &failing, &mut seen_models).unwrap_err().to_string();
+        assert!(!err.contains("secret") && !err.contains("worker-7b"), "{err}");
+        assert!(arity.reveal(1)?.contains("secret:worker-7b (failed: secret:worker-7b refused"));
+
+        // Sweep every public read surface before rating: zero mention of secret:worker-7b.
+        assert!(seen_models.iter().all(Option::is_none), "{seen_models:?}");
+        let public = format!(
+            "{:?} {:?} {:?} {:?} {:?}",
+            arity.threads()?,
+            arity.messages("task-1".into())?,
+            arity.messages("chat-1".into())?,
+            arity.runs()?,
+            arity.scores()?,
+        );
+        assert!(!public.contains("secret") && !public.contains("worker-7b"), "{public}");
+
+        // Once rated, the model opens everywhere.
+        arity.rate(1, 5, "clean fix".into())?;
+        assert_eq!(arity.last_model("task-1".into())?.as_deref(), Some("secret:worker-7b"));
+        assert!(arity.messages("task-1".into())?.iter().any(|m| m.model.as_deref() == Some("secret:worker-7b")));
+        assert_eq!(arity.scores()?[0].model, "secret:worker-7b");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

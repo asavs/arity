@@ -397,7 +397,7 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 for (id, _) in &todos {
                     board::set_done(db, *id, true)?;
                 }
-                db.execute("UPDATE trials SET outcome = ?2 WHERE conversation = ?1 AND ended IS NULL", rusqlite::params![conv, outcome])?;
+                db.execute("UPDATE trials SET outcome = ?2 WHERE conversation = ?1", rusqlite::params![conv, outcome])?;
                 Ok(FINISHED.into())
             }
             other => anyhow::bail!("unknown tool {other}"),

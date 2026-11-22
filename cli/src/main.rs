@@ -11,8 +11,9 @@ const USAGE: &str = "usage:
   arity ls                                   every thread: chats and tasks, by what needs you
   arity board                                the same list, tasks only
   arity log    <thread>                      read a thread
-  arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used,
-                                             or --smart, --fast, --free or --private to let Arity pick;
+  arity chat   <conv> <model> <message...>   send a message; <model> may be - for a chat's last model or a
+                                             task's worker (kept hidden until rated), or --smart, --fast,
+                                             --free or --private to let Arity pick for a chat;
                                              if a turn is running there, the message steers it (cutting off its
                                              reply), or with --after-turn joins when it would end;
                                              --inbox leaves it for the next turn and starts nothing
@@ -69,11 +70,15 @@ fn clip(s: &str) -> String {
 fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let arity = Arity::new(None);
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
-    let model_for = |conv: &str, given: String| -> Result<String, Box<dyn std::error::Error>> {
-        if !given.is_empty() && given != "-" {
-            return Ok(given);
+    let is_worker = |conv: &str| -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(arity.threads()?.iter().any(|t| t.name == conv && t.task.as_ref().and_then(|k| k.run).is_some()))
+    };
+    let who_for = |conv: &str, model: &str| -> Result<String, Box<dyn std::error::Error>> {
+        if model.is_empty() || model == "-" {
+            Ok(arity.last_model(conv.into())?.unwrap_or_else(|| "model".into()))
+        } else {
+            Ok(model.into())
         }
-        arity.last_model(conv.into())?.ok_or_else(|| format!("{conv} has no model yet; name one").into())
     };
     match (arg(0).as_str(), args.len()) {
         ("ls" | "board", 1) => {
@@ -105,13 +110,15 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             messages.iter().for_each(print)
         }
         ("chat", n) if n >= 4 => {
-            let model = match choice(&arg(2)) {
-                Some(c) => {
+            let conv = arg(1);
+            let model = match (is_worker(&conv)?, choice(&arg(2))) {
+                (true, _) => "-".into(),
+                (false, Some(c)) => {
                     let pick = arity.pick(c)?;
                     println!("      {}: {}", pick.model, pick.reason);
                     pick.model
                 }
-                None => model_for(&arg(1), arg(2))?,
+                (false, None) => arg(2),
             };
             let (how, words) = match arg(3).as_str() {
                 "--after-turn" => (Delivery::AfterTurn, &args[4..]),
@@ -121,18 +128,21 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if words.is_empty() {
                 return Err("nothing to send".into());
             }
-            stop_on_ctrl_c(&arg(1));
-            if !arity.send_as_with(&arg(1), &model, &words.join(" "), how, &mut streamer(&model))? {
-                println!("a turn is running in {}; the message joins it", arg(1));
+            let who = who_for(&conv, &model)?;
+            stop_on_ctrl_c(&conv);
+            if !arity.send_as_with(&conv, &model, &words.join(" "), how, &mut streamer(&who))? {
+                println!("a turn is running in {conv}; the message joins it");
             } else if how == Delivery::Inbox {
-                println!("left in {} for its next turn", arg(1));
+                println!("left in {conv} for its next turn");
             }
         }
         ("resume", 2 | 3) => {
-            let model = model_for(&arg(1), arg(2))?;
-            stop_on_ctrl_c(&arg(1));
-            if !arity.resume_with(&arg(1), &model, &mut streamer(&model))? {
-                println!("a turn is already running in {}", arg(1));
+            let conv = arg(1);
+            let model = if is_worker(&conv)? || args.len() == 2 { "-".into() } else { arg(2) };
+            let who = who_for(&conv, &model)?;
+            stop_on_ctrl_c(&conv);
+            if !arity.resume_with(&conv, &model, &mut streamer(&who))? {
+                println!("a turn is already running in {conv}");
             }
         }
         ("stop", 2) => match arity.stop(arg(1))? {

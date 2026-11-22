@@ -79,10 +79,13 @@ fn next_step(chain: &[Entry]) -> Step {
         if let Some(call) = calls.iter().find(|c| output(&c.id).is_none()) {
             return Step::RunTool(call.clone());
         }
-        let accepted = |c: &&ToolCall| c.name == "finish" && output(&c.id).is_some_and(|o| o.starts_with(tools::FINISHED));
-        if let Some(call) = calls.iter().find(accepted) {
-            let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
-            return Step::Finished(args["report"].as_str().unwrap_or_default().trim().to_string());
+        // Only for the reply that just finished; a later message starts a new turn.
+        if chain[pos + 1..].iter().all(|e| e.kind == "tool") {
+            let accepted = |c: &&ToolCall| c.name == "finish" && output(&c.id).is_some_and(|o| o.starts_with(tools::FINISHED));
+            if let Some(call) = calls.iter().find(accepted) {
+                let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+                return Step::Finished(args["report"].as_str().unwrap_or_default().trim().to_string());
+            }
         }
     }
     if last.kind == "assistant" { Step::Done } else { Step::CallModel }
@@ -102,9 +105,19 @@ pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn F
 
 pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
     let Some(mut lease) = Lease::take(db, conv, spec)? else { return Ok(Outcome::Busy) };
-    let worker = board::trial_of_conversation(db.conn(), conv)?.is_some();
+    let trial = board::trial_state(db.conn(), conv)?;
+    let worker = trial.is_some();
+    let in_run = trial.as_ref().is_some_and(|(.., ended)| !*ended);
     let today: String = db.conn().query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
-    let system = format!("{}\n\nToday is {today}.", if worker { WORKER } else { SYSTEM });
+    let base = match (worker, in_run) {
+        (true, true) => WORKER.to_string(),
+        (true, false) => format!(
+            "{WORKER}\n\nYou have already handed in your report for this task. Answer follow-up messages directly; \
+             call finish again only if you are replacing your report."
+        ),
+        (false, _) => SYSTEM.to_string(),
+    };
+    let system = format!("{base}\n\nToday is {today}.");
     // Entries up to here were written before this turn; later ones are shown as they come.
     let mut shown = db.chain(conv)?.last().map_or(0, |e| e.id);
     let show = |shown: &mut i64, on: &mut dyn FnMut(Event)| -> Result<()> {
@@ -177,7 +190,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 show(&mut shown, on)?;
                 return Ok(Outcome::Finished(report));
             }
-            Step::Done if worker => {
+            Step::Done if in_run => {
                 // Stopped without finish. Its inbox first: that may be what it needs.
                 if lease.drain_all(db)? > 0 {
                     continue;

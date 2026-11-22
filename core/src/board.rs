@@ -772,6 +772,17 @@ pub fn trial_of_conversation(conn: &Connection, conv: &str) -> Result<Option<i64
         .optional()?)
 }
 
+/// The run bound to `conv`, if any: `(trial, task, model, ended)`.
+pub fn trial_state(conn: &Connection, conv: &str) -> Result<Option<(i64, i64, String, bool)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, task, model, ended IS NOT NULL FROM trials WHERE conversation = ?1 ORDER BY id DESC LIMIT 1",
+            params![conv],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?)
+}
+
 pub fn run_conversations(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT conversation FROM trials")?;
     let rows = stmt.query_map([], |r| r.get(0))?;

@@ -54,6 +54,13 @@ struct ThreadView: View {
 
             Divider()
             if let task = store.thread?.task {
+                if task.runState != nil {
+                    composer(prompt: workerPrompt(task), lines: 1...5)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+                    Divider()
+                }
                 TaskDock(task: task).id(task.id)
             } else if let card = store.draft {
                 cardComposer(card)
@@ -100,19 +107,29 @@ struct ThreadView: View {
         }
     }
 
+    private func workerPrompt(_ task: BoardTask) -> String {
+        switch task.runState {
+        case .needsRating?: "Ask the agent before rating"
+        case .rated?: "Ask \(shortName(task.model))"
+        default: "Message the agent"
+        }
+    }
+
     /// The message field and model choice. Collapsed to a line or so while a card is open.
     private func composer(prompt: String, lines: ClosedRange<Int>) -> some View {
         @Bindable var store = store
         return HStack(alignment: .bottom, spacing: 8) {
-            modelChoice
+            if !store.isWorkerRun {
+                modelChoice
 
-            if store.draft == nil {
-                Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut("t")
-                    .disabled(busy)
-                    .help("Draft a task in this chat (⌘T)")
+                if store.draft == nil {
+                    Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
+                        .keyboardShortcut("t")
+                        .disabled(busy)
+                        .help("Draft a task in this chat (⌘T)")
+                }
             }
 
             TextField(prompt, text: $message, axis: .vertical)

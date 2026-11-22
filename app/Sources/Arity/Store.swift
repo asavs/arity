@@ -60,6 +60,8 @@ final class Store {
     let me: String
 
     var thread: Thread? { threads.first { $0.name == selection } }
+    /// Selected thread is a task with an agent run; its model is the trial's, kept inside the core.
+    var isWorkerRun: Bool { thread?.task?.run != nil }
     var tasks: [BoardTask] { threads.compactMap(\.task) }
 
     private var revision = ""
@@ -130,14 +132,15 @@ final class Store {
     func send(_ text: String, how: Delivery = .steer) {
         guard let conv = selection else { return }
         flushCard()
+        let worker = isWorkerRun
         if how == .inbox {
-            _ = attempt { try core.sendAs(conversation: conv, model: model, text: text, how: .inbox) }
+            _ = attempt { try core.sendAs(conversation: conv, model: worker ? "" : model, text: text, how: .inbox) }
             refresh(force: true)
             return
         }
-        let pick = choice.flatMap { messages.isEmpty || choiceChanged || model.isEmpty ? $0 : nil }
-        choiceChanged = false
-        run(conv, pick: pick, unsent: text) { core, model in
+        let pick = worker ? nil : choice.flatMap { messages.isEmpty || choiceChanged || model.isEmpty ? $0 : nil }
+        if !worker { choiceChanged = false }
+        run(conv, pick: pick, fixedModel: worker ? "" : nil, unsent: text) { core, model in
             try core.sendAs(conversation: conv, model: model, text: text, how: how)
         }
     }
@@ -160,7 +163,10 @@ final class Store {
     /// Carry on after a failed step. The journal knows where it stopped.
     func resume() {
         guard let conv = selection else { return }
-        run(conv) { core, model in try core.resume(conversation: conv, model: model) }
+        let worker = isWorkerRun
+        run(conv, fixedModel: worker ? "" : nil) { core, model in
+            try core.resume(conversation: conv, model: model)
+        }
     }
 
     func fork(at entry: Int64) {
@@ -340,11 +346,11 @@ final class Store {
     /// running returns at once; the running turn answers it next.
     /// With `pick`, the model is picked first; if that fails nothing is sent and
     /// `unsent` goes back to the composer.
-    private func run(_ conv: String, pick: Choice? = nil, unsent: String? = nil,
+    private func run(_ conv: String, pick: Choice? = nil, fixedModel: String? = nil, unsent: String? = nil,
                      _ work: @escaping @Sendable (Arity, String) throws -> Void) {
         error = nil
         starting.insert(conv)
-        let core = self.core, named = self.model
+        let core = self.core, named = fixedModel ?? self.model
         Task.detached {
             var model = named
             if let pick {
