@@ -11,14 +11,15 @@ It is built as a Rust core that owns one durable journal, with a command-line to
 - **The column** is the chain of command: user, secretary, project agent, subagent.
 - **Between neighbours**, messages go both ways (grey) and reports go up only (amber).
 - **The rails** are the user's direct line: the left rail messages any agent, the right rail carries that agent's report straight back.
-- **Every message** (left box) is delivered according to the recipient's state. The sender picks a timing (steer, after turn, or inbox); a live agent takes it in at that point. A cold or not-yet-created agent is instantiated first.
+- **Every message** (left box) is delivered according to the recipient's state. The sender picks a timing (**steer**, **after turn**, or **inbox**); a live agent takes it in at that point without re-routing. A cold or not-yet-created agent is instantiated first, unless the message is **inbox**.
 - **Every report** (right box) is graded by whoever receives it. Grades become scores on the leaderboard, which instantiation reads when it picks the next model.
 
 ## Pages
 
 | Page | Covers |
 |---|---|
-| [Agents](agent-tiers.md) | The three tiers, messages, reports, delivery, agent states |
+| [The loop](loop.md) | The journal, threads, turn timings, waiting, recursion |
+| [Agents](agent-tiers.md) | The three tiers, messages, reports, delivery, agent lifecycle |
 | [How work starts](work.md) | The task board, patch-ins, fresh agents and forks |
 | [Instantiate](instantiate.md) | The six steps that build an agent on spawn or wake |
 | [Model router](model-router.md) | Blind model selection, scores, the endpoint pool |

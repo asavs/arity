@@ -2,7 +2,7 @@
 
 [Back to index](README.md)
 
-Instantiation builds an agent. It runs when work arrives for an agent that is cold or not yet created, which is the "no" branch of the "Live?" decision in the [baseline](README.md). A live agent never goes through it.
+Instantiation builds an agent. It runs when a ready task or a waking [message](agent-tiers.md#message) arrives for an agent that is cold or not yet created, which is the "no" branch of the "Live?" decision in the [baseline](README.md). A live agent—running or idle—never goes through it, and an **inbox** message waits without triggering it.
 
 Creating a new agent and waking a cold one are the same six steps. A new agent starts fresh or as a fork of its parent; see [How work starts](work.md#fresh-or-fork).
 

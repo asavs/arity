@@ -17,13 +17,15 @@ After either route the user can talk to the agent directly. That is the user's d
 
 ## The board
 
-The board is the set of tasks in the [database](database.md). The user, the secretary and project agents can all write to it.
+The board is the set of tasks in the [database](database.md). The user, the secretary, project agents and subagents above the depth floor can all write to it.
 
-**A task belongs to whoever asked for it.** When a model files a task for a person it is talking with, the task is that person's: the result comes back to them, and they rate it. An agent that hands work on of its own accord is the asker of that task.
+**A task belongs to whoever asked for it.** When a model files a task for a person it is talking with, the task is that person's: the result comes back to them, and they rate it. An agent that hands work on from its own run is the asker of that task.
 
-**An entry on the board is what wakes an agent.** When a task becomes ready, an agent that is a good fit for it is woken, or created if none exists. How fit is judged is [undecided](open-questions.md#judging-a-good-fit). Agents are pulled in by available work.
+**An entry on the board is deferred work.** When a task has no open blockers it becomes ready, and an agent that fits it is woken, or created if none exists. How fit is judged is [undecided](open-questions.md#judging-a-good-fit). Claiming the task starts (or wakes) the agent's thread with the brief as its opening entry in the [journal](loop.md), and finishing sends a [report](agent-tiers.md#report) back at the timing the asker chose (**after turn** or **steer**).
 
 A task entry carries what [instantiation](instantiate.md) needs: what kind of agent it wants, what it requires, and its clearance.
+
+**Delegation is recursive.** An agent's run files subtasks with the same call a chat uses, one level down. At the depth floor delegation is not offered, and a task the run writes is its own todo; see [The loop](loop.md#recursion).
 
 ## A patch-in
 
@@ -35,9 +37,9 @@ When an agent is created for a piece of work, there is a second choice: how much
 
 ![Fresh agent or fork](diagrams/fork.svg)
 
-| | Starts with | Relationship | Good for |
-|---|---|---|---|
-| Fresh | Only the brief | A child | An unbiased second look; narrow tasks; anything where the parent's assumptions should not carry over |
-| Fork | Everything the parent knows | A sibling | Work that depends on the conversation so far; exploring one option without losing the thread |
+| | Starts with | In the journal | Relationship | Good for |
+|---|---|---|---|---|
+| Fresh | Only the brief | A new root entry | A child | An unbiased second look; narrow tasks; anything where the parent's assumptions should not carry over |
+| Fork | Everything the parent knows | A new thread head pointing at an entry in the parent's chain | A sibling | Work that depends on the conversation so far; exploring one option without losing the thread |
 
-The choice is about how naive the agent should be. It is not about cost, because a fork reads the parent's context from cache.
+The choice is about how naive the agent should be. It is not about cost, because a fork shares the parent's entries in the [journal](loop.md) and reads the parent's context from cache.

@@ -152,6 +152,54 @@ def baseline():
     svg("baseline", 496, "Baseline: agents, messages, reports", p)
 
 
+def loop():
+    p = [
+        txt(40, 36, "Message timing", "th"),
+        box("coral", 40, 64, 150, 48, "Steer", "Cut reply, or after tools"),
+        box("coral", 40, 220, 150, 48, "After turn", "When turn would end"),
+        box("coral", 40, 314, 150, 48, "Inbox", "Context only, no wake"),
+        # one thread's turn loop
+        frame(236, 24, 404, 262),
+        txt(252, 44, "One thread's turn", "th"),
+        txt(624, 44, "One lease holder", anchor="end"),
+        box("purple", 280, 64, 190, 48, "Stream reply", "Model call"),
+        line([(375, 112), (375, 132)]),
+        diamond(375, 158, 68, 22, "Tool calls?"),
+        txt(460, 145, "yes", anchor="middle"),
+        line([(443, 158), (476, 158)]),
+        box("purple", 480, 134, 144, 48, "Run tools", "Atomic batch"),
+        line([(552, 134), (552, 88), (474, 88)]),
+        txt(385, 198, "no"),
+        line([(375, 180), (375, 216)]),
+        box("box", 280, 220, 190, 48, "End of turn", "Extend or release lease"),
+        # journal underneath: read and appended every step
+        line([(375, 290), (375, 304)], start=True),
+        txt(387, 297, "every step"),
+        cyl(295, 318, 160, 46, "Journal", "Append-only tree"),
+        # where each timing enters
+        line([(190, 88), (276, 88)]),
+        line([(190, 244), (276, 244)]),
+        line([(190, 338), (291, 338)]),
+    ]
+    svg("loop", 388, "One thread's turn and the three timings", p)
+
+
+def recursion():
+    p = [
+        box("purple", 40, 92, 180, 56, "Thread", "Chat or agent run"),
+        txt(198, 40, "writes task", anchor="middle"),
+        line([(130, 92), (130, 56), (266, 56)]),
+        cyl(270, 36, 140, 42, "Task board"),
+        txt(482, 40, "claims ready", anchor="middle"),
+        line([(414, 56), (550, 56), (550, 88)]),
+        box("purple", 460, 92, 180, 56, "Child thread", "Same loop, ends on finish"),
+        line([(550, 148), (550, 190), (130, 190), (130, 152)], "rep"),
+        txt(340, 208, "report, at the timing asked for (graded)", anchor="middle"),
+        txt(340, 234, "Capabilities narrow with depth; at the floor, tasks are own todos", anchor="middle"),
+    ]
+    svg("recursion", 258, "Delegation as recursion through the board", p)
+
+
 def work():
     p = [
         box("box", 40, 110, 150, 56, "User"),
@@ -418,6 +466,8 @@ def roles():
 
 if __name__ == "__main__":
     baseline()
+    loop()
+    recursion()
     work()
     fork()
     instantiate()

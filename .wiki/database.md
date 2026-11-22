@@ -28,7 +28,7 @@ The database is the system's record of what needs doing, who did what, and how i
 - **Profiles.** Person and model pages.
 - **Papercuts.** Task entries attached to whatever they are about; see [Papercuts](papercuts.md).
 
-The endpoint pool, the computer pool and the vault are separate stores. The registry is separate too, though it [may move in](open-questions.md#registry-in-the-database).
+The endpoint pool, the computer pool and the vault are separate stores. The [journal](loop.md) holds the append-only entry tree of every thread. The registry is separate too, though it [may move in](open-questions.md#registry-in-the-database).
 
 ## Tasks
 
