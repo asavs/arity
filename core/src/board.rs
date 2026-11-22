@@ -120,6 +120,8 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     if !columns("trials")?.iter().any(|c| c == "waiting") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0")?;
     }
+    // Earlier names for steer.
+    tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE report_when IN ('now', 'next_step')")?;
     if !columns("trials")?.iter().any(|c| c == "outcome") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN outcome TEXT NOT NULL DEFAULT 'done'")?;
     }
@@ -128,7 +130,7 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
         tx.execute_batch("ALTER TABLE tasks ADD COLUMN report_when TEXT NOT NULL DEFAULT 'after_turn'")?;
         // An earlier column for the same thing, left in place.
         if task_cols.iter().any(|c| c == "when_done") {
-            tx.execute_batch("UPDATE tasks SET report_when = 'next_step' WHERE when_done = 'interrupt'")?;
+            tx.execute_batch("UPDATE tasks SET report_when = 'steer' WHERE when_done = 'interrupt'")?;
         }
     }
     if !columns("ratings")?.iter().any(|c| c == "rater_model") {

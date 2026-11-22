@@ -119,7 +119,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
         let mut chain = db.chain(conv)?;
         // Between replies, never between a reply's tool calls: stop, or take what was sent meanwhile.
         if matches!(next_step(&chain), Step::CallModel | Step::Done) {
-            if lease.live.cut_for_now() {
+            if lease.live.cut_for_steer() {
                 lease.go_on(db)?;
             } else if lease.live.stopped() {
                 lease.release(db, true)?;
@@ -153,7 +153,7 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 };
                 let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate), &mut out)?;
                 let mut body = reply.to_json();
-                if reply.interrupted && lease.live.cut_for_now() {
+                if reply.interrupted && lease.live.cut_for_steer() {
                     body["cut_for_message"] = json!(true);
                 }
                 lease.commit(db, &body, spec)?;
@@ -161,8 +161,8 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 if let (false, false, Some((ttft, tps))) = (worker, reply.interrupted, clock.finish()) {
                     crate::leaderboard::record_speed(db.conn(), spec, ttft, tps)?;
                 }
-                // Cut for a message sent now: the top of the loop takes it in and goes on.
-                if reply.interrupted && !lease.live.cut_for_now() {
+                // Cut for a steer: the top of the loop takes it in and goes on.
+                if reply.interrupted && !lease.live.cut_for_steer() {
                     lease.release(db, true)?;
                     show(&mut shown, on)?;
                     return Ok(Outcome::Ended);
@@ -351,7 +351,7 @@ mod tests {
         Ok(())
     }
 
-    /// While a turn runs, next-step and inbox entries join between its replies,
+    /// While a turn runs, steer and inbox entries join between its replies,
     /// after-turn ones only when it would end; an inbox entry never keeps a turn going.
     #[test]
     fn each_timing_joins_a_running_turn_where_it_says() -> Result<()> {
@@ -359,7 +359,7 @@ mod tests {
         let lease = Lease::take(&db, "c", "m")?.unwrap();
         let said = |text: &str| json!({ "text": text });
         assert!(!turn::deliver(db.conn(), "c", "report", &said("later"), turn::Delivery::AfterTurn)?);
-        assert!(!turn::deliver(db.conn(), "c", "report", &said("now"), turn::Delivery::NextStep)?);
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("now"), turn::Delivery::Steer)?);
         assert!(!turn::deliver(db.conn(), "c", "report", &said("fyi"), turn::Delivery::Inbox)?);
         assert!(turn::queued(db.conn(), "c")?.is_empty(), "reports are not the user's messages");
         // An inbox note to a turn that would end does not keep it going.
@@ -463,10 +463,10 @@ mod tests {
         Ok(())
     }
 
-    /// A message sent now cuts the reply being written; the turn keeps its
+    /// A steer cuts the reply being written; the turn keeps its
     /// text, takes the message in, and goes on, holding its lease throughout.
     #[test]
-    fn a_message_sent_now_cuts_the_reply_and_the_turn_goes_on() -> Result<()> {
+    fn a_steer_cuts_the_reply_and_the_turn_goes_on() -> Result<()> {
         let path = scratch("now");
         let db = Journal::open(&path)?;
         turn::send(&db, "c", "write a long story")?;
@@ -488,7 +488,7 @@ mod tests {
             }
         });
         until("the reply to start", || turn::partial(db.conn(), "c").unwrap().is_some());
-        turn::send_as(&db, "c", "make it short", turn::Delivery::Now)?;
+        turn::send_as(&db, "c", "make it short", turn::Delivery::Steer)?;
         assert_eq!(turn.join().unwrap()?, Outcome::Ended);
         assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant"]);
         let chain = db.chain("c")?;
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(chain[3].body["text"], "Short.");
         assert!(messages_of(&chain[1]).iter().any(|m| m.text == "Cut off by a new message."));
         assert!(turn::running(db.conn())?.is_empty());
-        // Stop still ends the turn, and a message sent now while stopping does not undo it.
+        
         Ok(())
     }
 

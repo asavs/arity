@@ -36,7 +36,7 @@ pub const TABLES: &str = "
         model        TEXT,
         lease_until  INTEGER NOT NULL,
         partial      TEXT NOT NULL DEFAULT '',
-        stop         INTEGER NOT NULL DEFAULT 0, -- 1 stop the turn; 2 cut the reply for a message sent now
+        stop         INTEGER NOT NULL DEFAULT 0, -- 1 stop the turn; 2 cut the reply for a steer
         seq          INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS queued (
@@ -45,7 +45,7 @@ pub const TABLES: &str = "
         text         TEXT NOT NULL,
         kind         TEXT NOT NULL DEFAULT 'user',  -- the entry it becomes: user, or report
         body         TEXT,                          -- that entry's JSON body; NULL means {\"text\": text}
-        mode         TEXT NOT NULL DEFAULT 'next_step' -- see Delivery
+        mode         TEXT NOT NULL DEFAULT 'steer' -- see Delivery
     );";
 
 /// Bring a `queued` table from before deliveries had a kind and a mode up to date.
@@ -56,11 +56,11 @@ pub fn migrate(c: &Connection) -> Result<()> {
         c.execute_batch(
             "ALTER TABLE queued ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
              ALTER TABLE queued ADD COLUMN body TEXT;
-             ALTER TABLE queued ADD COLUMN mode TEXT NOT NULL DEFAULT 'next_step';",
+             ALTER TABLE queued ADD COLUMN mode TEXT NOT NULL DEFAULT 'steer';",
         )?;
     }
     // Earlier names for the same timings.
-    c.execute_batch("UPDATE queued SET mode = 'next_step' WHERE mode = 'steer'")?;
+    c.execute_batch("UPDATE queued SET mode = 'steer' WHERE mode IN ('now', 'next_step')")?;
     Ok(())
 }
 
@@ -68,17 +68,15 @@ pub fn migrate(c: &Connection) -> Result<()> {
 /// no turn running it goes into the journal at once, whatever the timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Delivery {
-    /// At once: the reply being written is cut off (its text so far kept),
-    /// and the turn takes it in and goes on.
-    Now,
-    /// Between the turn's replies (never between a reply's tool calls and
-    /// their results): the turn takes it into the work in hand.
-    NextStep,
+    /// As soon as it can: a reply being written is cut off (its text so far
+    /// kept) and the turn takes it in and goes on; tool calls running are
+    /// never cut, so it joins once they have their results.
+    Steer,
     /// When the turn would end: the turn answers it then, instead of ending.
     AfterTurn,
     /// Read when the recipient is next ready: it asks for no answer, so it
-    /// never keeps a turn going or wakes anyone. A running turn takes it in at
-    /// the next step as context; an idle conversation has it there for its
+    /// never keeps a turn going or wakes anyone. A running turn takes it in
+    /// between replies as context; an idle conversation has it there for its
     /// next turn. Work to be done is a task on the board, not this.
     Inbox,
 }
@@ -86,8 +84,7 @@ pub enum Delivery {
 impl Delivery {
     pub fn name(self) -> &'static str {
         match self {
-            Delivery::Now => "now",
-            Delivery::NextStep => "next_step",
+            Delivery::Steer => "steer",
             Delivery::AfterTurn => "after_turn",
             Delivery::Inbox => "inbox",
         }
@@ -95,8 +92,7 @@ impl Delivery {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "now" => Delivery::Now,
-            "next_step" => Delivery::NextStep,
+            "steer" => Delivery::Steer,
             "after_turn" => Delivery::AfterTurn,
             "inbox" => Delivery::Inbox,
             _ => return None,
@@ -109,21 +105,21 @@ impl Delivery {
 pub struct Live {
     text: Mutex<String>,
     stop: AtomicBool,
-    /// The stop is for a message sent now: the turn goes on after it.
-    now: AtomicBool,
+    /// The stop is for a steer: the turn goes on after it.
+    steer: AtomicBool,
 }
 
 impl Live {
     pub fn push(&self, s: &str) {
         self.text.lock().unwrap().push_str(s);
     }
-    /// Whether the reply should be cut off: the turn was stopped, or a message was sent now.
+    /// Whether the reply should be cut off: the turn was stopped, or steered.
     pub fn stopped(&self) -> bool {
         self.stop.load(Relaxed)
     }
-    /// Whether that cut is for a message sent now, so the turn goes on.
-    pub fn cut_for_now(&self) -> bool {
-        self.now.load(Relaxed)
+    /// Whether that cut is for a steer, so the turn goes on.
+    pub fn cut_for_steer(&self) -> bool {
+        self.steer.load(Relaxed)
     }
 }
 
@@ -181,7 +177,7 @@ impl Lease {
         db.immediate(|c| drain(c, &self.conv, true))
     }
 
-    /// Go on after a cut for a message sent now: clear the flag here and in the
+    /// Go on after a cut for a steer: clear the flag here and in the
     /// row. Holds the text lock, which the heartbeat takes before reading the
     /// row, so it cannot set the flag again from a read made before the clear.
     pub fn go_on(&self, db: &Journal) -> Result<()> {
@@ -189,7 +185,7 @@ impl Lease {
         db.conn().execute("UPDATE turns SET stop = 0 WHERE conversation = ?1 AND owner = ?2 AND stop = 2", params![
             self.conv, self.owner
         ])?;
-        self.live.now.store(false, Relaxed);
+        self.live.steer.store(false, Relaxed);
         self.live.stop.store(false, Relaxed);
         Ok(())
     }
@@ -268,11 +264,11 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
                 .optional();
             match stop {
                 Ok(Some(2)) => {
-                    live.now.store(true, Relaxed);
+                    live.steer.store(true, Relaxed);
                     live.stop.store(true, Relaxed);
                 }
                 Ok(Some(1) | None) => {
-                    live.now.store(false, Relaxed);
+                    live.steer.store(false, Relaxed);
                     live.stop.store(true, Relaxed);
                 }
                 _ => {}
@@ -315,7 +311,7 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
             "INSERT INTO queued (conversation, text, kind, body, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![conv, text, kind, body.to_string(), how.name()],
         )?;
-        if how == Delivery::Now {
+        if how == Delivery::Steer {
             // Cut the reply in progress, unless the turn is being stopped anyway.
             c.execute("UPDATE turns SET stop = 2, seq = seq + 1 WHERE conversation = ?1 AND stop = 0", params![conv])?;
         }
@@ -326,10 +322,10 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
     Ok(true)
 }
 
-/// The user's message at the next step, as the front ends send by default.
+/// The user's message as a steer, as the front ends send by default.
 #[cfg(test)]
 pub fn send(db: &Journal, conv: &str, text: &str) -> Result<()> {
-    send_as(db, conv, text, Delivery::NextStep)
+    send_as(db, conv, text, Delivery::Steer)
 }
 
 /// The user's message, joining a running turn when `how` says.

@@ -443,7 +443,7 @@ mod tests {
         let half = |t: &str| TaskFields { title: t.into(), assignee: board::AGENT.into(), ..Default::default() };
         board::add_task(c, &half("first half"), Some("task-3"))?;
         board::add_task(c, &half("second half"), Some("task-3"))?;
-        c.execute("UPDATE tasks SET report_when = 'next_step' WHERE id = 4", [])?;
+        c.execute("UPDATE tasks SET report_when = 'steer' WHERE id = 4", [])?;
         c.execute("INSERT INTO trials (task, conversation, model, ended, result) VALUES (4, 'task-4', 'b', datetime('now'), 'half')", [])?;
         deliver_report(&db)?;
         let waiting: bool = c.query_row("SELECT waiting FROM trials WHERE conversation = 'task-3'", [], |r| r.get(0))?;

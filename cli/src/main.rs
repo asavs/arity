@@ -13,8 +13,8 @@ const USAGE: &str = "usage:
   arity log    <thread>                      read a thread
   arity chat   <conv> <model> <message...>   send a message; <model> may be - for the last one used,
                                              or --smart, --fast, --free or --private to let Arity pick;
-                                             if a turn is running there, the message joins at its next step,
-                                             or with --after-turn when it would end, --now cutting off its reply;
+                                             if a turn is running there, the message steers it (cutting off its
+                                             reply), or with --after-turn joins when it would end;
                                              --inbox leaves it for the next turn and starts nothing
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
@@ -114,10 +114,9 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 None => model_for(&arg(1), arg(2))?,
             };
             let (how, words) = match arg(3).as_str() {
-                "--now" => (Delivery::Now, &args[4..]),
                 "--after-turn" => (Delivery::AfterTurn, &args[4..]),
                 "--inbox" => (Delivery::Inbox, &args[4..]),
-                _ => (Delivery::NextStep, &args[3..]),
+                _ => (Delivery::Steer, &args[3..]),
             };
             if words.is_empty() {
                 return Err("nothing to send".into());

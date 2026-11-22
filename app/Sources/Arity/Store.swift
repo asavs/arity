@@ -127,7 +127,7 @@ final class Store {
     /// does not change model part way; a new choice picks again from the next message.
     /// `how` is when it joins a turn already running there, as for any participant's
     /// message. Inbox starts nothing: it waits there for the chat's next turn.
-    func send(_ text: String, how: Delivery = .nextStep) {
+    func send(_ text: String, how: Delivery = .steer) {
         guard let conv = selection else { return }
         flushCard()
         if how == .inbox {

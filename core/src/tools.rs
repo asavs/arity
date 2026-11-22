@@ -155,10 +155,10 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                 "to": {"type": ["string", "integer"], "description": "\"parent\" for whoever handed you this task, \
                     or the id of a task you handed out."},
                 "text": {"type": "string"},
-                "when": {"type": "string", "enum": ["now", "next_step", "after_turn", "inbox"], "description": "When it \
-                    reaches them if they are working: \"now\" cuts off what they are writing, \"next_step\" when \
-                    they finish their current step, \"after_turn\" (the default) when they would stop, \"inbox\" \
-                    for something they only need to know, read when they are next ready and never waking them."}
+                "when": {"type": "string", "enum": ["steer", "after_turn", "inbox"], "description": "When it \
+                    reaches them if they are working: \"steer\" as soon as it can, cutting off what they are writing, \
+                    for when they are about to waste work; \"after_turn\" (the default) when they would stop; \
+                    \"inbox\" for something they only need to know, read when they are next ready and never waking them."}
             }, "required": ["to", "text"]}),
         },
     ];
@@ -169,11 +169,11 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                 let mut props = field_schema();
                 props["assignee"] = json!({"type": "string", "description": "Leave it out to hand the task to an agent. \
                     \"user\" puts it on the user's own list instead."});
-                props["when_done"] = json!({"type": "string", "enum": ["after_turn", "next_step", "now"],
-                    "description": "When its result reaches you if you are still working: \"after_turn\" (the default) when you next \
-                    stop, \"next_step\" when you finish the step you are on, \"now\" at once, cutting off what you \
-                    are writing. If you have stopped to wait, \"next_step\" and \"now\" wake you for each result, \
-                    \"after_turn\" once all your sub-tasks have reported."});
+                props["when_done"] = json!({"type": "string", "enum": ["after_turn", "steer"],
+                    "description": "When its result reaches you if you are still working: \"after_turn\" (the default) \
+                    when you next stop, \"steer\" as soon as it arrives, cutting off what you are writing. If you have \
+                    stopped to wait, \"steer\" wakes you for each result, \"after_turn\" once all your sub-tasks have \
+                    reported."});
                 ToolSpec {
                     name: "add_task",
                     description: "Hand part of your task to another agent, one level down. It knows nothing but the \
@@ -255,7 +255,7 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 f.merge(&args)?;
                 let id = board::add_task(db, &f, Some(conv))?;
                 let when = args["when_done"].as_str().and_then(turn::Delivery::parse);
-                if let (Caller::Run, Some(when @ (turn::Delivery::Now | turn::Delivery::NextStep | turn::Delivery::AfterTurn))) = (caller, when) {
+                if let (Caller::Run, Some(when @ (turn::Delivery::Steer | turn::Delivery::AfterTurn))) = (caller, when) {
                     db.execute("UPDATE tasks SET report_when = ?2 WHERE id = ?1", rusqlite::params![id, when.name()])?;
                 }
                 Ok(match (f.assignee == AGENT, worker) {
@@ -306,7 +306,7 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 let how = match args["when"].as_str() {
                     None => turn::Delivery::AfterTurn,
                     Some(w) => turn::Delivery::parse(w)
-                        .ok_or_else(|| anyhow::anyhow!("when is one of now, next_step, after_turn and inbox"))?,
+                        .ok_or_else(|| anyhow::anyhow!("when is one of steer, after_turn and inbox"))?,
                 };
                 let (mine, title): (i64, String) = db.query_row(
                     "SELECT t.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
@@ -531,8 +531,8 @@ mod tests {
         assert!(call("task-2", "message", json!({ "to": "parent", "text": "fyi", "when": "inbox" })).starts_with("sent"));
         let waiting = |conv: &str| -> bool { c.query_row("SELECT waiting FROM trials WHERE conversation = ?1", [conv], |r| r.get(0)).unwrap() };
         assert!(waiting("task-1"));
-        // Up, next step: it is woken.
-        call("task-2", "message", json!({ "to": "parent", "text": "the repo does not exist", "when": "next_step" }));
+        // Up, steer: it is woken.
+        call("task-2", "message", json!({ "to": "parent", "text": "the repo does not exist", "when": "steer" }));
         assert!(!waiting("task-1"));
         assert_eq!(db.chain("task-1")?.iter().filter(|e| e.kind == "message").count(), 2);
         // Task 1's parent is the user, reached in the chat as a note.

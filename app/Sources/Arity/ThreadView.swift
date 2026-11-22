@@ -121,9 +121,8 @@ struct ThreadView: View {
                 .focused($composing)
                 .onSubmit { send() }
                 .onKeyPress(.return, phases: .down) { press in
-                    // ⌥↩ after this turn; ⌘↩ now, unless a card is open (there ⌘↩ adds it).
+                    // ⌥↩ after this turn; ↩ alone steers.
                     if press.modifiers.contains(.option) { send(.afterTurn); return .handled }
-                    if press.modifiers.contains(.command) && store.draft == nil { send(.now); return .handled }
                     return .ignored
                 }
                 .onExitCommand { if busy { store.stop() } }
@@ -139,9 +138,8 @@ struct ThreadView: View {
             } else {
                 Menu {
                     if busy {
-                        Button("Send at the Next Step  ↩") { send(.nextStep) }
+                        Button("Steer: Cut In Now  ↩") { send(.steer) }
                         Button("Send After This Turn  ⌥↩") { send(.afterTurn) }
-                        Button("Send Now, Cutting Off the Reply  ⌘↩") { send(.now) }
                     }
                     Button("Leave a Note for Its Next Turn") { send(.inbox) }
                 } label: {
@@ -155,7 +153,7 @@ struct ThreadView: View {
                 .buttonStyle(.borderless)
                 .fixedSize()
                 .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help(busy ? "Send at the next step (↩); more timings in the menu" : "Send (↩); or leave a note without a reply")
+                .help(busy ? "Steer: cut in now (↩); after this turn (⌥↩); or leave a note" : "Send (↩); or leave a note without a reply")
             }
         }
     }
@@ -189,7 +187,7 @@ struct ThreadView: View {
 
     /// While a turn runs, `how` says when the message joins it: the same
     /// timings an agent's messages and reports have.
-    private func send(_ how: Delivery = .nextStep) {
+    private func send(_ how: Delivery = .steer) {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         message = ""

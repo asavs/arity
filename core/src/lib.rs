@@ -563,7 +563,7 @@ impl Arity {
 /// when another loop is running the conversation; a sent message then waits for it.
 impl Arity {
     pub fn send_with(&self, conv: &str, model: &str, text: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
-        self.send_as_with(conv, model, text, Delivery::NextStep, on)
+        self.send_as_with(conv, model, text, Delivery::Steer, on)
     }
 
     /// As `send_as`. Inbox runs nothing and returns true.

@@ -31,20 +31,19 @@ Everything between the user and agents, and between agents, is one of two calls.
 
 A message can go in either direction, including from a child to its parent: a child tells its parent when the parent is about to waste work, without ending its own task. The user is one more participant: the user's messages, an agent's messages and reports all go through the same call.
 
-**The sender picks a timing; the recipient's state decides what happens.** Each timing is one of the loop's boundaries:
+**The sender picks a timing; the recipient's state decides what happens.**
 
 | Timing | Recipient is running a turn | Recipient is idle |
 |---|---|---|
-| **Now** | The reply being written is cut off, its text kept, and the turn takes the message in and goes on | Woken |
-| **Next step** | Joins when the current step ends: after the reply, and after its tool calls have their results | Woken |
+| **Steer** | Joins as soon as it can: a reply being written is cut off, its text kept, and the turn takes the message in and goes on. Tool calls are never cut; it joins once they have their results | Woken |
 | **After turn** | Joins when the turn would end; the turn answers it instead of ending | Woken |
-| **Inbox** | Joins at the next step as context, asking for no answer: it never keeps a turn going | Left for its next turn; nothing wakes |
+| **Inbox** | Joins between replies as context, asking for no answer: it never keeps a turn going | Left for its next turn; nothing wakes |
 
 A recipient that does not exist yet is created, and a cold one is instantiated again, before it receives the message: see [Instantiate](instantiate.md). A live agent keeps its model.
 
 Stop is not a timing: it ends the turn, and the reply so far is kept.
 
-Pick the latest timing that does not waste work: now when the recipient is about to go wrong, next step when it should change course, after turn for anything it should answer, inbox for anything it only needs to know. Work to be done is a task on the [board](work.md), not a message.
+Steer when the recipient is about to waste work, after turn for anything it should answer, inbox for anything it only needs to know. Work to be done is a task on the [board](work.md), not a message.
 
 ### Report
 
@@ -52,7 +51,7 @@ A report goes one way: up, to whoever asked for the work. That is the parent age
 
 Reports are graded. See [Blind testing](blind-testing.md#grading).
 
-A report is delivered like a message, with the timing the recipient asked for when it handed out the work: after turn unless it said next step or now. The agent may keep working meanwhile or stop to wait. A waiting agent is woken at once by a next-step or now report, and otherwise when all the work it handed out has reported. A note of a result for a conversation that is not waiting on it, such as the chat a task was filed in, goes to its inbox.
+A report is delivered like a message, with the timing the recipient asked for when it handed out the work: after turn unless it said steer. The agent may keep working meanwhile or stop to wait. A waiting agent is woken at once by a steering report, and otherwise when all the work it handed out has reported. A note of a result for a conversation that is not waiting on it, such as the chat a task was filed in, goes to its inbox.
 
 ## Agent lifecycle
 
