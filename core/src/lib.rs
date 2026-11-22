@@ -21,6 +21,7 @@ mod journal;
 mod keys;
 mod leaderboard;
 mod model;
+mod papercut;
 mod tools;
 mod usage;
 mod turn;
@@ -459,6 +460,13 @@ impl Arity {
     /// Replace a task's fields. Changing the assignee to `agent` hands it off.
     pub fn update_task(&self, id: i64, fields: TaskFields) -> Result<()> {
         Ok(board::update_task(self.journal()?.conn(), id, &fields)?)
+    }
+
+    /// A papercut from the user: a note that something got in the way, filed as
+    /// a low-priority task on their own list tagged `papercut`. `conversation`
+    /// is the thread it came up in, if any; `about` is what got in the way.
+    pub fn file_papercut(&self, conversation: Option<String>, note: String, about: Option<String>) -> Result<i64> {
+        Ok(papercut::file(self.journal()?.conn(), conversation.as_deref(), &note, about.as_deref())?)
     }
 
     pub fn set_task_done(&self, id: i64, done: bool) -> Result<()> {

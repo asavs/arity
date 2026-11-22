@@ -66,7 +66,7 @@ pub fn caller(db: &Connection, conv: &str) -> anyhow::Result<Caller> {
 fn offered(caller: Caller, name: &str, can_rate: bool) -> bool {
     match (caller, name) {
         (_, "rate") => can_rate,
-        (_, "list_tasks" | "add_task") => true,
+        (_, "list_tasks" | "add_task" | "papercut") => true,
         (Caller::Chat, "finish") => false,
         (Caller::Chat, _) => true,
         (_, "finish" | "message") => true,
@@ -160,6 +160,11 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                     for when they are about to waste work; \"after_turn\" (the default) when they would stop; \
                     \"inbox\" for something they only need to know, read when they are next ready and never waking them."}
             }, "required": ["to", "text"]}),
+        },
+        ToolSpec {
+            name: "papercut",
+            description: crate::papercut::DESCRIPTION,
+            parameters: crate::papercut::parameters(),
         },
     ];
     all.into_iter()
@@ -303,52 +308,18 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 if text.is_empty() {
                     anyhow::bail!("message needs its text");
                 }
-                let how = match args["when"].as_str() {
-                    None => turn::Delivery::AfterTurn,
-                    Some(w) => turn::Delivery::parse(w)
-                        .ok_or_else(|| anyhow::anyhow!("when is one of steer, after_turn and inbox"))?,
-                };
-                let (mine, title): (i64, String) = db.query_row(
-                    "SELECT t.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
-                    [conv],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                let child = match &args["to"] {
-                    Value::String(s) if s == "parent" => None,
-                    Value::Number(n) => n.as_i64(),
-                    Value::String(s) => s.trim().trim_start_matches("task").trim().parse().ok(),
-                    _ => None,
-                };
-                let (to, how, said, sent) = match child {
-                    Some(task) => {
-                        let Some(run) = board::child_run(db, conv, task)? else {
-                            anyhow::bail!("nobody is working on task {task} now");
-                        };
-                        (run, how, format!("Message from whoever handed you this task (task {mine}):\n\n{text}"), format!("task {task}"))
-                    }
-                    None if args["to"] != "parent" => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
-                    None => match board::parent(db, conv)? {
-                        board::Parent::Run(run) => {
-                            (run, how, format!("Message from task {mine}, \"{title}\":\n\n{text}"), "whoever handed you this task".into())
-                        }
-                        // The user reads it in the chat; the chat's model is not asked to answer it.
-                        board::Parent::Chat(chat) => (
-                            chat,
-                            turn::Delivery::Inbox,
-                            format!("Message from task {mine}, \"{title}\":\n\n{text}"),
-                            "the user, in the chat they filed it in".into(),
-                        ),
-                        board::Parent::Unreachable => anyhow::bail!(
-                            "whoever handed you this task cannot be reached now; say it in your report when you finish"
-                        ),
+                let how = when(&args)?;
+                match &args["to"] {
+                    Value::String(s) if s == "parent" => message_parent(db, conv, text, how),
+                    Value::Number(n) => message_child(db, conv, n.as_i64().unwrap_or_default(), text, how),
+                    Value::String(s) => match s.trim().trim_start_matches("task").trim().parse() {
+                        Ok(task) => message_child(db, conv, task, text, how),
+                        Err(_) => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
                     },
-                };
-                turn::deliver(db, &to, "message", &json!({ "text": said, "from_task": mine }), how)?;
-                if how != turn::Delivery::Inbox {
-                    board::wake(db, &to)?;
+                    _ => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
                 }
-                Ok(format!("sent to {sent}"))
             }
+            "papercut" => crate::papercut::execute(db, conv, &args),
             "finish" => {
                 let report = args["report"].as_str().unwrap_or_default().trim();
                 if report.is_empty() {
@@ -404,6 +375,60 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
         }
     })();
     result.unwrap_or_else(|e| format!("error: {e:#}"))
+}
+
+/// The `when` a tool was given, `after_turn` when it is left out.
+pub(crate) fn when(args: &Value) -> anyhow::Result<turn::Delivery> {
+    match args["when"].as_str() {
+        None => Ok(turn::Delivery::AfterTurn),
+        Some(w) => turn::Delivery::parse(w).ok_or_else(|| anyhow::anyhow!("when is one of steer, after_turn and inbox")),
+    }
+}
+
+/// The task whose run `conv` is, as (id, title).
+fn own_task(db: &Connection, conv: &str) -> anyhow::Result<(i64, String)> {
+    Ok(db.query_row(
+        "SELECT t.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
+        [conv],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// Deliver a message to `to` and wake it if it is waiting, unless it is inbox.
+fn send(db: &Connection, to: &str, said: String, from_task: i64, how: turn::Delivery) -> anyhow::Result<()> {
+    turn::deliver(db, to, "message", &json!({ "text": said, "from_task": from_task }), how)?;
+    if how != turn::Delivery::Inbox {
+        board::wake(db, to)?;
+    }
+    Ok(())
+}
+
+/// What `message` does with `to: "parent"`: the text goes to whoever handed
+/// the run in `conv` its task. A run gets it at `how`; the user reads it as a
+/// note in the chat the task was filed in, and the chat's model is not asked to
+/// answer it. Says who it reached, for the tool's result.
+pub(crate) fn message_parent(db: &Connection, conv: &str, text: &str, how: turn::Delivery) -> anyhow::Result<String> {
+    let (mine, title) = own_task(db, conv)?;
+    let said = format!("Message from task {mine}, \"{title}\":\n\n{text}");
+    let (to, how, sent) = match board::parent(db, conv)? {
+        board::Parent::Run(run) => (run, how, "whoever handed you this task"),
+        board::Parent::Chat(chat) => (chat, turn::Delivery::Inbox, "the user, in the chat they filed it in"),
+        board::Parent::Unreachable => {
+            anyhow::bail!("whoever handed you this task cannot be reached now; say it in your report when you finish")
+        }
+    };
+    send(db, &to, said, mine, how)?;
+    Ok(format!("sent to {sent}"))
+}
+
+/// What `message` does with a task id: the text goes to the run doing a task `conv` handed out.
+fn message_child(db: &Connection, conv: &str, task: i64, text: &str, how: turn::Delivery) -> anyhow::Result<String> {
+    let (mine, _) = own_task(db, conv)?;
+    let Some(run) = board::child_run(db, conv, task)? else {
+        anyhow::bail!("nobody is working on task {task} now");
+    };
+    send(db, &run, format!("Message from whoever handed you this task (task {mine}):\n\n{text}"), mine, how)?;
+    Ok(format!("sent to task {task}"))
 }
 
 /// One task as a line a model can read.
@@ -471,14 +496,14 @@ mod tests {
         // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
         assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
         run(1)?;
-        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish", "message"]);
+        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish", "message", "papercut"]);
         assert!(add_props("task-1")["properties"]["assignee"].is_object(), "above the floor it may delegate");
         let said = call("task-1", "add_task", json!({ "title": "sub" }));
         assert!(said.starts_with("added task 2") && said.contains("comes back here"), "{said}");
         assert_eq!(board::task(c, 2)?.created_by, "conversations/task-1");
         // Task 2's run is at the floor: add_task has no assignee or choice, and complete_task is offered.
         run(2)?;
-        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task", "finish", "message"]);
+        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task", "finish", "message", "papercut"]);
         let props = add_props("task-2");
         assert!(props["properties"]["assignee"].is_null() && props["properties"]["choice"].is_null(), "{props}");
         // Even asked for an agent, what it writes is its own todo: no pick, no run, nothing woken.

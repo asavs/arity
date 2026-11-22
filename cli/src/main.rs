@@ -24,6 +24,9 @@ const USAGE: &str = "usage:
                                              drawn among the top three its choice allows
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
   arity done   <task>                        mark a task done
+  arity papercut [--about <t>] [--in <conv>] <note...>
+                                             note that something got in the way; it goes on your list
+  arity papercuts                            open papercuts
   arity draft  <conv>                        the task card open in a conversation
   arity draft  <conv> --new                  open an empty card; the next model turn helps fill it
   arity draft  <conv> [fields] [-- brief]    edit the card
@@ -175,6 +178,27 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("done", 2) => {
             arity.set_task_done(arg(1).parse()?, true)?;
             println!("task {} is done", arg(1));
+        }
+        ("papercut", n) if n >= 2 => {
+            let (mut about, mut conv, mut words) = (None, None, vec![]);
+            let mut rest = args[1..].iter();
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--about" => about = Some(rest.next().ok_or("--about needs what got in the way")?.clone()),
+                    "--in" => conv = Some(rest.next().ok_or("--in needs a conversation")?.clone()),
+                    _ => words.push(a.as_str()),
+                }
+            }
+            let id = arity.file_papercut(conv, words.join(" "), about)?;
+            println!("filed papercut {id}");
+        }
+        ("papercuts", 1) => {
+            let me = arity.me();
+            for t in arity.threads()?.iter().filter(|t| {
+                t.task.as_ref().is_some_and(|k| k.state != TaskState::Done && k.fields.tags.iter().any(|g| g == "papercut"))
+            }) {
+                println!("{}", thread_line(t, &me));
+            }
         }
         ("draft", n) if n >= 2 => {
             let conv = arg(1);

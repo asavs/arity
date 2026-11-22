@@ -42,6 +42,8 @@ final class Store {
     /// A message that could not be sent, handed back to the composer.
     var unsent: String?
     var showSettings = false
+    /// The papercut popover is open.
+    var filingPapercut = false
     /// The searchable list for adding a worker is open.
     var choosingWorker = false
     /// The add-provider form, open with these values.
@@ -234,6 +236,19 @@ final class Store {
     func setDone(_ task: BoardTask, _ done: Bool) {
         _ = attempt { try core.setTaskDone(id: task.id, done: done) }
         refresh(force: true)
+    }
+
+    /// A papercut: a note that something got in the way, onto the user's own
+    /// list. Filed in the selected chat, if one is open; a task's thread is
+    /// named in About instead, since filing in a run's conversation would make
+    /// it the run's. Leaves the selection and any open card as they are.
+    func filePapercut(_ note: String, about: String) -> Bool {
+        let chat = thread.flatMap { $0.task == nil ? $0.name : nil }
+        var about = about.trimmingCharacters(in: .whitespacesAndNewlines)
+        if about.isEmpty, let task = thread?.task { about = "task \(task.id), \"\(task.fields.title)\"" }
+        let filed = attempt { try core.filePapercut(conversation: chat, note: note, about: about.isEmpty ? nil : about) }
+        refresh(force: true)
+        return filed != nil
     }
 
     func rate(run: Int64, score: Int64, note: String) {
