@@ -53,6 +53,13 @@ struct ContentView: View {
                     .popover(isPresented: $showScores, arrowEdge: .bottom) { Scores() }
             }
             ToolbarItem {
+                Button("Papercut", systemImage: "bandage") { store.filingPapercut.toggle() }
+                    .help("Note that something got in the way")
+                    .popover(isPresented: Bindable(store).filingPapercut, arrowEdge: .bottom) {
+                        PapercutForm { store.filingPapercut = false }.environment(store)
+                    }
+            }
+            ToolbarItem {
                 Button("Models", systemImage: "cpu") { store.showSettings = true }
                     .help("Your accounts, their keys and plans, and worker models (⌘,)")
             }
@@ -61,6 +68,38 @@ struct ContentView: View {
                     .help("New chat (⌘N)")
             }
         }
+    }
+}
+
+/// A one-line papercut, filed on the user's own list against the selected thread.
+private struct PapercutForm: View {
+    @Environment(Store.self) private var store
+    @State private var note = ""
+    @State private var about = ""
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("What got in the way?", text: $note, axis: .vertical)
+                .lineLimit(1...4)
+                .onSubmit(file)
+            TextField("About (optional): a tool, a repo, a URL", text: $about)
+                .onSubmit(file)
+            HStack {
+                Spacer()
+                Button("File", action: file)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .frame(width: 300)
+        .padding(14)
+    }
+
+    private func file() {
+        guard !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if store.filePapercut(note, about: about) { done() }
     }
 }
 

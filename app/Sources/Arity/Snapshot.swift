@@ -3,7 +3,8 @@ import AppKit
 /// Development aid: `ARITY_SNAPSHOT=/path/shot.png` makes the app write a PNG of
 /// its own window every two seconds, so a script (or Claude) can see the UI
 /// without screen-recording permission. `ARITY_OPEN=<conversation>` selects one at launch;
-/// `ARITY_SETTINGS=1` opens the models sheet (`add`: with the add-provider form; `signin`: as if signing in; `workers`: with the add-worker list open).
+/// `ARITY_SETTINGS=1` opens the models sheet (`add`: with the add-provider form; `signin`: as if signing in; `workers`: with the add-worker list open);
+/// `ARITY_PAPERCUT=1` opens the papercut popover.
 @MainActor
 enum Snapshot {
     static func startIfAsked(store: Store) {
@@ -16,6 +17,9 @@ enum Snapshot {
             if settings == "workers" {
                 Task { try? await Task.sleep(for: .seconds(1)); store.choosingWorker = true }
             }
+        }
+        if env["ARITY_PAPERCUT"] != nil {
+            Task { try? await Task.sleep(for: .seconds(1)); store.filingPapercut = true }
         }
         guard let path = env["ARITY_SNAPSHOT"] else { return }
         Task {
