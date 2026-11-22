@@ -119,10 +119,13 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     if !columns("trials")?.iter().any(|c| c == "waiting") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0")?;
     }
-    if !columns("tasks")?.iter().any(|c| c == "when_done") {
-        tx.execute_batch(
-            "ALTER TABLE tasks ADD COLUMN when_done TEXT NOT NULL DEFAULT 'inbox' CHECK (when_done IN ('inbox', 'interrupt'))",
-        )?;
+    let task_cols = columns("tasks")?;
+    if !task_cols.iter().any(|c| c == "report_when") {
+        tx.execute_batch("ALTER TABLE tasks ADD COLUMN report_when TEXT NOT NULL DEFAULT 'after_turn'")?;
+        // An earlier column for the same thing, left in place.
+        if task_cols.iter().any(|c| c == "when_done") {
+            tx.execute_batch("UPDATE tasks SET report_when = 'next_step' WHERE when_done = 'interrupt'")?;
+        }
     }
     if !columns("ratings")?.iter().any(|c| c == "rater_model") {
         migrate_authorship(&tx)?;
@@ -144,8 +147,7 @@ fn create_tasks(c: &Connection, name: &str) -> Result<()> {
                         CHECK (state IN ('open', 'ready', 'assigned', 'in_gates', 'done')),
              choice     TEXT NOT NULL DEFAULT 'smart' CHECK (choice IN ('smart', 'fast', 'free', 'private')),
              depth      INTEGER NOT NULL DEFAULT 1, -- 1 filed by a person or chat, 2 by that task's run, ...
-             when_done  TEXT NOT NULL DEFAULT 'inbox' CHECK (when_done IN ('inbox', 'interrupt')),
-                                                 -- how its result reaches the run that filed it
+             report_when TEXT NOT NULL DEFAULT 'after_turn', -- when its result joins the run that filed it
              priority   INTEGER NOT NULL DEFAULT 1, -- 0 low, 1 normal, 2 high, 3 urgent
              due        TEXT,                     -- YYYY-MM-DD
              tags       TEXT NOT NULL DEFAULT '[]', -- JSON array of strings

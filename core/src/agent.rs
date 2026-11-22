@@ -122,9 +122,8 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 show(&mut shown, on)?;
                 return Ok(Outcome::Ended);
             }
-            if lease.drain(db)? > 0 {
-                chain = db.chain(conv)?;
-            }
+            lease.drain(db)?;
+            chain = db.chain(conv)?;
         }
         show(&mut shown, on)?;
         match next_step(&chain) {
@@ -343,21 +342,28 @@ mod tests {
         Ok(())
     }
 
-    /// While a turn runs, a steer joins between its replies; the inbox only when it would end.
+    /// While a turn runs, next-step and inbox entries join between its replies,
+    /// after-turn ones only when it would end; an inbox entry never keeps a turn going.
     #[test]
-    fn a_steer_joins_at_once_and_the_inbox_when_the_turn_would_end() -> Result<()> {
-        let db = Journal::open(&scratch("deliver"))?;
+    fn each_timing_joins_a_running_turn_where_it_says() -> Result<()> {
+        let db = Journal::open(&scratch("timing"))?;
         let lease = Lease::take(&db, "c", "m")?.unwrap();
         let said = |text: &str| json!({ "text": text });
-        assert!(!turn::deliver(db.conn(), "c", "report", &said("later"), turn::Delivery::Inbox)?);
-        assert!(!turn::deliver(db.conn(), "c", "report", &said("now"), turn::Delivery::Steer)?);
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("later"), turn::Delivery::AfterTurn)?);
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("now"), turn::Delivery::NextStep)?);
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("fyi"), turn::Delivery::Inbox)?);
         assert!(turn::queued(db.conn(), "c")?.is_empty(), "reports are not the user's messages");
-        assert_eq!(lease.drain(&db)?, 1);
-        assert_eq!(db.chain("c")?.iter().map(|e| e.body["text"].as_str().unwrap()).collect::<Vec<_>>(), ["now"]);
+        // An inbox note to a turn that would end does not keep it going.
+        let mut quiet = Lease::take(&db, "q", "m")?.unwrap();
+        turn::deliver(db.conn(), "q", "report", &said("note"), turn::Delivery::Inbox)?;
+        assert!(quiet.release(&db, false)?, "ended");
+        assert_eq!(kinds(&db, "q"), ["report"], "and the note is in the journal");
+        assert_eq!(lease.drain(&db)?, 1, "the inbox one joins too, but asks for no answer");
+        assert_eq!(db.chain("c")?.iter().map(|e| e.body["text"].as_str().unwrap()).collect::<Vec<_>>(), ["now", "fyi"]);
         assert_eq!(lease.drain_all(&db)?, 1);
-        assert_eq!(kinds(&db, "c"), ["report", "report"]);
+        assert_eq!(kinds(&db, "c"), ["report", "report", "report"]);
         drop(lease);
-        assert!(turn::deliver(db.conn(), "c", "report", &said("idle"), turn::Delivery::Inbox)?, "no turn: straight in");
+        assert!(turn::deliver(db.conn(), "c", "report", &said("idle"), turn::Delivery::AfterTurn)?, "no turn: straight in");
         Ok(())
     }
 

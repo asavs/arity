@@ -10,7 +10,7 @@
 //! A run that hands part of its task on and stops waits, holding no lease, and
 //! is taken up again when its sub-tasks have reported: each result is delivered
 //! to its conversation like any message, as a steer if its turn is running and
-//! the sub-task asked to interrupt, else into its inbox. A run that stops
+//! joining when the sub-task asked (`report_when`: after its turn by default). A run that stops
 //! without finishing is ended unscored and its task picked again.
 //!
 //! A run whose model cannot be reached (signed out, key gone, server down) is
@@ -214,28 +214,30 @@ fn claim(c: &Connection, data_dir: &Path, reachable: &[Candidate]) -> Result<Opt
 /// Pass on a finished result. It already waits in the task's own thread for a
 /// rating. A task an agent's run filed goes back to that run, which rates it if
 /// it is on a different model than the one that did it, and is woken if it was
-/// waiting and asked to be interrupted (or `wake_settled` finds nothing else
-/// out). A run that has already finished gets the result too, but the rating
-/// is left to the user. A task filed in a chat leaves the chat a note, as plain
-/// information, and wakes nothing.
+/// waiting and asked to hear before its turn would end (or `wake_settled`
+/// finds nothing else out). A run that has already finished gets the result
+/// too, but the rating is left to the user. A task filed in a chat leaves the
+/// chat a note in its inbox: plain information, read on its next turn, waking
+/// nothing.
 fn deliver_report(db: &Journal) -> Result<Option<Did>> {
     db.immediate(|c| {
         let row: Option<(i64, i64, String, String, Option<String>, String, String, String)> = c
             .query_row(
-                "SELECT tr.id, t.id, t.title, t.created_by, t.origin, ifnull(tr.result, ''), tr.model, t.when_done
+                "SELECT tr.id, t.id, t.title, t.created_by, t.origin, ifnull(tr.result, ''), tr.model, t.report_when
                  FROM trials tr JOIN tasks t ON t.id = tr.task
                  WHERE tr.ended IS NOT NULL AND tr.reported = 0 ORDER BY tr.id LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .optional()?;
-        let Some((trial, task, title, created_by, origin, result, model, when_done)) = row else { return Ok(None) };
+        let Some((trial, task, title, created_by, origin, result, model, report_when)) = row else { return Ok(None) };
         c.execute("UPDATE trials SET reported = 1 WHERE id = ?1", params![trial])?;
         let said = |ask: &str| format!("Task {task}, \"{title}\", is finished. The result:\n\n{result}{ask}");
         let body = |text: String| json!({ "text": text, "task": task, "trial": trial });
         let Some(parent) = created_by.strip_prefix("conversations/") else {
+            // A note for the chat, read on its next turn: it asks the chat's model for nothing.
             if let Some(chat) = &origin {
-                insert(c, chat, "report", &body(said("")), None)?;
+                turn::deliver(c, chat, "report", &body(said("")), Delivery::Inbox)?;
             }
             return Ok(Some(Did::Reported { task, rater: None }));
         };
@@ -249,10 +251,10 @@ fn deliver_report(db: &Journal) -> Result<Option<Did>> {
             .optional()?;
         let rates = run.as_ref().is_some_and(|(_, m, _)| *m != model);
         let ask = if rates { format!("\n\nRate it with the rate tool: task {task}, a score from 1 to 5, and a short note.") } else { String::new() };
-        let interrupt = when_done == "interrupt";
-        let how = if interrupt { Delivery::Steer } else { Delivery::Inbox };
+        let how = Delivery::parse(&report_when).unwrap_or(Delivery::AfterTurn);
         turn::deliver(c, parent, "report", &body(said(&ask)), how)?;
-        if let (Some((parent_trial, _, true)), true) = (run, interrupt) {
+        // A waiting run asked to hear at once is woken; otherwise when nothing is left out.
+        if let (Some((parent_trial, _, true)), true) = (run, how != Delivery::AfterTurn) {
             c.execute("UPDATE trials SET waiting = 0, lease_until = 0 WHERE id = ?1", params![parent_trial])?;
         }
         Ok(Some(Did::Reported { task, rater: rates.then(|| parent.to_string()) }))
@@ -433,11 +435,11 @@ mod tests {
         let half = |t: &str| TaskFields { title: t.into(), assignee: board::AGENT.into(), ..Default::default() };
         board::add_task(c, &half("first half"), Some("task-3"))?;
         board::add_task(c, &half("second half"), Some("task-3"))?;
-        c.execute("UPDATE tasks SET when_done = 'interrupt' WHERE id = 4", [])?;
+        c.execute("UPDATE tasks SET report_when = 'next_step' WHERE id = 4", [])?;
         c.execute("INSERT INTO trials (task, conversation, model, ended, result) VALUES (4, 'task-4', 'b', datetime('now'), 'half')", [])?;
         deliver_report(&db)?;
         let waiting: bool = c.query_row("SELECT waiting FROM trials WHERE conversation = 'task-3'", [], |r| r.get(0))?;
-        assert!(!waiting, "woken by the interrupt while task 5 is still out");
+        assert!(!waiting, "woken at once while task 5 is still out");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

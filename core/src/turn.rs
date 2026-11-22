@@ -7,10 +7,10 @@
 //! many times a second from a thread of its own, so a lease whose process died runs
 //! out in a few seconds and the next sender takes over. A message sent while
 //! the lease is held waits in `queued`, so two loops never run on one
-//! conversation. The sender says how it joins: a steer between the turn's
-//! replies, as soon as it can; the inbox only when the turn would end. A
+//! conversation. The sender says when it joins (see `Delivery`); a
 //! conversation with no turn running gets it in the journal at once. The user's
-//! messages and an agent's reports from its sub-tasks go through the same door.
+//! messages, an agent's reports from its sub-tasks and notes alike go through
+//! this one door, `deliver`.
 //!
 //! The journal still records only finished entries; this table is cleared in
 //! the same transaction that commits the reply.
@@ -45,7 +45,7 @@ pub const TABLES: &str = "
         text         TEXT NOT NULL,
         kind         TEXT NOT NULL DEFAULT 'user',  -- the entry it becomes: user, or report
         body         TEXT,                          -- that entry's JSON body; NULL means {\"text\": text}
-        mode         TEXT NOT NULL DEFAULT 'steer'  -- steer or inbox
+        mode         TEXT NOT NULL DEFAULT 'next_step' -- see Delivery
     );";
 
 /// Bring a `queued` table from before deliveries had a kind and a mode up to date.
@@ -56,27 +56,46 @@ pub fn migrate(c: &Connection) -> Result<()> {
         c.execute_batch(
             "ALTER TABLE queued ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
              ALTER TABLE queued ADD COLUMN body TEXT;
-             ALTER TABLE queued ADD COLUMN mode TEXT NOT NULL DEFAULT 'steer';",
+             ALTER TABLE queued ADD COLUMN mode TEXT NOT NULL DEFAULT 'next_step';",
         )?;
     }
+    // Earlier names for the same timings.
+    c.execute_batch("UPDATE queued SET mode = 'next_step' WHERE mode = 'steer'")?;
     Ok(())
 }
 
-/// How a message joins a conversation whose turn is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// When something delivered to a conversation joins a turn running there. With
+/// no turn running it goes into the journal at once, whatever the timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Delivery {
-    /// Between the turn's replies, as soon as it can: the turn takes it into the work in hand.
-    Steer,
+    /// Between the turn's replies (never between a reply's tool calls and
+    /// their results): the turn takes it into the work in hand.
+    NextStep,
     /// When the turn would end: the turn answers it then, instead of ending.
+    AfterTurn,
+    /// Read when the recipient is next ready: it asks for no answer, so it
+    /// never keeps a turn going or wakes anyone. A running turn takes it in at
+    /// the next step as context; an idle conversation has it there for its
+    /// next turn. Work to be done is a task on the board, not this.
     Inbox,
 }
 
 impl Delivery {
     pub fn name(self) -> &'static str {
         match self {
-            Delivery::Steer => "steer",
+            Delivery::NextStep => "next_step",
+            Delivery::AfterTurn => "after_turn",
             Delivery::Inbox => "inbox",
         }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "next_step" => Delivery::NextStep,
+            "after_turn" => Delivery::AfterTurn,
+            "inbox" => Delivery::Inbox,
+            _ => return None,
+        })
     }
 }
 
@@ -137,13 +156,15 @@ impl Lease {
         Ok(Some(Lease { conv: conv.into(), owner, path, live, done, beat: Some(beat), released: false }))
     }
 
-    /// Move steers sent during the turn into the journal. Only between replies,
-    /// never between a reply's tool calls and their results.
+    /// Take in what may join between replies. Only between replies, never
+    /// between a reply's tool calls and their results. Returns how many of
+    /// them ask for an answer.
     pub fn drain(&self, db: &Journal) -> Result<usize> {
         db.immediate(|c| drain(c, &self.conv, false))
     }
 
-    /// Move everything waiting into the journal, the inbox too: the turn would end otherwise.
+    /// Take in everything waiting, what waits for the end of the turn too: the
+    /// turn would end otherwise. Returns how many ask for an answer.
     pub fn drain_all(&self, db: &Journal) -> Result<usize> {
         db.immediate(|c| drain(c, &self.conv, true))
     }
@@ -228,24 +249,26 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
     }
 }
 
-/// Move what waits for `conv` into the journal, oldest first: steers only, or the inbox too.
+/// Move what waits for `conv` into the journal, oldest first: what may join
+/// between replies, or everything when `all`. Returns how many ask for an answer.
 fn drain(c: &Connection, conv: &str, all: bool) -> Result<usize> {
     let mut stmt = c.prepare(
-        "SELECT id, text, kind, body FROM queued WHERE conversation = ?1 AND (?2 OR mode = 'steer') ORDER BY id",
+        "SELECT id, text, kind, body, mode FROM queued
+         WHERE conversation = ?1 AND (?2 OR mode != 'after_turn') ORDER BY id",
     )?;
-    let waiting: Vec<(i64, String, String, Option<String>)> = stmt
-        .query_map(params![conv, all], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let waiting: Vec<(i64, String, String, Option<String>, String)> = stmt
+        .query_map(params![conv, all], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    for (id, text, kind, body) in &waiting {
+    for (id, text, kind, body, _) in &waiting {
         let body = body.as_deref().and_then(|b| serde_json::from_str(b).ok()).unwrap_or_else(|| json!({ "text": text }));
         insert(c, conv, kind, &body, None)?;
         c.execute("DELETE FROM queued WHERE id = ?1", params![id])?;
     }
-    Ok(waiting.len())
+    Ok(waiting.iter().filter(|w| w.4 != Delivery::Inbox.name()).count())
 }
 
 /// Deliver an entry to `conv`: into the journal at once when no turn is
-/// running there, otherwise to the running turn, as a steer or into its inbox.
+/// running there, otherwise to the running turn, joining it when `how` says.
 /// Returns true if it went straight into the journal.
 pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delivery) -> Result<bool> {
     let running: bool = c.query_row(
@@ -268,7 +291,12 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
 
 /// The user's message. A running turn takes it between replies.
 pub fn send(db: &Journal, conv: &str, text: &str) -> Result<()> {
-    db.immediate(|c| deliver(c, conv, "user", &json!({ "text": text }), Delivery::Steer).map(|_| ()))
+    send_as(db, conv, text, Delivery::NextStep)
+}
+
+/// The user's message, joining a running turn when `how` says.
+pub fn send_as(db: &Journal, conv: &str, text: &str, how: Delivery) -> Result<()> {
+    db.immediate(|c| deliver(c, conv, "user", &json!({ "text": text }), how).map(|_| ()))
 }
 
 /// Ask the turn running in `conv` to stop, from any process. False if none is running.
