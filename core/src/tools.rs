@@ -151,10 +151,11 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                 let mut props = field_schema();
                 props["assignee"] = json!({"type": "string", "description": "Leave it out to hand the task to an agent. \
                     \"user\" puts it on the user's own list instead."});
-                props["when_done"] = json!({"type": "string", "enum": ["after_turn", "next_step"], "description": "When \
-                    its result reaches you if you are still working: \"after_turn\" (the default) when you next stop, \
-                    \"next_step\" as soon as you finish the step you are on. If you have stopped to wait, \"next_step\" \
-                    wakes you for each result, \"after_turn\" once all your sub-tasks have reported."});
+                props["when_done"] = json!({"type": "string", "enum": ["after_turn", "next_step", "now"],
+                    "description": "When its result reaches you if you are still working: \"after_turn\" (the default) when you next \
+                    stop, \"next_step\" when you finish the step you are on, \"now\" at once, cutting off what you \
+                    are writing. If you have stopped to wait, \"next_step\" and \"now\" wake you for each result, \
+                    \"after_turn\" once all your sub-tasks have reported."});
                 ToolSpec {
                     name: "add_task",
                     description: "Hand part of your task to another agent, one level down. It knows nothing but the \
@@ -236,7 +237,7 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 f.merge(&args)?;
                 let id = board::add_task(db, &f, Some(conv))?;
                 let when = args["when_done"].as_str().and_then(turn::Delivery::parse);
-                if let (Caller::Run, Some(when @ (turn::Delivery::NextStep | turn::Delivery::AfterTurn))) = (caller, when) {
+                if let (Caller::Run, Some(when @ (turn::Delivery::Now | turn::Delivery::NextStep | turn::Delivery::AfterTurn))) = (caller, when) {
                     db.execute("UPDATE tasks SET report_when = ?2 WHERE id = ?1", rusqlite::params![id, when.name()])?;
                 }
                 Ok(match (f.assignee == AGENT, worker) {

@@ -117,7 +117,9 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
         let mut chain = db.chain(conv)?;
         // Between replies, never between a reply's tool calls: stop, or take what was sent meanwhile.
         if matches!(next_step(&chain), Step::CallModel | Step::Done) {
-            if lease.live.stopped() {
+            if lease.live.cut_for_now() {
+                lease.go_on(db)?;
+            } else if lease.live.stopped() {
                 lease.release(db, true)?;
                 show(&mut shown, on)?;
                 return Ok(Outcome::Ended);
@@ -148,12 +150,17 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                     !live.stopped()
                 };
                 let reply = complete(&system, &crate::draft::collapse_edits(&chain), &tools::specs(tools::caller(db.conn(), conv)?, can_rate), &mut out)?;
-                lease.commit(db, &reply.to_json(), spec)?;
+                let mut body = reply.to_json();
+                if reply.interrupted && lease.live.cut_for_now() {
+                    body["cut_for_message"] = json!(true);
+                }
+                lease.commit(db, &body, spec)?;
                 // Chats only: a run's speed would hint at its model before it is rated.
                 if let (false, false, Some((ttft, tps))) = (worker, reply.interrupted, clock.finish()) {
                     crate::leaderboard::record_speed(db.conn(), spec, ttft, tps)?;
                 }
-                if reply.interrupted {
+                // Cut for a message sent now: the top of the loop takes it in and goes on.
+                if reply.interrupted && !lease.live.cut_for_now() {
                     lease.release(db, true)?;
                     show(&mut shown, on)?;
                     return Ok(Outcome::Ended);
@@ -451,6 +458,43 @@ mod tests {
         let roles: Vec<Value> = crate::model::chat_messages("s", &db.chain("c")?).iter().map(|m| m["role"].clone()).collect();
         assert_eq!(roles, ["system", "user", "assistant", "user", "assistant"]);
         assert!(crate::model::codex_input(&db.chain("c")?).iter().all(|i| i["type"] != "function_call"));
+        Ok(())
+    }
+
+    /// A message sent now cuts the reply being written; the turn keeps its
+    /// text, takes the message in, and goes on, holding its lease throughout.
+    #[test]
+    fn a_message_sent_now_cuts_the_reply_and_the_turn_goes_on() -> Result<()> {
+        let path = scratch("now");
+        let db = Journal::open(&path)?;
+        turn::send(&db, "c", "write a long story")?;
+        let turn = std::thread::spawn({
+            let path = path.clone();
+            move || -> Result<Outcome> {
+                let db = Journal::open(&path)?;
+                let model = |_: &str, chain: &[Entry], _: &[ToolSpec], out: &mut Sink| {
+                    if chain.last().unwrap().body["text"] == "make it short" {
+                        return Ok(says("Short."));
+                    }
+                    out("Once upon");
+                    while out("") {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true })
+                };
+                run_with(&db, "c", "test:m", &model, &mut |_| {})
+            }
+        });
+        until("the reply to start", || turn::partial(db.conn(), "c").unwrap().is_some());
+        turn::send_as(&db, "c", "make it short", turn::Delivery::Now)?;
+        assert_eq!(turn.join().unwrap()?, Outcome::Ended);
+        assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant"]);
+        let chain = db.chain("c")?;
+        assert_eq!((chain[1].body["text"].clone(), chain[1].body["cut_for_message"].clone()), (json!("Once upon"), json!(true)));
+        assert_eq!(chain[3].body["text"], "Short.");
+        assert!(messages_of(&chain[1]).iter().any(|m| m.text == "Cut off by a new message."));
+        assert!(turn::running(db.conn())?.is_empty());
+        // Stop still ends the turn, and a message sent now while stopping does not undo it.
         Ok(())
     }
 

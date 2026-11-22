@@ -679,7 +679,8 @@ pub(crate) fn messages_of(e: &Entry) -> Vec<Message> {
                 out.push(msg(i + 1, MessageKind::ToolCall, format!("{}({})", c.name, c.arguments)));
             }
             if e.body["interrupted"] == true {
-                out.push(Message { model: None, ..msg(1, MessageKind::Notice, "Stopped.".into()) });
+                let why = if e.body["cut_for_message"] == true { "Cut off by a new message." } else { "Stopped." };
+                out.push(Message { model: None, ..msg(1, MessageKind::Notice, why.into()) });
             }
             out
         }

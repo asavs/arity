@@ -55,22 +55,21 @@ impl Journal {
 
     /// Append one entry under the conversation's head and move the head, atomically.
     pub fn append(&self, conv: &str, kind: &str, body: &Value, model: Option<&str>) -> Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
-        let id = insert(&tx, conv, kind, body, model)?;
-        tx.commit()?;
-        Ok(id)
+        self.immediate(|c| insert(c, conv, kind, body, model))
     }
 
     /// Run a tool and record its result in one transaction. If the process dies
     /// before commit, neither the tool's effect on the board nor the entry exists,
     /// so a resume runs it again exactly once.
     pub fn run_tool(&self, conv: &str, model: &str, call: &ToolCall) -> Result<String> {
-        let tx = self.conn.unchecked_transaction()?;
-        let output = tools::execute(&tx, conv, model, &call.name, &call.arguments);
-        let body = serde_json::json!({ "call_id": call.id, "name": call.name, "output": output });
-        insert(&tx, conv, "tool", &body, None)?;
-        tx.commit()?;
-        Ok(output)
+        // Immediate, so the write lock is taken up front: a transaction that read
+        // first could not take it once the turn's heartbeat had written.
+        self.immediate(|c| {
+            let output = tools::execute(c, conv, model, &call.name, &call.arguments);
+            let body = serde_json::json!({ "call_id": call.id, "name": call.name, "output": output });
+            insert(c, conv, "tool", &body, None)?;
+            Ok(output)
+        })
     }
 
     /// The conversation's entries, oldest first, following parent links from the head.

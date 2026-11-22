@@ -36,7 +36,7 @@ pub const TABLES: &str = "
         model        TEXT,
         lease_until  INTEGER NOT NULL,
         partial      TEXT NOT NULL DEFAULT '',
-        stop         INTEGER NOT NULL DEFAULT 0,
+        stop         INTEGER NOT NULL DEFAULT 0, -- 1 stop the turn; 2 cut the reply for a message sent now
         seq          INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS queued (
@@ -68,6 +68,9 @@ pub fn migrate(c: &Connection) -> Result<()> {
 /// no turn running it goes into the journal at once, whatever the timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Delivery {
+    /// At once: the reply being written is cut off (its text so far kept),
+    /// and the turn takes it in and goes on.
+    Now,
     /// Between the turn's replies (never between a reply's tool calls and
     /// their results): the turn takes it into the work in hand.
     NextStep,
@@ -83,6 +86,7 @@ pub enum Delivery {
 impl Delivery {
     pub fn name(self) -> &'static str {
         match self {
+            Delivery::Now => "now",
             Delivery::NextStep => "next_step",
             Delivery::AfterTurn => "after_turn",
             Delivery::Inbox => "inbox",
@@ -91,6 +95,7 @@ impl Delivery {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "now" => Delivery::Now,
             "next_step" => Delivery::NextStep,
             "after_turn" => Delivery::AfterTurn,
             "inbox" => Delivery::Inbox,
@@ -104,14 +109,21 @@ impl Delivery {
 pub struct Live {
     text: Mutex<String>,
     stop: AtomicBool,
+    /// The stop is for a message sent now: the turn goes on after it.
+    now: AtomicBool,
 }
 
 impl Live {
     pub fn push(&self, s: &str) {
         self.text.lock().unwrap().push_str(s);
     }
+    /// Whether the reply should be cut off: the turn was stopped, or a message was sent now.
     pub fn stopped(&self) -> bool {
         self.stop.load(Relaxed)
+    }
+    /// Whether that cut is for a message sent now, so the turn goes on.
+    pub fn cut_for_now(&self) -> bool {
+        self.now.load(Relaxed)
     }
 }
 
@@ -167,6 +179,19 @@ impl Lease {
     /// turn would end otherwise. Returns how many ask for an answer.
     pub fn drain_all(&self, db: &Journal) -> Result<usize> {
         db.immediate(|c| drain(c, &self.conv, true))
+    }
+
+    /// Go on after a cut for a message sent now: clear the flag here and in the
+    /// row. Holds the text lock, which the heartbeat takes before reading the
+    /// row, so it cannot set the flag again from a read made before the clear.
+    pub fn go_on(&self, db: &Journal) -> Result<()> {
+        let _text = self.live.text.lock().unwrap();
+        db.conn().execute("UPDATE turns SET stop = 0 WHERE conversation = ?1 AND owner = ?2 AND stop = 2", params![
+            self.conv, self.owner
+        ])?;
+        self.live.now.store(false, Relaxed);
+        self.live.stop.store(false, Relaxed);
+        Ok(())
     }
 
     /// Append the finished reply and clear the text so far, in one transaction,
@@ -233,7 +258,7 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
     while !done.load(Relaxed) {
         {
             let text = live.text.lock().unwrap();
-            let stop: rusqlite::Result<Option<bool>> = c
+            let stop: rusqlite::Result<Option<i64>> = c
                 .query_row(
                     "UPDATE turns SET seq = seq + (partial IS NOT ?1), partial = ?1, lease_until = ?2
                      WHERE conversation = ?3 AND owner = ?4 RETURNING stop",
@@ -241,8 +266,16 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
                     |r| r.get(0),
                 )
                 .optional();
-            if matches!(stop, Ok(Some(true) | None)) {
-                live.stop.store(true, Relaxed);
+            match stop {
+                Ok(Some(2)) => {
+                    live.now.store(true, Relaxed);
+                    live.stop.store(true, Relaxed);
+                }
+                Ok(Some(1) | None) => {
+                    live.now.store(false, Relaxed);
+                    live.stop.store(true, Relaxed);
+                }
+                _ => {}
             }
         }
         std::thread::sleep(BEAT);
@@ -282,6 +315,10 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
             "INSERT INTO queued (conversation, text, kind, body, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![conv, text, kind, body.to_string(), how.name()],
         )?;
+        if how == Delivery::Now {
+            // Cut the reply in progress, unless the turn is being stopped anyway.
+            c.execute("UPDATE turns SET stop = 2, seq = seq + 1 WHERE conversation = ?1 AND stop = 0", params![conv])?;
+        }
         return Ok(false);
     }
     drain(c, conv, true)?;
