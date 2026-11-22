@@ -339,13 +339,14 @@ impl Arity {
         let db = self.journal()?;
         let mut conversations = db.conversations()?;
         let mut out = Vec::new();
-        for t in board::tasks(db.conn())? {
+        // A run's own todos are its scratchpad, shown in its thread rather than listed.
+        for t in board::tasks(db.conn())?.into_iter().filter(|t| !t.fields.assignee.starts_with("conversations/")) {
             let name = t.conversation.clone().unwrap_or_else(|| format!("task-{}", t.id));
             let updated = conversations.iter().find(|c| c.0 == name).map_or(&t.created, |c| &c.1).clone();
             let group = match (t.state, t.run_state) {
                 (TaskState::Done, _) => ThreadGroup::Done,
                 (_, Some(RunState::NeedsRating)) => ThreadGroup::NeedsYou,
-                (_, Some(RunState::Running | RunState::Failing)) => ThreadGroup::Running,
+                (_, Some(RunState::Running | RunState::Failing | RunState::Waiting)) => ThreadGroup::Running,
                 _ => ThreadGroup::Open,
             };
             out.push(Thread { name, title: t.fields.title.clone(), group, updated, task: Some(t.into()), card: None });
@@ -563,7 +564,7 @@ impl Arity {
             Event::Message(m) if hidden => on(Event::Message(&Message { model: None, ..m.clone() })),
             e => on(e),
         };
-        Ok(agent::run(&db, &self.dir, conv, model, &mut masked)?)
+        Ok(agent::run(&db, &self.dir, conv, model, &mut masked)? != agent::Outcome::Busy)
     }
 
     fn standings(&self, candidates: &[leaderboard::Candidate]) -> Result<Vec<Standing>> {

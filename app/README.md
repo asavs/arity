@@ -22,3 +22,6 @@ Development aids: `ARITY_SNAPSHOT=/path/shot.png` makes the app save a PNG of
 its window every two seconds; `ARITY_OPEN=<conversation>` selects one at launch.
 Run the binary directly to pass them:
 `ARITY_SNAPSHOT=/tmp/a.png app/build/Arity.app/Contents/MacOS/Arity`.
+If your own Arity is already open, add `-ApplePersistenceIgnoreState YES` after
+the binary (and point `ARITY_HOME` at a scratch folder), so the second copy
+neither restores nor overwrites the first one's windows.

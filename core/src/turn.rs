@@ -6,8 +6,11 @@
 //! The row is a lease. A loop takes it before its first step and renews it
 //! many times a second from a thread of its own, so a lease whose process died runs
 //! out in a few seconds and the next sender takes over. A message sent while
-//! the lease is held waits in `queued` and is moved into the journal between
-//! replies, so two loops never run on one conversation.
+//! the lease is held waits in `queued`, so two loops never run on one
+//! conversation. The sender says how it joins: a steer between the turn's
+//! replies, as soon as it can; the inbox only when the turn would end. A
+//! conversation with no turn running gets it in the journal at once. The user's
+//! messages and an agent's reports from its sub-tasks go through the same door.
 //!
 //! The journal still records only finished entries; this table is cleared in
 //! the same transaction that commits the reply.
@@ -39,8 +42,43 @@ pub const TABLES: &str = "
     CREATE TABLE IF NOT EXISTS queued (
         id           INTEGER PRIMARY KEY,
         conversation TEXT NOT NULL,
-        text         TEXT NOT NULL
+        text         TEXT NOT NULL,
+        kind         TEXT NOT NULL DEFAULT 'user',  -- the entry it becomes: user, or report
+        body         TEXT,                          -- that entry's JSON body; NULL means {\"text\": text}
+        mode         TEXT NOT NULL DEFAULT 'steer'  -- steer or inbox
     );";
+
+/// Bring a `queued` table from before deliveries had a kind and a mode up to date.
+pub fn migrate(c: &Connection) -> Result<()> {
+    let mut stmt = c.prepare("SELECT name FROM pragma_table_info('queued')")?;
+    let cols: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    if !cols.iter().any(|c| c == "mode") {
+        c.execute_batch(
+            "ALTER TABLE queued ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
+             ALTER TABLE queued ADD COLUMN body TEXT;
+             ALTER TABLE queued ADD COLUMN mode TEXT NOT NULL DEFAULT 'steer';",
+        )?;
+    }
+    Ok(())
+}
+
+/// How a message joins a conversation whose turn is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Between the turn's replies, as soon as it can: the turn takes it into the work in hand.
+    Steer,
+    /// When the turn would end: the turn answers it then, instead of ending.
+    Inbox,
+}
+
+impl Delivery {
+    pub fn name(self) -> &'static str {
+        match self {
+            Delivery::Steer => "steer",
+            Delivery::Inbox => "inbox",
+        }
+    }
+}
 
 /// What the loop and its heartbeat share: the text so far, and the stop flag.
 #[derive(Default)]
@@ -99,10 +137,15 @@ impl Lease {
         Ok(Some(Lease { conv: conv.into(), owner, path, live, done, beat: Some(beat), released: false }))
     }
 
-    /// Move messages sent during the turn into the journal. Only between replies,
+    /// Move steers sent during the turn into the journal. Only between replies,
     /// never between a reply's tool calls and their results.
     pub fn drain(&self, db: &Journal) -> Result<usize> {
-        db.immediate(|c| drain(c, &self.conv))
+        db.immediate(|c| drain(c, &self.conv, false))
+    }
+
+    /// Move everything waiting into the journal, the inbox too: the turn would end otherwise.
+    pub fn drain_all(&self, db: &Journal) -> Result<usize> {
+        db.immediate(|c| drain(c, &self.conv, true))
     }
 
     /// Append the finished reply and clear the text so far, in one transaction,
@@ -124,7 +167,7 @@ impl Lease {
     /// what was queued stays in the journal for the next turn.
     pub fn release(&mut self, db: &Journal, stopped: bool) -> Result<bool> {
         let end = db.immediate(|c| {
-            if drain(c, &self.conv)? > 0 && !stopped {
+            if drain(c, &self.conv, true)? > 0 && !stopped {
                 return Ok(false);
             }
             c.execute("DELETE FROM turns WHERE conversation = ?1 AND owner = ?2", params![self.conv, self.owner])?;
@@ -145,7 +188,7 @@ impl Drop for Lease {
         if !self.released {
             if let Ok(c) = open(&self.path) {
                 let _ = c.execute_batch("BEGIN IMMEDIATE");
-                let _ = drain(&c, &self.conv);
+                let _ = drain(&c, &self.conv, true);
                 let _ = c.execute("DELETE FROM turns WHERE conversation = ?1 AND owner = ?2", params![
                     self.conv, self.owner
                 ]);
@@ -185,33 +228,47 @@ fn heartbeat(path: &str, conv: &str, owner: &str, live: &Live, done: &AtomicBool
     }
 }
 
-fn drain(c: &Connection, conv: &str) -> Result<usize> {
-    let mut stmt = c.prepare("SELECT id, text FROM queued WHERE conversation = ?1 ORDER BY id")?;
-    let waiting: Vec<(i64, String)> = stmt.query_map(params![conv], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-    for (id, text) in &waiting {
-        insert(c, conv, "user", &json!({ "text": text }), None)?;
+/// Move what waits for `conv` into the journal, oldest first: steers only, or the inbox too.
+fn drain(c: &Connection, conv: &str, all: bool) -> Result<usize> {
+    let mut stmt = c.prepare(
+        "SELECT id, text, kind, body FROM queued WHERE conversation = ?1 AND (?2 OR mode = 'steer') ORDER BY id",
+    )?;
+    let waiting: Vec<(i64, String, String, Option<String>)> = stmt
+        .query_map(params![conv, all], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, text, kind, body) in &waiting {
+        let body = body.as_deref().and_then(|b| serde_json::from_str(b).ok()).unwrap_or_else(|| json!({ "text": text }));
+        insert(c, conv, kind, &body, None)?;
         c.execute("DELETE FROM queued WHERE id = ?1", params![id])?;
     }
     Ok(waiting.len())
 }
 
-/// The user's message. Goes straight into the journal when no turn is running,
-/// otherwise waits for the running turn to take it between replies.
-pub fn send(db: &Journal, conv: &str, text: &str) -> Result<()> {
-    db.immediate(|c| {
-        let running: bool = c.query_row(
-            "SELECT count(*) > 0 FROM turns WHERE conversation = ?1 AND lease_until >= ?2",
-            params![conv, now()],
-            |r| r.get(0),
+/// Deliver an entry to `conv`: into the journal at once when no turn is
+/// running there, otherwise to the running turn, as a steer or into its inbox.
+/// Returns true if it went straight into the journal.
+pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delivery) -> Result<bool> {
+    let running: bool = c.query_row(
+        "SELECT count(*) > 0 FROM turns WHERE conversation = ?1 AND lease_until >= ?2",
+        params![conv, now()],
+        |r| r.get(0),
+    )?;
+    if running {
+        let text = body["text"].as_str().unwrap_or_default();
+        c.execute(
+            "INSERT INTO queued (conversation, text, kind, body, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![conv, text, kind, body.to_string(), how.name()],
         )?;
-        if running {
-            c.execute("INSERT INTO queued (conversation, text) VALUES (?1, ?2)", params![conv, text])?;
-        } else {
-            drain(c, conv)?;
-            insert(c, conv, "user", &json!({ "text": text }), None)?;
-        }
-        Ok(())
-    })
+        return Ok(false);
+    }
+    drain(c, conv, true)?;
+    insert(c, conv, kind, body, None)?;
+    Ok(true)
+}
+
+/// The user's message. A running turn takes it between replies.
+pub fn send(db: &Journal, conv: &str, text: &str) -> Result<()> {
+    db.immediate(|c| deliver(c, conv, "user", &json!({ "text": text }), Delivery::Steer).map(|_| ()))
 }
 
 /// Ask the turn running in `conv` to stop, from any process. False if none is running.
@@ -245,8 +302,8 @@ pub fn model(c: &Connection, conv: &str) -> Result<Option<String>> {
         .flatten())
 }
 
-/// Messages waiting for the running turn, oldest first.
+/// The user's messages waiting for the running turn, oldest first.
 pub fn queued(c: &Connection, conv: &str) -> Result<Vec<(i64, String)>> {
-    let mut stmt = c.prepare("SELECT id, text FROM queued WHERE conversation = ?1 ORDER BY id")?;
+    let mut stmt = c.prepare("SELECT id, text FROM queued WHERE conversation = ?1 AND kind = 'user' ORDER BY id")?;
     Ok(stmt.query_map(params![conv], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
 }

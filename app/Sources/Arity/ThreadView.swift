@@ -186,6 +186,7 @@ private struct TaskDock: View {
             switch task.runState {
             case nil: card
             case .running?: Label("An agent is on it", systemImage: "sparkles").foregroundStyle(.secondary)
+            case .waiting?: Label("Waiting on its sub-tasks", systemImage: "hourglass").foregroundStyle(.secondary)
             case .failing?:
                 Label(task.error ?? "The last attempt failed", systemImage: "exclamationmark.arrow.circlepath")
                     .foregroundStyle(.orange).textSelection(.enabled)

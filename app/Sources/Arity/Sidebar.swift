@@ -63,6 +63,7 @@ private struct ThreadRow: View {
         } else if let task = thread.task {
             switch (task.state, task.runState) {
             case (_, .running?): ProgressView().controlSize(.mini)
+            case (_, .waiting?): Image(systemName: "hourglass").foregroundStyle(.secondary).help("Waiting on its sub-tasks")
             case (_, .failing?): Image(systemName: "exclamationmark.arrow.circlepath").foregroundStyle(.orange)
             case (.done, _): Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             case (_, .needsRating?): Image(systemName: "star.leadinghalf.filled").foregroundStyle(.yellow)
@@ -86,6 +87,7 @@ func details(_ task: BoardTask, me: String) -> String {
         parts.append("An agent")
         switch task.runState {
         case .running?: parts.append("running")
+        case .waiting?: parts.append("waiting on sub-tasks")
         case .failing?: parts.append("retrying")
         case .needsRating? where task.state != .done: parts.append("needs rating")
         default: break

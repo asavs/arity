@@ -1,6 +1,11 @@
 //! The loop: call the model, run the tools it asks for, repeat until it answers
 //! without calling a tool. Each step is decided purely from the journal, so a
 //! fresh process after a crash makes the same decision the dead one would have.
+//!
+//! A chat ends when the model answers without a tool. A run ends only when it
+//! calls `finish`: answering without a tool hands nothing in. With sub-tasks
+//! still out it waits to be woken by their results; otherwise it is reminded,
+//! and after a few reminders it ends unfinished.
 
 use std::path::Path;
 use std::time::Instant;
@@ -32,30 +37,50 @@ user asks; they add it to the board themselves. Use add_task only when they ask 
 Be brief.";
 
 const WORKER: &str = "You are an agent inside Arity, doing one task from a shared board. The task was \
-handed to you: where it says an agent or someone else should do it, that means you. Do it yourself and \
-reply with the result. Your final message is your report, and it is all the person who \
-wrote the task will see, so make it complete. Be brief.";
+handed to you: where it says an agent or someone else should do it, that means you. Do the work, then call \
+finish with your report. The report is all the person who wrote the task will see, so make it complete: the \
+outcome first, then what they need to use it. Ending your turn without finish hands nothing in. Be brief.";
 
-const MAX_STEPS: usize = 16;
-/// How many times a conversation is reminded to rate before it is let through.
-const MAX_NUDGES: usize = 3;
+const MAX_STEPS: usize = 24;
+/// How many times a run that stops without calling finish is reminded before it ends unfinished.
+const MAX_NUDGES: usize = 2;
+
+/// How a call to `run` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Another loop holds the conversation; nothing was done.
+    Busy,
+    /// A chat's turn ended, or someone stopped the turn.
+    Ended,
+    /// A run called finish; this is its report.
+    Finished(String),
+    /// A run stopped with sub-tasks out, to be woken by their results.
+    Waiting,
+    /// A run stopped without finishing, even after being reminded.
+    Unfinished,
+}
 
 enum Step {
     CallModel,
     RunTool(ToolCall),
     Done,
+    /// The run called finish and it was accepted; this is the report.
+    Finished(String),
 }
 
 fn next_step(chain: &[Entry]) -> Step {
     let Some(last) = chain.last() else { return Step::Done };
     if let Some(pos) = chain.iter().rposition(|e| e.kind == "assistant") {
-        let answered: Vec<&str> = chain[pos + 1..]
-            .iter()
-            .filter(|e| e.kind == "tool")
-            .filter_map(|e| e.body["call_id"].as_str())
-            .collect();
-        if let Some(call) = tool_calls_of(&chain[pos].body).into_iter().find(|c| !answered.contains(&c.id.as_str())) {
-            return Step::RunTool(call);
+        let results: Vec<&Entry> = chain[pos + 1..].iter().filter(|e| e.kind == "tool").collect();
+        let output = |id: &str| results.iter().find(|e| e.body["call_id"] == id).and_then(|e| e.body["output"].as_str());
+        let calls = tool_calls_of(&chain[pos].body);
+        if let Some(call) = calls.iter().find(|c| output(&c.id).is_none()) {
+            return Step::RunTool(call.clone());
+        }
+        let accepted = |c: &&ToolCall| c.name == "finish" && output(&c.id).is_some_and(|o| o.starts_with(tools::FINISHED));
+        if let Some(call) = calls.iter().find(accepted) {
+            let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+            return Step::Finished(args["report"].as_str().unwrap_or_default().trim().to_string());
         }
     }
     if last.kind == "assistant" { Step::Done } else { Step::CallModel }
@@ -65,17 +90,16 @@ fn next_step(chain: &[Entry]) -> Step {
 /// sink. A real model in `run`; a scripted one in tests.
 pub type Complete<'a> = dyn Fn(&str, &[Entry], &[ToolSpec], &mut Sink) -> Result<Reply> + 'a;
 
-/// Run the conversation until the model answers without calling a tool, it is
-/// stopped, or it runs out of steps. `on` sees the reply's text as it arrives
-/// and every message as it is written. Returns false, doing nothing, when a
-/// turn in another loop holds the conversation.
-pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn FnMut(Event)) -> Result<bool> {
+/// Run the conversation until its turn ends (see `Outcome`), it is stopped, or
+/// it runs out of steps. `on` sees the reply's text as it arrives and every
+/// message as it is written.
+pub fn run(db: &Journal, data_dir: &Path, conv: &str, spec: &str, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
     let model = Model::parse(spec, data_dir, conv)?;
     run_with(db, conv, spec, &|system, chain, tools, out| model.complete(system, chain, tools, out), on)
 }
 
-pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<bool> {
-    let Some(mut lease) = Lease::take(db, conv, spec)? else { return Ok(false) };
+pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<Outcome> {
+    let Some(mut lease) = Lease::take(db, conv, spec)? else { return Ok(Outcome::Busy) };
     let worker = board::trial_of_conversation(db.conn(), conv)?.is_some();
     let today: String = db.conn().query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
     let system = format!("{}\n\nToday is {today}.", if worker { WORKER } else { SYSTEM });
@@ -92,11 +116,11 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
     for _ in 0..MAX_STEPS {
         let mut chain = db.chain(conv)?;
         // Between replies, never between a reply's tool calls: stop, or take what was sent meanwhile.
-        if !matches!(next_step(&chain), Step::RunTool(_)) {
+        if matches!(next_step(&chain), Step::CallModel | Step::Done) {
             if lease.live.stopped() {
                 lease.release(db, true)?;
                 show(&mut shown, on)?;
-                return Ok(true);
+                return Ok(Outcome::Ended);
             }
             if lease.drain(db)? > 0 {
                 chain = db.chain(conv)?;
@@ -133,25 +157,56 @@ pub fn run_with(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &
                 if reply.interrupted {
                     lease.release(db, true)?;
                     show(&mut shown, on)?;
-                    return Ok(true);
+                    return Ok(Outcome::Ended);
                 }
             }
             Step::RunTool(call) => {
                 db.run_tool(conv, spec, &call)?;
             }
-            Step::Done => match rating_nudge(db, conv, spec, &chain)? {
-                Some(text) => {
-                    db.append(conv, "notice", &json!({ "text": text }), None)?;
+            Step::Finished(report) => {
+                // Anything still on its way stays in the journal; the run is over.
+                lease.release(db, true)?;
+                show(&mut shown, on)?;
+                return Ok(Outcome::Finished(report));
+            }
+            Step::Done if worker => {
+                // Stopped without finish. Its inbox first: that may be what it needs.
+                if lease.drain_all(db)? > 0 {
+                    continue;
                 }
-                None if lease.release(db, false)? => {
+                let waiting = !board::children_out(db.conn(), conv)?.is_empty();
+                let reminded = chain.iter().rev().take_while(|e| !matches!(e.kind.as_str(), "user" | "report")).filter(|e| e.kind == "notice").count();
+                if !waiting && reminded < MAX_NUDGES {
+                    db.append(conv, "notice", &json!({ "text": unfinished(db, conv)? }), None)?;
+                    continue;
+                }
+                if lease.release(db, false)? {
                     show(&mut shown, on)?;
-                    return Ok(true);
+                    return Ok(if waiting { Outcome::Waiting } else { Outcome::Unfinished });
                 }
-                None => {}
-            },
+            }
+            Step::Done => {
+                if lease.release(db, false)? {
+                    show(&mut shown, on)?;
+                    return Ok(Outcome::Ended);
+                }
+            }
         }
     }
     bail!("stopped after {MAX_STEPS} steps")
+}
+
+/// The reminder for a run that stopped without calling finish.
+fn unfinished(db: &Journal, conv: &str) -> Result<String> {
+    let todos: Vec<String> = board::open_todos(db.conn(), conv)?.iter().map(|(id, t)| format!("{id} \"{t}\"")).collect();
+    let open = match todos.len() {
+        0 => String::new(),
+        1 => format!(" Your todo {} is still open: do it in your reply and mark it done with complete_task.", todos[0]),
+        _ => format!(" Your todos {} are still open: do them in your reply and mark each done with complete_task.", todos.join(", ")),
+    };
+    Ok(format!(
+        "You stopped without calling finish, so nothing is handed in.{open} Write the work itself, then call finish with your report."
+    ))
 }
 
 /// Times a streamed reply: how long until its first text, and how fast the rest came.
@@ -184,72 +239,24 @@ impl Stopwatch {
     }
 }
 
-/// The rating gate, for an agent that delegated on its own: its conversation
-/// may not finish while a result it asked for sits unrated. After a few
-/// reminders it is let through, so a model that will not rate cannot loop
-/// forever; the run stays unrated for the user to rate. The user's own tasks
-/// never come through here: the user rates when they like.
-fn rating_nudge(db: &Journal, conv: &str, model: &str, chain: &[Entry]) -> Result<Option<String>> {
-    let unrated = board::unrated_for(db.conn(), conv, model)?;
-    if unrated.is_empty() {
-        return Ok(None);
-    }
-    let since_report = chain.iter().rev().take_while(|e| e.kind != "report").filter(|e| e.kind == "notice").count();
-    if since_report >= MAX_NUDGES {
-        return Ok(None);
-    }
-    let tasks: Vec<String> = unrated.iter().map(|(t, _)| t.to_string()).collect();
-    Ok(Some(format!(
-        "Before you finish, rate the result of task {} with the rate tool: a score from 1 to 5 and a short note.",
-        tasks.join(", ")
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board;
     use serde_json::Value;
 
-    #[test]
-    fn gate_nudges_three_times_then_lets_through() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-gate-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-        let c = db.conn();
-        let agent = |title: &str| board::TaskFields { title: title.into(), assignee: board::AGENT.into(), ..Default::default() };
-        let run = |task: i64, model: &str| {
-            c.execute(
-                "INSERT INTO trials (task, conversation, model, ended, reported) VALUES (?1, 'task-' || ?1, ?2, datetime('now'), 1)",
-                rusqlite::params![task, model],
-            )
-        };
-        // An agent's run, task-1, delegates a task of its own; another model does it.
-        run(board::add_task(c, &agent("parent"), None)?, "a")?;
-        run(board::add_task(c, &agent("child"), Some("task-1"))?, "b")?;
-        db.append("task-1", "report", &json!({"text": "result"}), None)?;
-        for _ in 0..MAX_NUDGES {
-            let nudge = rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?;
-            assert!(nudge.is_some_and(|n| n.contains("task 2")));
-            db.append("task-1", "notice", &json!({"text": "rate"}), None)?;
-        }
-        assert!(rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?.is_none(), "let through after {MAX_NUDGES}");
-        board::rate(c, 2, 4, "fine", "conversations/task-1", Some("a"))?;
-        db.append("task-1", "report", &json!({"text": "another"}), None)?;
-        assert!(rating_nudge(&db, "task-1", "a", &db.chain("task-1")?)?.is_none(), "nothing unrated");
-        // The user's own task, filed in a chat, is never the chat's to rate.
-        run(board::add_task(c, &agent("mine"), Some("chat"))?, "b")?;
-        assert!(rating_nudge(&db, "chat", "a", &db.chain("chat")?)?.is_none());
-        let _ = std::fs::remove_file(&path);
-        Ok(())
-    }
-
     // Turns on a scripted model: no network.
+
+    /// A turn on a scripted model; false if another loop held the conversation.
+    fn turn_on(db: &Journal, conv: &str, spec: &str, complete: &Complete, on: &mut dyn FnMut(Event)) -> Result<bool> {
+        run_with(db, conv, spec, complete, on).map(|o| o != Outcome::Busy)
+    }
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
     use std::time::{Duration, Instant};
 
+    use crate::model::ToolCall;
     use crate::turn;
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -276,6 +283,84 @@ mod tests {
         db.chain(conv).unwrap().into_iter().map(|e| e.kind).collect()
     }
 
+    /// A reply that calls one tool.
+    pub(crate) fn calls(name: &str, args: Value) -> Reply {
+        let call = ToolCall { id: format!("call-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() };
+        Reply { text: String::new(), tool_calls: vec![call], interrupted: false }
+    }
+
+    /// A run at the floor that answers its todo with the todo's id is not let
+    /// off: it is reminded, finish turns it back while the todo is open, and
+    /// it ends only when it has done the todo and handed in its report.
+    #[test]
+    fn a_run_finishes_only_with_its_todos_done() -> Result<()> {
+        let db = Journal::open(&scratch("finish"))?;
+        let c = db.conn();
+        let agent = |title: &str| board::TaskFields { title: title.into(), assignee: board::AGENT.into(), ..Default::default() };
+        board::add_task(c, &agent("Middle step"), None)?;
+        c.execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'a')", [])?;
+        board::add_task(c, &agent("Bottom step"), Some("task-1"))?;
+        c.execute("INSERT INTO trials (task, conversation, model) VALUES (2, 'task-2', 'b')", [])?;
+        db.append("task-2", "user", &json!({ "text": "Bottom step\n\nWrite one haiku about snow." }), None)?;
+        let model = |_: &str, chain: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            let replies = chain.iter().filter(|e| e.kind == "assistant").count();
+            Ok(match replies {
+                0 => calls("add_task", json!({ "title": "Write the haiku" })),
+                1 => says("3"),
+                2 => calls("finish", json!({ "report": "done" })),
+                3 => calls("complete_task", json!({ "id": 3 })),
+                _ => calls("finish", json!({ "report": "Snow on the cedar" })),
+            })
+        };
+        assert_eq!(run_with(&db, "task-2", "b", &model, &mut |_| {})?, Outcome::Finished("Snow on the cedar".into()));
+        let chain = db.chain("task-2")?;
+        let notice = chain.iter().find(|e| e.kind == "notice").expect("reminded");
+        assert!(notice.body["text"].as_str().unwrap().contains("3 \"Write the haiku\""), "{}", notice.body);
+        let refused = chain.iter().filter(|e| e.kind == "tool" && e.body["name"] == "finish").next().unwrap();
+        assert!(refused.body["output"].as_str().unwrap().contains("todo 3"), "{}", refused.body);
+        assert_eq!(board::task(c, 3)?.state, board::TaskState::Done);
+        Ok(())
+    }
+
+    /// A run that never calls finish is reminded twice, then ends unfinished.
+    #[test]
+    fn a_run_that_never_finishes_ends_unfinished() -> Result<()> {
+        let db = Journal::open(&scratch("unfinished"))?;
+        let c = db.conn();
+        board::add_task(c, &board::TaskFields { title: "t".into(), assignee: board::AGENT.into(), ..Default::default() }, None)?;
+        c.execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'a')", [])?;
+        db.append("task-1", "user", &json!({ "text": "t" }), None)?;
+        let asked = AtomicUsize::new(0);
+        let model = |_: &str, _: &[Entry], _: &[ToolSpec], _: &mut Sink| {
+            asked.fetch_add(1, SeqCst);
+            Ok(says("ok"))
+        };
+        assert_eq!(run_with(&db, "task-1", "a", &model, &mut |_| {})?, Outcome::Unfinished);
+        assert_eq!(asked.load(SeqCst), 1 + MAX_NUDGES);
+        // A chat is not a run: it ends when it answers.
+        db.append("chat", "user", &json!({ "text": "hi" }), None)?;
+        assert_eq!(run_with(&db, "chat", "a", &|_, _, _, _| Ok(says("hello")), &mut |_| {})?, Outcome::Ended);
+        Ok(())
+    }
+
+    /// While a turn runs, a steer joins between its replies; the inbox only when it would end.
+    #[test]
+    fn a_steer_joins_at_once_and_the_inbox_when_the_turn_would_end() -> Result<()> {
+        let db = Journal::open(&scratch("deliver"))?;
+        let lease = Lease::take(&db, "c", "m")?.unwrap();
+        let said = |text: &str| json!({ "text": text });
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("later"), turn::Delivery::Inbox)?);
+        assert!(!turn::deliver(db.conn(), "c", "report", &said("now"), turn::Delivery::Steer)?);
+        assert!(turn::queued(db.conn(), "c")?.is_empty(), "reports are not the user's messages");
+        assert_eq!(lease.drain(&db)?, 1);
+        assert_eq!(db.chain("c")?.iter().map(|e| e.body["text"].as_str().unwrap()).collect::<Vec<_>>(), ["now"]);
+        assert_eq!(lease.drain_all(&db)?, 1);
+        assert_eq!(kinds(&db, "c"), ["report", "report"]);
+        drop(lease);
+        assert!(turn::deliver(db.conn(), "c", "report", &said("idle"), turn::Delivery::Inbox)?, "no turn: straight in");
+        Ok(())
+    }
+
     #[test]
     fn a_streamed_reply_shows_as_it_comes_and_ends_as_one_entry() -> Result<()> {
         let path = scratch("stream");
@@ -293,7 +378,7 @@ mod tests {
                     }
                     Ok(says("Hello world"))
                 };
-                run_with(&db, "c", "test:m", &model, &mut |e| {
+                turn_on(&db, "c", "test:m", &model, &mut |e| {
                     if let Event::Text(t) = e {
                         pieces.push(t.to_string())
                     }
@@ -339,7 +424,7 @@ mod tests {
                     }
                     Ok(Reply { text: "Once upon".into(), tool_calls: vec![], interrupted: true })
                 };
-                run_with(&db, "c", "test:m", &model, &mut |_| {})
+                turn_on(&db, "c", "test:m", &model, &mut |_| {})
             }
         });
         until("the reply to start", || turn::partial(db.conn(), "c").unwrap().is_some());
@@ -355,7 +440,7 @@ mod tests {
 
         // The next message is answered as usual, and both wire formats read the chain cleanly.
         turn::send(&db, "c", "go on")?;
-        assert!(run_with(&db, "c", "test:m", &|_, _, _, _| Ok(says("The end.")), &mut |_| {})?);
+        assert!(turn_on(&db, "c", "test:m", &|_, _, _, _| Ok(says("The end.")), &mut |_| {})?);
         assert_eq!(kinds(&db, "c"), ["user", "assistant", "user", "assistant"]);
         let roles: Vec<Value> = crate::model::chat_messages("s", &db.chain("c")?).iter().map(|m| m["role"].clone()).collect();
         assert_eq!(roles, ["system", "user", "assistant", "user", "assistant"]);
@@ -382,14 +467,14 @@ mod tests {
                     let asked = chain.last().unwrap().body["text"].as_str().unwrap().to_string();
                     Ok(says(&format!("re: {asked}")))
                 };
-                run_with(&db, "c", "test:m", &model, &mut |_| {})
+                turn_on(&db, "c", "test:m", &model, &mut |_| {})
             }
         });
         until("the turn to start", || turn::running(db.conn()).unwrap() == ["c"]);
         // Someone else sends meanwhile: the message waits, and no second loop runs.
         let other = Journal::open(&path)?;
         turn::send(&other, "c", "second")?;
-        let ran = run_with(&other, "c", "test:m", &|_, _, _, _| panic!("a second loop called the model"), &mut |_| {})?;
+        let ran = turn_on(&other, "c", "test:m", &|_, _, _, _| panic!("a second loop called the model"), &mut |_| {})?;
         assert!(!ran);
         assert_eq!(turn::queued(db.conn(), "c")?.len(), 1);
         go.store(true, SeqCst);
@@ -412,7 +497,7 @@ mod tests {
         assert!(turn::running(db.conn())?.is_empty());
         turn::send(&db, "c", "hello?")?;
         assert!(turn::queued(db.conn(), "c")?.is_empty(), "goes straight into the journal");
-        assert!(run_with(&db, "c", "test:m", &|_, _, _, _| Ok(says("here")), &mut |_| {})?);
+        assert!(turn_on(&db, "c", "test:m", &|_, _, _, _| Ok(says("here")), &mut |_| {})?);
         assert_eq!(kinds(&db, "c"), ["user", "assistant"]);
         assert!(turn::running(db.conn())?.is_empty());
         Ok(())

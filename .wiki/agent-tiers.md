@@ -33,7 +33,7 @@ A message can go in either direction, including from a child to its parent. How 
 
 | Recipient state | Delivery | Instantiated first |
 |---|---|---|
-| Live (running now) | **Steer**: interrupts immediately. **Inbox**: read at the end of the current turn. The sender chooses | No. A live agent keeps its model |
+| Live (running now) | **Steer**: interrupts immediately. **Inbox**: read at the end of the current turn. The sender chooses; for a report, the recipient chose when it handed out the work | No. A live agent keeps its model |
 | Cold (cache expired) | The agent is woken, then receives the message | Yes, see [Instantiate](instantiate.md) |
 | Not created | The agent is created, then receives the message | Yes |
 
@@ -49,7 +49,7 @@ A report goes one way: up, to whoever asked for the work. That is the parent age
 
 Reports are graded. See [Blind testing](blind-testing.md#grading).
 
-A report usually arrives after its recipient has finished its turn. It is delivered like any message: a cold recipient is woken to read it.
+An agent that hands work on chooses how each report reaches it: interrupt, or inbox. It may keep working meanwhile or stop to wait. A waiting agent is woken by an interrupting report at once, and otherwise when all the work it handed out has reported. Either way it is delivered like any message: a cold recipient is woken to read it.
 
 ## Agent lifecycle
 
@@ -57,7 +57,7 @@ A report usually arrives after its recipient has finished its turn. It is delive
 2. **Live** to **Live**: receives steer or inbox messages. No instantiation, so no model router.
 3. **Live** to **Cold**: its cache expires.
 4. **Cold** to **Live**: [instantiated](instantiate.md) again. Any tier can be woken, including subagents. Whether it keeps its previous model is [undecided](open-questions.md#model-on-wake).
-5. **Live** to **Finished**: the task is done and it writes its report.
+5. **Live** to **Finished**: the task is done and it hands in its report with an explicit finish. Stopping without it hands nothing in.
 
 ## What an agent is made of
 

@@ -445,6 +445,7 @@ fn thread_line(thread: &Thread, me: &str) -> String {
     let mut extra = vec![];
     match t.run_state {
         Some(RunState::Running) => extra.push("running".to_string()),
+        Some(RunState::Waiting) => extra.push("waiting on sub-tasks".into()),
         Some(RunState::Failing) => extra.push("retrying".into()),
         Some(RunState::NeedsRating) => extra.push(format!("needs rating (run {})", t.run.unwrap_or_default())),
         Some(RunState::Rated) => extra.push(format!("rated {}/5", t.score.unwrap_or_default())),

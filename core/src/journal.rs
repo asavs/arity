@@ -47,6 +47,7 @@ impl Journal {
              );",
         )?;
         conn.execute_batch(crate::turn::TABLES)?;
+        crate::turn::migrate(&conn)?;
         conn.execute_batch(crate::leaderboard::TABLES)?;
         crate::board::migrate(&conn)?;
         Ok(Self { conn })

@@ -7,6 +7,12 @@
 //! picked up again from the journal once its lease runs out, or as soon as its
 //! conversation's turn lease lapses, which takes seconds rather than minutes.
 //!
+//! A run that hands part of its task on and stops waits, holding no lease, and
+//! is taken up again when its sub-tasks have reported: each result is delivered
+//! to its conversation like any message, as a steer if its turn is running and
+//! the sub-task asked to interrupt, else into its inbox. A run that stops
+//! without finishing is ended unscored and its task picked again.
+//!
 //! A run whose model cannot be reached (signed out, key gone, server down) is
 //! abandoned: it ends without a result, is never reported or scored, and the
 //! task is picked again among models that can be reached. Failures are told
@@ -21,12 +27,14 @@ use serde_json::json;
 use crate::board::{LEASE_SECS, now};
 use crate::journal::{Journal, chain, insert};
 use crate::leaderboard::{self, Candidate, Choice};
+use crate::turn::{self, Delivery};
 use crate::{agent, config};
 
 /// What is said about a failing run before it is rated. Nothing in it hints at the model.
 pub const FAILING: &str = "The last attempt failed; it will be tried again";
 const RETRYING: &str = "failed; retrying in a minute";
 const ABANDONED: &str = "could not reach its model; the task will be picked again";
+const UNFINISHED: &str = "stopped without finishing; the task will be picked again";
 
 /// What one call did, for logging.
 pub enum Did {
@@ -34,6 +42,8 @@ pub enum Did {
     /// A result was passed on. `rater` is the conversation woken to rate it, if any.
     Reported { task: i64, rater: Option<String> },
     Ran { task: i64, trial: i64 },
+    /// The run stopped to wait for its sub-tasks.
+    Waiting { task: i64, trial: i64 },
     Failed { task: i64, trial: i64, error: String },
 }
 
@@ -43,6 +53,7 @@ impl Did {
         Some(match self {
             Did::Nothing => return None,
             Did::Ran { task, trial } => format!("task {task}: run {trial} finished"),
+            Did::Waiting { task, trial } => format!("task {task}: run {trial} waits for its sub-tasks"),
             Did::Failed { task, trial, error } => format!("task {task}: run {trial} {error}"),
             Did::Reported { task, rater: Some(conv) } => format!("task {task}: reported to {conv} to rate"),
             Did::Reported { task, rater: None } => format!("task {task}: waiting for your rating"),
@@ -57,12 +68,13 @@ pub fn work_once(db: &Journal, data_dir: &Path) -> Result<Did> {
 /// `reachable` lists the models that can be reached now; it is asked only when
 /// there is work, since it may check local servers.
 pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Result<Vec<Candidate>>) -> Result<Did> {
-    if let Some(did) = deliver_report(db, data_dir)? {
+    if let Some(did) = deliver_report(db)? {
         return Ok(did);
     }
+    db.immediate(wake_settled)?;
     let waiting: bool = db.conn().query_row(
         "SELECT EXISTS (SELECT 1 FROM tasks WHERE assignee = 'agent' AND state = 'ready')
-             OR EXISTS (SELECT 1 FROM trials WHERE ended IS NULL)",
+             OR EXISTS (SELECT 1 FROM trials WHERE ended IS NULL AND waiting = 0)",
         [],
         |r| r.get(0),
     )?;
@@ -77,17 +89,41 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
     let mut renew = |_: crate::Event| {
         let _ = db.conn().execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS]);
     };
-    let ran = agent::run(db, data_dir, &conv, &model, &mut renew)
-        .and_then(|ran| if ran { Ok(()) } else { Err(anyhow::anyhow!("another turn is running in {conv}")) });
+    let ran = agent::run(db, data_dir, &conv, &model, &mut renew).and_then(|outcome| match outcome {
+        agent::Outcome::Busy => Err(anyhow::anyhow!("another turn is running in {conv}")),
+        outcome => Ok(outcome),
+    });
+    let end_unscored = |error: &str| {
+        db.immediate(|c| {
+            c.execute(
+                "UPDATE trials SET ended = datetime('now'), error = ?2, abandoned = 1, reported = 1 WHERE id = ?1",
+                params![trial, error],
+            )?;
+            c.execute("UPDATE tasks SET state = 'open', edits = edits + 1 WHERE id = ?1", params![task])?;
+            crate::board::refresh_ready(c)
+        })
+    };
     match ran {
-        Ok(()) => {
-            let result = db
-                .chain(&conv)?
-                .iter()
-                .rev()
-                .find(|e| e.kind == "assistant")
-                .and_then(|e| e.body["text"].as_str().map(String::from))
-                .unwrap_or_default();
+        Ok(agent::Outcome::Waiting) => {
+            db.conn().execute("UPDATE trials SET waiting = 1, lease_until = 0, error = NULL WHERE id = ?1", params![trial])?;
+            Ok(Did::Waiting { task, trial })
+        }
+        Ok(agent::Outcome::Unfinished) => {
+            end_unscored(UNFINISHED)?;
+            Ok(Did::Failed { task, trial, error: UNFINISHED.into() })
+        }
+        Ok(outcome) => {
+            // Finished with a report; or stopped by someone, when the last reply is all there is.
+            let result = match outcome {
+                agent::Outcome::Finished(report) => report,
+                _ => db
+                    .chain(&conv)?
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == "assistant")
+                    .and_then(|e| e.body["text"].as_str().map(String::from))
+                    .unwrap_or_default(),
+            };
             db.immediate(|c| {
                 c.execute(
                     "UPDATE trials SET ended = datetime('now'), result = ?2, error = NULL WHERE id = ?1",
@@ -103,14 +139,7 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
             let detail = format!("{e:#}");
             if !reach.iter().any(|c| c.model == model) {
                 // Its model is out of reach: end this run unscored and let the task be picked again.
-                db.immediate(|c| {
-                    c.execute(
-                        "UPDATE trials SET ended = datetime('now'), error = ?2, abandoned = 1, reported = 1 WHERE id = ?1",
-                        params![trial, detail],
-                    )?;
-                    c.execute("UPDATE tasks SET state = 'open', edits = edits + 1 WHERE id = ?1", params![task])?;
-                    crate::board::refresh_ready(c)
-                })?;
+                end_unscored(&detail)?;
                 return Ok(Did::Failed { task, trial, error: ABANDONED.into() });
             }
             // Leave the run open and retry it in a minute; the journal knows where it stopped.
@@ -131,7 +160,7 @@ fn claim(c: &Connection, data_dir: &Path, reachable: &[Candidate]) -> Result<Opt
     let stale: Option<(i64, i64, String, String)> = c
         .query_row(
             "SELECT id, task, conversation, model FROM trials tr
-             WHERE ended IS NULL AND (lease_until < ?1 OR (
+             WHERE ended IS NULL AND waiting = 0 AND (lease_until < ?1 OR (
                  lease_until < ?1 + ?2 - ?3
                  AND NOT EXISTS (SELECT 1 FROM turns WHERE conversation = tr.conversation AND lease_until >= ?1)))
              ORDER BY id LIMIT 1",
@@ -183,44 +212,71 @@ fn claim(c: &Connection, data_dir: &Path, reachable: &[Candidate]) -> Result<Opt
 }
 
 /// Pass on a finished result. It already waits in the task's own thread for a
-/// rating. The chat the task was filed in gets a note of it, as plain
-/// information. Only an agent that delegated on its own is woken, to rate it,
-/// and only if the model it would rate with is not the one that did the run.
-fn deliver_report(db: &Journal, data_dir: &Path) -> Result<Option<Did>> {
-    let found = db.immediate(|c| {
-        let row: Option<(i64, i64, String, String, Option<String>, String, String)> = c
+/// rating. A task an agent's run filed goes back to that run, which rates it if
+/// it is on a different model than the one that did it, and is woken if it was
+/// waiting and asked to be interrupted (or `wake_settled` finds nothing else
+/// out). A run that has already finished gets the result too, but the rating
+/// is left to the user. A task filed in a chat leaves the chat a note, as plain
+/// information, and wakes nothing.
+fn deliver_report(db: &Journal) -> Result<Option<Did>> {
+    db.immediate(|c| {
+        let row: Option<(i64, i64, String, String, Option<String>, String, String, String)> = c
             .query_row(
-                "SELECT tr.id, t.id, t.title, t.created_by, t.origin, ifnull(tr.result, ''), tr.model
+                "SELECT tr.id, t.id, t.title, t.created_by, t.origin, ifnull(tr.result, ''), tr.model, t.when_done
                  FROM trials tr JOIN tasks t ON t.id = tr.task
                  WHERE tr.ended IS NOT NULL AND tr.reported = 0 ORDER BY tr.id LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .optional()?;
-        let Some((trial, task, title, created_by, origin, result, model)) = row else { return Ok(None) };
+        let Some((trial, task, title, created_by, origin, result, model, when_done)) = row else { return Ok(None) };
         c.execute("UPDATE trials SET reported = 1 WHERE id = ?1", params![trial])?;
-        let author = created_by.strip_prefix("conversations/");
-        let rater = match author {
-            Some(conv) => chain(c, conv)?.iter().rev().find_map(|e| e.model.clone()).filter(|m| *m != model),
-            None => None,
+        let said = |ask: &str| format!("Task {task}, \"{title}\", is finished. The result:\n\n{result}{ask}");
+        let body = |text: String| json!({ "text": text, "task": task, "trial": trial });
+        let Some(parent) = created_by.strip_prefix("conversations/") else {
+            if let Some(chat) = &origin {
+                insert(c, chat, "report", &body(said("")), None)?;
+            }
+            return Ok(Some(Did::Reported { task, rater: None }));
         };
-        let to = author.map(String::from).or(origin);
-        if let Some(conv) = &to {
-            let ask = match rater {
-                Some(_) => format!("\n\nRate it with the rate tool: task {task}, a score from 1 to 5, and a short note."),
-                None => String::new(),
-            };
-            let text = format!("Task {task}, \"{title}\", is finished. The result:\n\n{result}{ask}");
-            insert(c, conv, "report", &json!({ "text": text, "task": task, "trial": trial }), None)?;
+        // The run that filed it, if it is still going: (trial, model, waiting).
+        let run: Option<(i64, String, bool)> = c
+            .query_row(
+                "SELECT id, model, waiting FROM trials WHERE conversation = ?1 AND ended IS NULL",
+                params![parent],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let rates = run.as_ref().is_some_and(|(_, m, _)| *m != model);
+        let ask = if rates { format!("\n\nRate it with the rate tool: task {task}, a score from 1 to 5, and a short note.") } else { String::new() };
+        let interrupt = when_done == "interrupt";
+        let how = if interrupt { Delivery::Steer } else { Delivery::Inbox };
+        turn::deliver(c, parent, "report", &body(said(&ask)), how)?;
+        if let (Some((parent_trial, _, true)), true) = (run, interrupt) {
+            c.execute("UPDATE trials SET waiting = 0, lease_until = 0 WHERE id = ?1", params![parent_trial])?;
         }
-        Ok(Some((task, to.zip(rater))))
-    })?;
-    let Some((task, rater)) = found else { return Ok(None) };
-    if let Some((conv, model)) = &rater {
-        // A turn already running there reads the report as its next input.
-        agent::run(db, data_dir, conv, model, &mut |_| {})?;
+        Ok(Some(Did::Reported { task, rater: rates.then(|| parent.to_string()) }))
+    })
+}
+
+/// Wake runs that are waiting with nothing left out: their sub-tasks have all
+/// reported, or were closed without a result. A woken run is taken up by
+/// `claim` like one whose lease ran out.
+fn wake_settled(c: &Connection) -> Result<()> {
+    let mut stmt = c.prepare("SELECT id, conversation FROM trials WHERE waiting = 1 AND ended IS NULL")?;
+    let waiting: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (trial, conv) in waiting {
+        if !crate::board::children_out(c, &conv)?.is_empty() {
+            continue;
+        }
+        // A result is what it waited for; if none came, say so, so it does not stop again at once.
+        if chain(c, &conv)?.last().is_none_or(|e| e.kind != "report") {
+            let text = "Your sub-tasks are settled, and not all of them reported a result. Use what you have and call finish.";
+            insert(c, &conv, "notice", &json!({ "text": text }), None)?;
+        }
+        c.execute("UPDATE trials SET waiting = 0, lease_until = 0 WHERE id = ?1", params![trial])?;
     }
-    Ok(Some(Did::Reported { task, rater: rater.map(|(conv, _)| conv) }))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -244,13 +300,13 @@ mod tests {
         )?;
         board::set_state(c, task, board::TaskState::InGates)?;
         // Waking the chat would call its model, which does not exist, and fail.
-        assert!(matches!(deliver_report(&db, &dir)?, Some(Did::Reported { rater: None, .. })));
+        assert!(matches!(deliver_report(&db)?, Some(Did::Reported { rater: None, .. })));
         let chat = db.chain("chat")?;
         let note = chat.last().unwrap();
         assert_eq!(note.kind, "report");
         assert!(note.body["text"].as_str().unwrap().contains("roses") && !note.body["text"].as_str().unwrap().contains("Rate"));
         assert_eq!(board::task(c, task)?.run_state, Some(board::RunState::NeedsRating));
-        assert!(deliver_report(&db, &dir)?.is_none(), "delivered once");
+        assert!(deliver_report(&db)?.is_none(), "delivered once");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
@@ -317,6 +373,71 @@ mod tests {
         // Its process died: the turn lease lapsed.
         c.execute("UPDATE turns SET lease_until = ?1", params![now() - 1])?;
         assert_eq!(claim(c, &dir, &[])?.map(|r| r.0), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A run that hands part of its task on and stops waits for the result,
+    /// holding no lease. The result goes to its inbox; once nothing is left out
+    /// it is woken, rates the result (another model did it) and finishes.
+    /// A sub-task that asked to interrupt wakes it at once.
+    #[test]
+    fn a_run_waits_for_its_sub_task_then_rates_it_and_finishes() -> Result<()> {
+        use crate::agent::{Outcome, run_with};
+        use crate::model::{Reply, ToolCall};
+        let dir = std::env::temp_dir().join(format!("arity-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Journal::open(&dir.join("arity.sqlite"))?;
+        let c = db.conn();
+        let f = TaskFields { title: "plan a trip".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(c, &f, None)?;
+        c.execute("INSERT INTO trials (task, conversation, model, lease_until) VALUES (?1, 'task-1', 'a', ?2)", params![task, now() + 60])?;
+        db.append("task-1", "user", &json!({ "text": "plan a trip" }), None)?;
+        let call = |name: &str, args: serde_json::Value| Reply {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("{name}-{}", rand::random::<u32>()), name: name.into(), arguments: args.to_string() }],
+            interrupted: false,
+        };
+        let model = |_: &str, chain: &[crate::journal::Entry], _: &[crate::tools::ToolSpec], _: &mut crate::model::Sink| {
+            let last = chain.last().unwrap();
+            Ok(match (last.kind.as_str(), last.body["name"].as_str()) {
+                ("user", _) => call("add_task", json!({ "title": "find trains", "assignee": "agent", "brief": "List two." })),
+                ("tool", Some("add_task")) => Reply { text: "Waiting for the trains.".into(), tool_calls: vec![], interrupted: false },
+                ("report", _) => call("rate", json!({ "task": 2, "score": 4, "note": "useful" })),
+                _ => call("finish", json!({ "report": "Take the 9:10." })),
+            })
+        };
+        assert_eq!(run_with(&db, "task-1", "a", &model, &mut |_| {})?, Outcome::Waiting);
+        c.execute("UPDATE trials SET waiting = 1, lease_until = 0 WHERE id = 1", [])?;
+        assert_eq!(board::task(c, task)?.run_state, Some(board::RunState::Waiting));
+        assert!(db.immediate(|c| claim(c, &dir, &[]))?.is_none(), "a waiting run is not taken over");
+        // Another model does the sub-task.
+        c.execute("INSERT INTO trials (task, conversation, model, ended, result) VALUES (2, 'task-2', 'b', datetime('now'), '9:10 and 11:40')", [])?;
+        board::set_state(c, 2, board::TaskState::InGates)?;
+        assert!(matches!(deliver_report(&db)?, Some(Did::Reported { rater: Some(_), .. })));
+        let report = db.chain("task-1")?.last().unwrap().clone();
+        assert_eq!(report.kind, "report");
+        assert!(report.body["text"].as_str().unwrap().contains("Rate it"));
+        db.immediate(wake_settled)?;
+        let (trial, ..) = db.immediate(|c| claim(c, &dir, &[]))?.expect("woken");
+        assert_eq!(trial, 1);
+        assert_eq!(run_with(&db, "task-1", "a", &model, &mut |_| {})?, Outcome::Finished("Take the 9:10.".into()));
+        let (score, by, rater): (i64, String, String) =
+            c.query_row("SELECT score, rated_by, rater_model FROM ratings WHERE trial = 2", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        assert_eq!((score, by.as_str(), rater.as_str()), (4, "conversations/task-1", "a"));
+
+        // A sub-task that asked to interrupt wakes its waiting run at once, though another is still out.
+        let g = TaskFields { title: "two halves".into(), assignee: board::AGENT.into(), ..Default::default() };
+        board::add_task(c, &g, None)?;
+        c.execute("INSERT INTO trials (task, conversation, model, waiting) VALUES (3, 'task-3', 'a', 1)", [])?;
+        let half = |t: &str| TaskFields { title: t.into(), assignee: board::AGENT.into(), ..Default::default() };
+        board::add_task(c, &half("first half"), Some("task-3"))?;
+        board::add_task(c, &half("second half"), Some("task-3"))?;
+        c.execute("UPDATE tasks SET when_done = 'interrupt' WHERE id = 4", [])?;
+        c.execute("INSERT INTO trials (task, conversation, model, ended, result) VALUES (4, 'task-4', 'b', datetime('now'), 'half')", [])?;
+        deliver_report(&db)?;
+        let waiting: bool = c.query_row("SELECT waiting FROM trials WHERE conversation = 'task-3'", [], |r| r.get(0))?;
+        assert!(!waiting, "woken by the interrupt while task 5 is still out");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

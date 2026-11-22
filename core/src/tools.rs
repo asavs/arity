@@ -67,11 +67,19 @@ fn offered(caller: Caller, name: &str, can_rate: bool) -> bool {
     match (caller, name) {
         (_, "rate") => can_rate,
         (_, "list_tasks" | "add_task") => true,
+        (Caller::Chat, "finish") => false,
         (Caller::Chat, _) => true,
+        (_, "finish") => true,
         (Caller::RunAtFloor, "complete_task") => true,
         _ => false,
     }
 }
+
+/// What `finish` says when it accepts a report. The loop ends the run on it.
+pub const FINISHED: &str = "finished: your report is handed in";
+/// How many times `finish` turns a run back before it lets it through anyway,
+/// so a model that cannot clear what is open does not loop forever.
+const MAX_REFUSALS: usize = 3;
 
 fn with_id(mut props: Value) -> Value {
     props["id"] = json!({"type": "integer"});
@@ -126,10 +134,35 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
                 "note": {"type": "string"}
             }, "required": ["task", "score", "note"]}),
         },
+        ToolSpec {
+            name: "finish",
+            description: "End your task and hand in your report. The report is all whoever wrote the task will see: \
+                          start with the outcome, then what they need to use it. If you could not do it, say what \
+                          you found and what stopped you.",
+            parameters: json!({"type": "object", "properties": {
+                "report": {"type": "string", "description": "The result of the task, in full."}
+            }, "required": ["report"]}),
+        },
     ];
     all.into_iter()
         .filter(|t| offered(caller, t.name, can_rate))
         .map(|t| match (caller, t.name) {
+            (Caller::Run, "add_task") => {
+                let mut props = field_schema();
+                props["assignee"] = json!({"type": "string", "description": "Leave it out to hand the task to an agent. \
+                    \"user\" puts it on the user's own list instead."});
+                props["when_done"] = json!({"type": "string", "enum": ["inbox", "interrupt"], "description": "How its \
+                    result reaches you if you are still working when it arrives: \"inbox\" (the default) when you \
+                    next stop, \"interrupt\" as soon as it arrives. If you have stopped to wait, \"interrupt\" wakes \
+                    you for each result, \"inbox\" once all your sub-tasks have reported."});
+                ToolSpec {
+                    name: "add_task",
+                    description: "Hand part of your task to another agent, one level down. It knows nothing but the \
+                                  title and brief, so say the goal, what its report should contain, and where to stop. \
+                                  Its result comes back to you.",
+                    parameters: json!({"type": "object", "properties": props, "required": ["title"]}),
+                }
+            }
             (Caller::RunAtFloor, "add_task") => ToolSpec {
                 name: "add_task",
                 description: "Write a todo for yourself on the board. It is yours: do it in your reply, then mark it \
@@ -148,8 +181,9 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
 
 const HANDED_OFF: &str = "An agent will do it and the user will rate its result. \
                           Do not wait or check on it: finish your reply now.";
-const HANDED_OFF_BY_A_RUN: &str = "An agent will do it. Its result comes back to this conversation for you to rate, \
-                                   after your own reply is in: finish your reply now with what you can do yourself.";
+const HANDED_OFF_BY_A_RUN: &str = "An agent will do it, knowing only its title and brief. Its result comes back \
+                                   here. Carry on with the rest meanwhile, or end your turn without calling finish to \
+                                   wait: you are woken when it reports. Call finish once you have what you need.";
 
 /// `conv` is the conversation calling the tool, and `model` the model it is running on.
 pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
@@ -158,6 +192,9 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
         let caller = caller(db, conv)?;
         let worker = caller != Caller::Chat;
         if !offered(caller, name, true) {
+            if !worker {
+                anyhow::bail!("unknown tool {name}");
+            }
             anyhow::bail!("you are doing a task: you can read the board and file tasks, not change others");
         }
         match name {
@@ -180,7 +217,10 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 let mut f = TaskFields { assignee: board::conversation_page(conv), ..Default::default() };
                 f.merge(&args)?;
                 let id = board::add_task(db, &f, Some(conv))?;
-                Ok(format!("added todo {id} for yourself. Do it in your reply, then mark it done with complete_task."))
+                Ok(format!(
+                    "added todo {id} for yourself. The id is not an answer: write the work itself in your reply, \
+                     mark it done with complete_task, then call finish with your report."
+                ))
             }
             "complete_task" if caller == Caller::RunAtFloor => {
                 let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
@@ -191,9 +231,13 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 Ok(format!("completed todo {id}"))
             }
             "add_task" => {
-                let mut f = TaskFields::default();
+                // A run's add_task hands work on: left out, the assignee is an agent, not the user.
+                let mut f = TaskFields { assignee: if worker { AGENT.into() } else { TaskFields::default().assignee }, ..Default::default() };
                 f.merge(&args)?;
                 let id = board::add_task(db, &f, Some(conv))?;
+                if caller == Caller::Run && args["when_done"] == "interrupt" {
+                    db.execute("UPDATE tasks SET when_done = 'interrupt' WHERE id = ?1", [id])?;
+                }
                 Ok(match (f.assignee == AGENT, worker) {
                     (true, false) => format!("added task {id}. {HANDED_OFF}"),
                     (true, true) => format!("added task {id}. {HANDED_OFF_BY_A_RUN}"),
@@ -234,6 +278,51 @@ pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: 
                 board::rate(db, trial, score, note, &board::conversation_page(conv), Some(model))?;
                 Ok(format!("rated task {task}: {score}/5"))
             }
+            "finish" => {
+                let report = args["report"].as_str().unwrap_or_default().trim();
+                if report.is_empty() {
+                    anyhow::bail!("finish needs your report: the result of the task, in full");
+                }
+                let todos = board::open_todos(db, conv)?;
+                // Refusals since the last report it was given; a wake starts the count again.
+                let refused = crate::journal::chain(db, conv)?
+                    .iter()
+                    .rev()
+                    .take_while(|e| e.kind != "report")
+                    .filter(|e| e.kind == "tool" && e.body["name"] == "finish")
+                    .count();
+                if refused < MAX_REFUSALS {
+                    let ids = |v: &[i64]| v.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+                    let mut open = Vec::new();
+                    if !todos.is_empty() {
+                        let list: Vec<String> = todos.iter().map(|(id, title)| format!("{id} \"{title}\"")).collect();
+                        open.push(format!(
+                            "your todo {} is still open: do it in your reply and mark it done with complete_task",
+                            list.join(", ")
+                        ));
+                    }
+                    let out = board::children_out(db, conv)?;
+                    if !out.is_empty() {
+                        open.push(format!(
+                            "task {} has not reported yet: end your turn without calling finish to wait for it, \
+                             and you are woken with its result",
+                            ids(&out)
+                        ));
+                    }
+                    let unrated: Vec<i64> = board::unrated_for(db, conv, model)?.iter().map(|(t, _)| *t).collect();
+                    if !unrated.is_empty() {
+                        open.push(format!("rate the result of task {} with the rate tool first", ids(&unrated)));
+                    }
+                    if !open.is_empty() {
+                        anyhow::bail!("not finished: {}. Then call finish again.", open.join("; "));
+                    }
+                }
+                // Let through anyway: its todos die with it.
+                for (id, _) in &todos {
+                    board::set_done(db, *id, true)?;
+                }
+                Ok(FINISHED.into())
+            }
             other => anyhow::bail!("unknown tool {other}"),
         }
     })();
@@ -256,6 +345,7 @@ fn line(t: &board::TaskRow) -> String {
         parts.push(
             match run {
                 RunState::Running => "an agent is on it",
+                RunState::Waiting => "an agent is waiting on its sub-tasks",
                 RunState::Failing => "an agent is retrying it",
                 RunState::NeedsRating => "finished, needs rating",
                 RunState::Rated => "finished and rated",
@@ -304,14 +394,14 @@ mod tests {
         // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
         assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
         run(1)?;
-        assert_eq!(names("task-1"), ["add_task", "list_tasks"]);
+        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish"]);
         assert!(add_props("task-1")["properties"]["assignee"].is_object(), "above the floor it may delegate");
-        let said = call("task-1", "add_task", json!({ "title": "sub", "assignee": "agent" }));
-        assert!(said.starts_with("added task 2") && said.contains("comes back to this conversation"), "{said}");
+        let said = call("task-1", "add_task", json!({ "title": "sub" }));
+        assert!(said.starts_with("added task 2") && said.contains("comes back here"), "{said}");
         assert_eq!(board::task(c, 2)?.created_by, "conversations/task-1");
         // Task 2's run is at the floor: add_task has no assignee or choice, and complete_task is offered.
         run(2)?;
-        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task"]);
+        assert_eq!(names("task-2"), ["add_task", "list_tasks", "complete_task", "finish"]);
         let props = add_props("task-2");
         assert!(props["properties"]["assignee"].is_null() && props["properties"]["choice"].is_null(), "{props}");
         // Even asked for an agent, what it writes is its own todo: no pick, no run, nothing woken.

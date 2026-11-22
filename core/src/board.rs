@@ -79,7 +79,8 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
              error        TEXT,
              lease_until  INTEGER NOT NULL DEFAULT 0,
              reported     INTEGER NOT NULL DEFAULT 0,
-             abandoned    INTEGER NOT NULL DEFAULT 0  -- its model could not be reached; another run is picked
+             abandoned    INTEGER NOT NULL DEFAULT 0, -- its model could not be reached; another run is picked
+             waiting      INTEGER NOT NULL DEFAULT 0  -- its turn ended with sub-tasks out; woken when they report
          );
          CREATE TABLE IF NOT EXISTS ratings (
              trial    INTEGER PRIMARY KEY REFERENCES trials(id),
@@ -115,6 +116,14 @@ fn migrate_tables(conn: &Connection) -> Result<()> {
     if !columns("trials")?.iter().any(|c| c == "abandoned") {
         tx.execute_batch("ALTER TABLE trials ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0")?;
     }
+    if !columns("trials")?.iter().any(|c| c == "waiting") {
+        tx.execute_batch("ALTER TABLE trials ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0")?;
+    }
+    if !columns("tasks")?.iter().any(|c| c == "when_done") {
+        tx.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN when_done TEXT NOT NULL DEFAULT 'inbox' CHECK (when_done IN ('inbox', 'interrupt'))",
+        )?;
+    }
     if !columns("ratings")?.iter().any(|c| c == "rater_model") {
         migrate_authorship(&tx)?;
     }
@@ -135,6 +144,8 @@ fn create_tasks(c: &Connection, name: &str) -> Result<()> {
                         CHECK (state IN ('open', 'ready', 'assigned', 'in_gates', 'done')),
              choice     TEXT NOT NULL DEFAULT 'smart' CHECK (choice IN ('smart', 'fast', 'free', 'private')),
              depth      INTEGER NOT NULL DEFAULT 1, -- 1 filed by a person or chat, 2 by that task's run, ...
+             when_done  TEXT NOT NULL DEFAULT 'inbox' CHECK (when_done IN ('inbox', 'interrupt')),
+                                                 -- how its result reaches the run that filed it
              priority   INTEGER NOT NULL DEFAULT 1, -- 0 low, 1 normal, 2 high, 3 urgent
              due        TEXT,                     -- YYYY-MM-DD
              tags       TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
@@ -503,6 +514,8 @@ impl TaskState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum RunState {
     Running,
+    /// The run handed part of its task on and waits for those results.
+    Waiting,
     /// The last attempt failed; it will be retried.
     Failing,
     NeedsRating,
@@ -535,7 +548,7 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         "SELECT t.id, t.title, ifnull(t.brief, ''), t.assignee, t.created_by, t.state, t.choice,
                 t.priority, t.due, t.tags,
                 tr.id, tr.conversation, tr.ended, tr.result, tr.error, r.score,
-                t.origin, t.created, r.note, tr.model
+                t.origin, t.created, r.note, tr.model, tr.waiting
          FROM tasks t
          LEFT JOIN trials tr ON tr.id = (SELECT max(id) FROM trials WHERE task = t.id AND abandoned = 0)
          LEFT JOIN ratings r ON r.trial = tr.id
@@ -548,7 +561,9 @@ pub fn tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
         let ended: Option<String> = r.get(12)?;
         let error: Option<String> = r.get(14)?;
         let score: Option<i64> = r.get(15)?;
+        let waiting: Option<bool> = r.get(20)?;
         let run_state = trial.map(|_| match (ended.is_some(), error.is_some(), score.is_some()) {
+            (false, _, _) if waiting == Some(true) => RunState::Waiting,
             (false, true, _) => RunState::Failing,
             (false, false, _) => RunState::Running,
             (true, _, false) => RunState::NeedsRating,
@@ -736,7 +751,7 @@ pub fn set_state(conn: &Connection, id: i64, state: TaskState) -> Result<()> {
 /// Tick a task off, or reopen it. Not while an agent is still on it.
 pub fn set_done(conn: &Connection, id: i64, done: bool) -> Result<()> {
     let t = task(conn, id)?;
-    if done && matches!(t.run_state, Some(RunState::Running | RunState::Failing)) {
+    if done && matches!(t.run_state, Some(RunState::Running | RunState::Failing | RunState::Waiting)) {
         bail!("an agent is still working on task {id}");
     }
     set_state(conn, id, if done { TaskState::Done } else { TaskState::Open })
@@ -801,6 +816,28 @@ pub fn unrated_for(conn: &Connection, conv: &str, model: &str) -> Result<Vec<(i6
          ORDER BY tr.id",
     )?;
     let rows = stmt.query_map(params![conversation_page(conv), model], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Tasks this run handed to an agent whose results have not reached it yet:
+/// not started, running, or finished but not yet passed on. Ids, oldest first.
+pub fn children_out(conn: &Connection, conv: &str) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id FROM tasks t
+         WHERE t.created_by = ?1 AND t.assignee = 'agent'
+           AND (t.state IN ('open', 'ready', 'assigned')
+                OR EXISTS (SELECT 1 FROM trials tr WHERE tr.task = t.id AND tr.ended IS NOT NULL
+                               AND tr.reported = 0 AND tr.abandoned = 0))
+         ORDER BY t.id",
+    )?;
+    let rows = stmt.query_map(params![conversation_page(conv)], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A run's own todos that are not done, as (id, title).
+pub fn open_todos(conn: &Connection, conv: &str) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, title FROM tasks WHERE assignee = ?1 AND state != 'done' ORDER BY id")?;
+    let rows = stmt.query_map(params![conversation_page(conv)], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
