@@ -43,6 +43,7 @@ A task is a todo with fields.
 | Requirements | What the task needs to run: Xcode, an NVIDIA RTX card, computer use | Building the agent's loadout, and matching the task to a machine (see [Computers](computers.md)) |
 | Gates | What must pass before it counts as done: tests, CI, a QA bot, the user's eyes | Grading. A gate result is a verifiable check and counts for more than a rating |
 | Tags | Free labels | Search and grouping |
+| Folder | A directory on the user's computer its run may read, never change. Left out, it is the folder of the chat or run it was filed in | The file tools `list_files`, `read_file` and `search_files`, offered only when a folder is set |
 | Due date | When it is needed, if at all | Ordering |
 
 - **Few fields are required.** It is cheap for a model to fill them all in, so most entries are complete anyway.

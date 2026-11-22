@@ -89,8 +89,9 @@ fn with_id(mut props: Value) -> Value {
 /// A run gets the same `add_task` a chat uses, so a subagent is a task one level
 /// down. At the floor it gets `add_task` without an assignee or choice: a task it
 /// writes is its own todo, which it does and ticks off with `complete_task`.
-/// Runs cannot change other tasks.
-pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
+/// Runs cannot change other tasks. With a folder attached (`board::folder_of`),
+/// every caller also gets the read-only file tools.
+pub fn specs(caller: Caller, can_rate: bool, folder: bool) -> Vec<ToolSpec> {
     let all = vec![
         ToolSpec {
             name: "propose_task",
@@ -200,6 +201,7 @@ pub fn specs(caller: Caller, can_rate: bool) -> Vec<ToolSpec> {
             },
             _ => t,
         })
+        .chain(if folder { crate::files::specs() } else { vec![] })
         .collect()
 }
 
@@ -211,8 +213,18 @@ const HANDED_OFF_BY_A_RUN: &str = "An agent will do it, knowing only its title a
 
 /// `conv` is the conversation calling the tool, and `model` the model it is running on.
 pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    let mut args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    // A task's folder is set by the user, or passed down; a model never picks one.
+    if let Some(obj) = args.as_object_mut() {
+        obj.remove("dir");
+    }
     let result = (|| -> anyhow::Result<String> {
+        if crate::files::NAMES.contains(&name) {
+            let Some(root) = board::folder_of(db, conv)? else {
+                anyhow::bail!("no folder is attached to this conversation, so there are no files to read");
+            };
+            return crate::files::execute(&root, name, &args);
+        }
         let caller = caller(db, conv)?;
         let worker = caller != Caller::Chat;
         if !offered(caller, name, true) {
@@ -491,8 +503,8 @@ mod tests {
             c.execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-' || ?1, 'lab:m')", rusqlite::params![task])
         };
         let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
-        let names = |conv: &str| -> Vec<&'static str> { specs(caller(c, conv).unwrap(), false).iter().map(|t| t.name).collect() };
-        let add_props = |conv: &str| specs(caller(c, conv).unwrap(), false).into_iter().find(|t| t.name == "add_task").unwrap().parameters;
+        let names = |conv: &str| -> Vec<&'static str> { specs(caller(c, conv).unwrap(), false, false).iter().map(|t| t.name).collect() };
+        let add_props = |conv: &str| specs(caller(c, conv).unwrap(), false, false).into_iter().find(|t| t.name == "add_task").unwrap().parameters;
         // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
         assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
         run(1)?;
@@ -526,6 +538,39 @@ mod tests {
         assert!(call("task-1", "add_task", json!({ "title": "another", "assignee": "agent", "choice": "smart" })).starts_with("added task 4"));
         assert_eq!(board::task(c, 4)?.fields.choice, board::Choice::Private);
         let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// The file tools are offered only with a folder attached, and refused without one.
+    #[test]
+    fn file_tools_only_with_a_folder() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("arity-filetools-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = crate::journal::Journal::open(&path)?;
+        let c = db.conn();
+        let offered = |conv: &str| -> Vec<&'static str> {
+            let folder = board::folder_of(c, conv).unwrap().is_some();
+            specs(caller(c, conv).unwrap(), false, folder).iter().map(|t| t.name).collect()
+        };
+        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
+        for name in crate::files::NAMES {
+            assert!(!offered("chat").contains(&name));
+        }
+        assert!(call("chat", "list_files", json!({})).contains("no folder is attached"));
+        let repo = std::env::temp_dir().join(format!("arity-filetools-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&repo)?;
+        std::fs::write(repo.join("notes.txt"), "hello\n")?;
+        board::set_folder(c, "chat", repo.to_str())?;
+        assert!(offered("chat").ends_with(&crate::files::NAMES));
+        assert_eq!(call("chat", "list_files", json!({})), "notes.txt");
+        // A model cannot point a task somewhere else: the chat's folder passes down.
+        call("chat", "add_task", json!({ "title": "look", "assignee": "agent", "dir": "/" }));
+        c.execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'lab:m')", [])?;
+        assert_eq!(board::folder_of(c, "task-1")?, Some(std::fs::canonicalize(&repo)?));
+        assert!(offered("task-1").contains(&"read_file"));
+        assert!(call("task-1", "read_file", json!({ "path": "notes.txt" })).contains("1  hello"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&repo);
         Ok(())
     }
 

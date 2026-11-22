@@ -50,6 +50,14 @@ struct TaskCard: View {
                 }
             }
             .controlSize(.small)
+            if let dir = fields.dir {
+                Label(dir, systemImage: "folder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help("Its run reads this folder, and changes nothing in it")
+            }
         }
     }
 

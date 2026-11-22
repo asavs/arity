@@ -16,10 +16,13 @@ const USAGE: &str = "usage:
                                              --free or --private to let Arity pick for a chat;
                                              if a turn is running there, the message steers it (cutting off its
                                              reply), or with --after-turn joins when it would end;
-                                             --inbox leaves it for the next turn and starts nothing
+                                             --inbox leaves it for the next turn and starts nothing;
+                                             --dir <path> first attaches a folder (see folder)
   arity resume <conv> [model]                carry on a conversation that stopped
   arity stop   <conv>                        stop the turn running in a conversation, from anywhere
   arity fork   <entry> <new-conv>            branch a conversation at an entry
+  arity folder <conv> [<path> | --clear]     the folder a conversation's file tools may read, read-only;
+                                             tasks filed there take it with them
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
                                              drawn among the top three its choice allows
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
@@ -49,6 +52,7 @@ const USAGE: &str = "usage:
 
 fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
         --due YYYY-MM-DD  --blocked-by <id,id>  --tag <t> (repeatable)  --no-tags
+        --dir <path> | --no-dir  the folder its run may read; left out, the chat's
 
 data: $ARITY_HOME, or ~/Library/Application Support/Arity";
 
@@ -123,10 +127,16 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 (false, None) => arg(2),
             };
-            let (how, words) = match arg(3).as_str() {
-                "--after-turn" => (Delivery::AfterTurn, &args[4..]),
-                "--inbox" => (Delivery::Inbox, &args[4..]),
-                _ => (Delivery::Steer, &args[3..]),
+            let mut rest = &args[3..];
+            if rest.first().is_some_and(|a| a == "--dir") {
+                let dir = rest.get(1).ok_or("--dir needs a path")?;
+                arity.set_folder(conv.clone(), Some(absolute(dir)?))?;
+                rest = &rest[2..];
+            }
+            let (how, words) = match rest.first().map(String::as_str) {
+                Some("--after-turn") => (Delivery::AfterTurn, &rest[1..]),
+                Some("--inbox") => (Delivery::Inbox, &rest[1..]),
+                _ => (Delivery::Steer, rest),
             };
             if words.is_empty() {
                 return Err("nothing to send".into());
@@ -155,6 +165,19 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ("fork", 3) => {
             arity.fork(arg(1).parse()?, arg(2))?;
             println!("{} now branches from entry #{}", arg(2), arg(1));
+        }
+        ("folder", 2) => match arity.folder(arg(1))? {
+            Some(dir) => println!("{dir}"),
+            None => println!("{} has no folder", arg(1)),
+        },
+        ("folder", 3) => {
+            if arg(2) == "--clear" {
+                arity.set_folder(arg(1), None)?;
+                println!("{} has no folder now", arg(1));
+            } else {
+                arity.set_folder(arg(1), Some(absolute(&arg(2))?))?;
+                println!("{} reads {}", arg(1), arity.folder(arg(1))?.unwrap_or_default());
+            }
         }
         ("task", n) if n >= 2 => {
             let (words, fields) = parse_fields(&args[1..])?;
@@ -434,6 +457,15 @@ fn print(m: &Message) {
     }
 }
 
+/// A folder named on the command line, as the absolute path a run can use from anywhere.
+fn absolute(dir: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = std::fs::canonicalize(dir).map_err(|e| format!("no folder {dir}: {e}"))?;
+    if !path.is_dir() {
+        return Err(format!("{dir} is not a folder").into());
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Split arguments into plain words (a title) and field flags, as the JSON the
 /// core's tools take. Everything after `--` is the brief.
 fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::error::Error>> {
@@ -457,6 +489,8 @@ fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::er
             "--priority" => fields["priority"] = json!(value(a)?),
             "--due" => fields["due"] = json!(value(a)?),
             "--no-due" => fields["due"] = Value::Null,
+            "--dir" => fields["dir"] = json!(absolute(&value(a)?)?),
+            "--no-dir" => fields["dir"] = Value::Null,
             "--blocked-by" => {
                 let ids: Vec<Value> = value(a)?.split(',').filter(|s| !s.is_empty()).map(|s| json!(s.trim())).collect();
                 fields["blocked_by"] = json!(ids);
@@ -512,6 +546,9 @@ fn thread_line(thread: &Thread, me: &str) -> String {
         extra.push(format!("blocked by {}", ids.join(",")));
     }
     extra.extend(f.tags.iter().map(|t| format!("#{t}")));
+    if let Some(d) = &f.dir {
+        extra.push(format!("in {d}"));
+    }
     if let Some(origin) = &t.origin {
         extra.push(format!("from {origin}"));
     }

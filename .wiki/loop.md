@@ -45,4 +45,5 @@ Delegation is the same loop calling itself one level down through the [board](wo
 Capabilities narrow with depth so recursion stays safe and terminates:
 
 - **Clearance propagates down.** Tasks filed by a `private` run stay `private`, whatever the run asks for.
+- **The folder propagates down.** A folder attached to a chat passes to the tasks filed there and to their sub-tasks, unless the user gives a task its own. The file tools read only inside it, through symlinks and `..` too, and change nothing. A model cannot choose or change a task's folder.
 - **The floor is the base case.** At maximum depth, delegation is removed from the toolset: a task written there becomes the thread's own todo, which triggers no router, spawns no child and needs no rating.
