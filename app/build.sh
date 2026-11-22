@@ -22,6 +22,7 @@ cp $OUT/gen/arity_coreFFI.h $OUT/headers/
 cp $OUT/gen/arity_coreFFI.modulemap $OUT/headers/module.modulemap
 xcodebuild -create-xcframework -library $LIB/libarity_core.a -headers $OUT/headers \
   -output $OUT/arity_coreFFI.xcframework >/dev/null
+mkdir -p app/Sources/ArityCore
 cp $OUT/gen/arity_core.swift app/Sources/ArityCore/arity_core.swift
 
 # 3. The SwiftUI app, wrapped in a minimal bundle so macOS treats it as a real app.
