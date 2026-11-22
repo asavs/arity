@@ -11,7 +11,7 @@ A papercut is a quick note that something got in the way. Any agent or the user 
 | Kind | Example | What happens |
 |---|---|---|
 | Complaint | "This tool's error message didn't say what went wrong." "The skill told me to use a command that doesn't exist." "The brief didn't say which repo." | Logged. Nobody has to respond |
-| Request for help | "I don't have access to the staging server." "I'm stuck and don't know who to ask." | Logged, and also sent as a [message](agent-tiers.md#message) to the parent or the user, delivered by steer or inbox like any other |
+| Request for help | "I don't have access to the staging server." "I'm stuck and don't know who to ask." | Logged, and also sent as a [message](agent-tiers.md#message) to the parent or the user, at whatever timing the filer picks, like any other |
 
 Asking for help is a message that also leaves a record.
 
