@@ -30,6 +30,7 @@ mod prompt;
 mod tools;
 mod usage;
 mod turn;
+mod worktree;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -204,6 +205,66 @@ pub struct Score {
     pub model: String,
     pub rated: i64,
     pub average: f64,
+}
+
+/// One file a run changed in its isolated worktree.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DiffFileInfo {
+    pub path: String,
+    /// "added", "modified", "deleted" or "renamed".
+    pub status: String,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// What a run changed in its own git worktree, for review before it is applied.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WorktreeDiffInfo {
+    pub conversation: String,
+    /// The user's real checkout, where `apply_worktree` lands the changes.
+    pub repo_root: String,
+    /// The run's isolated folder, which its file tools read and write.
+    pub work_dir: String,
+    pub base_commit: String,
+    /// "active", "applied" or "discarded". Applied and discarded worktrees are
+    /// gone, so they come with no files and no patch.
+    pub status: String,
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    pub files: Vec<DiffFileInfo>,
+    /// A unified diff against the commit the worktree was made from.
+    pub patch: String,
+    /// The patch was cut short; `files` is still complete.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ApplyResult {
+    pub files_applied: u32,
+    pub summary: String,
+}
+
+impl From<worktree::WorktreeDiff> for WorktreeDiffInfo {
+    fn from(d: worktree::WorktreeDiff) -> Self {
+        WorktreeDiffInfo {
+            conversation: d.conversation,
+            repo_root: d.repo_root,
+            work_dir: d.work_dir,
+            base_commit: d.base_commit,
+            status: d.status,
+            files_changed: d.files_changed,
+            insertions: d.insertions,
+            deletions: d.deletions,
+            files: d
+                .files
+                .into_iter()
+                .map(|f| DiffFileInfo { path: f.path, status: f.status, insertions: f.insertions, deletions: f.deletions })
+                .collect(),
+            patch: d.patch,
+            truncated: d.truncated,
+        }
+    }
 }
 
 /// Somewhere you have models: OpenAI, OpenCode, Nous, this Mac. It holds at
@@ -684,6 +745,34 @@ impl Arity {
         Ok(board::reveal(self.journal()?.conn(), run)?)
     }
 
+    // Worktrees: review and apply a run's changes
+
+    /// What the run in `conversation` changed in its isolated git worktree, as
+    /// files with line counts and a unified patch. None if it has no worktree
+    /// (its folder is not in a git repo). After `apply_worktree` or
+    /// `discard_worktree` it still answers, with that `status` and nothing to review.
+    pub fn worktree_diff(&self, conversation: String) -> Result<Option<WorktreeDiffInfo>> {
+        Ok(worktree::diff(self.journal()?.conn(), &conversation)?.map(Into::into))
+    }
+
+    /// Apply the run's reviewed changes to the user's real checkout, then remove
+    /// its worktree. Refused, with nothing changed, if they conflict with the
+    /// checkout's own edits or while the run is still going.
+    pub fn apply_worktree(&self, conversation: String) -> Result<ApplyResult> {
+        let db = self.journal()?;
+        refuse_while_running(&db, &conversation, "apply")?;
+        let out = worktree::apply(db.conn(), &conversation)?;
+        Ok(ApplyResult { files_applied: out.files_applied, summary: out.summary })
+    }
+
+    /// Throw the run's worktree away without applying it. False if there was
+    /// nothing active to discard. Refused while the run is still going.
+    pub fn discard_worktree(&self, conversation: String) -> Result<bool> {
+        let db = self.journal()?;
+        refuse_while_running(&db, &conversation, "discard")?;
+        Ok(worktree::discard(db.conn(), &conversation)?)
+    }
+
     // ChatGPT
 
     /// Opens the browser and waits for the ChatGPT sign-in. Returns the account's email.
@@ -876,6 +965,10 @@ impl Arity {
         on: &mut dyn FnMut(Event),
     ) -> Result<Option<agent::Outcome>> {
         let trial = board::trial_state(db.conn(), conv)?;
+        if trial.is_some() {
+            // A run in a git repo works in its own worktree, made now if it has none (or lost it).
+            dispatch::isolate(db.conn(), &self.dir, conv)?;
+        }
         let hidden = hidden(db, conv)?;
         // Someone asked for it: a run stopped or waiting out a backoff goes on now.
         if let Some((tr_id, _, _, false)) = &trial {
@@ -1065,6 +1158,25 @@ fn resolve_model(db: &Journal, conv: &str, given: &str) -> anyhow::Result<String
     anyhow::bail!("{conv} has no model yet; name one")
 }
 
+/// A worktree is not applied or discarded out from under a worker that is
+/// using it: a turn running there, or a run still going and not stopped.
+fn refuse_while_running(db: &Journal, conv: &str, what: &str) -> Result<()> {
+    let working: bool = turn::running(db.conn())?.iter().any(|r| r == conv)
+        || db
+            .conn()
+            .query_row(
+                "SELECT count(*) > 0 FROM trials WHERE conversation = ?1 AND ended IS NULL AND abandoned = 0
+                   AND paused = 0 AND waiting = 0",
+                [conv],
+                |r| r.get(0),
+            )
+            .map_err(anyhow::Error::from)?;
+    if working {
+        return Err(ArityError::Failed(format!("The run in {conv} is still going; stop it before you {what} its changes")));
+    }
+    Ok(())
+}
+
 fn busy(conv: &str) -> ArityError {
     ArityError::Failed(format!("A turn is running in {conv}; wait for it to end or stop it first"))
 }
@@ -1191,6 +1303,7 @@ mod tests {
     use super::*;
     use crate::model::{Reply, ToolCall};
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn talking_to_a_worker_directly_keeps_it_blind_until_rated() -> anyhow::Result<()> {
@@ -1447,6 +1560,196 @@ mod tests {
         let nothing = arity.continue_in(&db, "chat", None, Some(&model), &mut |_| {}).unwrap_err().to_string();
         assert!(nothing.contains("Nothing to continue"), "{nothing}");
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A small git repo with one commit: `keep.txt` and `sub/nested.txt`.
+    fn git_repo(name: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!("arity-wt-repo-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("keep.txt"), "base\n").unwrap();
+        std::fs::write(repo.join("sub/nested.txt"), "nested\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "arity@example.invalid"]);
+        git(&["config", "user.name", "Arity Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        std::fs::canonicalize(&repo).unwrap()
+    }
+
+    /// A worker that writes `file` with `text`, edits `keep.txt`, and finishes.
+    fn coder(file: &'static str, text: &'static str) -> impl Fn(&str, &[Entry], &[tools::ToolSpec], &mut model::Sink) -> anyhow::Result<Reply> {
+        move |_, chain, tools, _| {
+            assert!(["write_file", "edit_file", "bash"].iter().all(|n| tools.iter().any(|t| t.name == *n)), "coding tools offered");
+            let last = chain.iter().rev().find(|e| e.kind != "system").unwrap();
+            let call = |name: &str, args: serde_json::Value| Reply {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: format!("{name}-{file}"), name: name.into(), arguments: args.to_string() }],
+                interrupted: false,
+                usage: None,
+            };
+            Ok(match (last.kind.as_str(), last.body["name"].as_str()) {
+                ("user", _) => call("write_file", json!({ "path": file, "content": text })),
+                ("tool", Some("write_file")) => call("edit_file", json!({ "path": "keep.txt", "old_text": "base", "new_text": format!("base+{file}") })),
+                ("tool", Some("edit_file")) => call("finish", json!({ "report": format!("wrote {file}") })),
+                other => panic!("coder did not expect {other:?}"),
+            })
+        }
+    }
+
+    /// A coding task filed in a chat attached to a git repo runs in its own
+    /// worktree: the checkout stays untouched while it runs and while it waits
+    /// for a rating, the exact diff is there to review, and applying it lands
+    /// the changes in the checkout. A sub-task it files inherits the real repo.
+    #[test]
+    fn a_coding_run_works_in_its_own_worktree_until_its_diff_is_applied() -> anyhow::Result<()> {
+        use crate::dispatch::{Did, work_once_scripted};
+        use crate::leaderboard::{Candidate, Reach};
+        let (dir, arity, db) = scratch_arity("worktree-apply")?;
+        std::fs::write(dir.join("config.json"), json!({ "workers": [] }).to_string())?;
+        let repo = git_repo("apply");
+        let only = vec![Candidate { model: "lab:coder".into(), reach: Reach::Local }];
+        arity.set_folder("chat-1".into(), Some(repo.to_string_lossy().into_owned()))?;
+        let f = TaskFields { title: "add hello".into(), assignee: board::AGENT.into(), ..Default::default() };
+        let task = board::add_task(db.conn(), &f, Some("chat-1"))?;
+        assert_eq!(board::task(db.conn(), task)?.fields.dir.as_deref(), repo.to_str());
+        assert!(arity.worktree_diff("task-1".into())?.is_none(), "nothing before it is claimed");
+
+        let worker = coder("hello.txt", "hi\n");
+        let did = work_once_scripted(&db, &dir, &only, &worker)?;
+        assert!(matches!(did, Did::Ran { task: 1, trial: 1 }), "{:?}", did.describe());
+
+        // It worked in an isolated worktree under the data folder; the checkout is untouched.
+        let work_dir = std::fs::canonicalize(arity.folder("task-1".into())?.unwrap())?;
+        assert!(work_dir.starts_with(std::fs::canonicalize(&dir)?.join("worktrees")), "{}", work_dir.display());
+        assert_eq!(std::fs::read_to_string(work_dir.join("hello.txt"))?, "hi\n");
+        assert_eq!(std::fs::read_to_string(work_dir.join("keep.txt"))?, "base+hello.txt\n");
+        assert_eq!(std::fs::read_to_string(repo.join("keep.txt"))?, "base\n");
+        assert!(!repo.join("hello.txt").exists());
+        assert_eq!(arity.folder("chat-1".into())?.as_deref(), repo.to_str(), "the chat still reads the real repo");
+        let status = std::process::Command::new("git").arg("-C").arg(&repo).args(["status", "--porcelain"]).output()?;
+        assert!(status.stdout.is_empty(), "the checkout is clean while the run waits for a rating");
+        assert_eq!(board::task(db.conn(), task)?.run_state, Some(RunState::NeedsRating));
+
+        // A sub-task it files inherits the real repo, so its own worktree is a sibling and applies there.
+        let sub = board::add_task(db.conn(), &TaskFields { title: "sub".into(), assignee: board::AGENT.into(), ..Default::default() }, Some("task-1"))?;
+        assert_eq!(board::task(db.conn(), sub)?.fields.dir.as_deref(), repo.to_str());
+
+        // The exact diff, for review before rating.
+        let d = arity.worktree_diff("task-1".into())?.unwrap();
+        assert_eq!((d.status.as_str(), d.files_changed, d.insertions, d.deletions), ("active", 2, 2, 1));
+        assert_eq!(Path::new(&d.repo_root), repo);
+        let kinds: Vec<(&str, &str)> = d.files.iter().map(|f| (f.path.as_str(), f.status.as_str())).collect();
+        assert!(kinds.contains(&("hello.txt", "added")) && kinds.contains(&("keep.txt", "modified")), "{kinds:?}");
+        assert!(d.patch.contains("+hi") && d.patch.contains("+base+hello.txt") && d.patch.contains("-base"), "{}", d.patch);
+        assert!(!d.truncated);
+
+        // Applying lands it in the checkout, removes the worktree, and the status stays readable.
+        let applied = arity.apply_worktree("task-1".into())?;
+        assert_eq!(applied.files_applied, 2);
+        assert_eq!(std::fs::read_to_string(repo.join("hello.txt"))?, "hi\n");
+        assert_eq!(std::fs::read_to_string(repo.join("keep.txt"))?, "base+hello.txt\n");
+        assert!(!work_dir.exists());
+        let after = arity.worktree_diff("task-1".into())?.unwrap();
+        assert_eq!((after.status.as_str(), after.files_changed, after.patch.as_str()), ("applied", 0, ""));
+        assert!(arity.apply_worktree("task-1".into()).is_err(), "not twice");
+        assert!(!arity.discard_worktree("task-1".into())?);
+        assert_eq!(arity.folder("task-1".into())?.as_deref(), repo.to_str(), "the folder is the repo's again");
+        // Rating still works afterwards.
+        arity.rate(1, 5, "fine".into())?;
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+        Ok(())
+    }
+
+    /// Two runs on one repo get distinct worktrees and never see each other's
+    /// files; discarding one leaves the checkout and the other alone.
+    #[test]
+    fn parallel_runs_get_separate_worktrees_and_discarding_one_touches_nothing() -> anyhow::Result<()> {
+        use crate::dispatch::{Did, work_once_scripted};
+        use crate::leaderboard::{Candidate, Reach};
+        let (dir, arity, db) = scratch_arity("worktree-parallel")?;
+        std::fs::write(dir.join("config.json"), json!({ "workers": [] }).to_string())?;
+        let repo = git_repo("parallel");
+        let only = vec![Candidate { model: "lab:coder".into(), reach: Reach::Local }];
+        for title in ["first", "second"] {
+            let f = TaskFields {
+                title: title.into(),
+                assignee: board::AGENT.into(),
+                dir: Some(repo.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            board::add_task(db.conn(), &f, None)?;
+        }
+        // Both are open and neither is rated at once: the second starts while the first's worktree lives.
+        let first = coder("one.txt", "1\n");
+        let second = coder("two.txt", "2\n");
+        assert!(matches!(work_once_scripted(&db, &dir, &only, &first)?, Did::Ran { task: 1, .. }));
+        // The first result is delivered to the user's inbox before the next task is claimed.
+        assert!(matches!(work_once_scripted(&db, &dir, &only, &second)?, Did::Reported { task: 1, parent: None }));
+        assert!(matches!(work_once_scripted(&db, &dir, &only, &second)?, Did::Ran { task: 2, .. }));
+
+        let d1 = arity.worktree_diff("task-1".into())?.unwrap();
+        let d2 = arity.worktree_diff("task-2".into())?.unwrap();
+        assert_ne!(d1.work_dir, d2.work_dir);
+        assert!(Path::new(&d1.work_dir).is_dir() && Path::new(&d2.work_dir).is_dir());
+        assert_eq!(d1.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["keep.txt", "one.txt"]);
+        assert_eq!(d2.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["keep.txt", "two.txt"]);
+        assert!(!Path::new(&d1.work_dir).join("two.txt").exists() && !Path::new(&d2.work_dir).join("one.txt").exists());
+        assert_eq!(d1.base_commit, d2.base_commit);
+
+        // Discarding the first leaves the checkout and the second as they were.
+        assert!(arity.discard_worktree("task-1".into())?);
+        assert!(!Path::new(&d1.work_dir).exists());
+        assert_eq!(arity.worktree_diff("task-1".into())?.unwrap().status, "discarded");
+        assert_eq!(std::fs::read_to_string(repo.join("keep.txt"))?, "base\n");
+        assert!(!repo.join("one.txt").exists() && !repo.join("two.txt").exists());
+        let d2 = arity.worktree_diff("task-2".into())?.unwrap();
+        assert_eq!((d2.status.as_str(), d2.files_changed), ("active", 2));
+
+        // The second still applies, alone.
+        arity.apply_worktree("task-2".into())?;
+        assert_eq!(std::fs::read_to_string(repo.join("two.txt"))?, "2\n");
+        assert!(!repo.join("one.txt").exists());
+        assert_eq!(std::fs::read_to_string(repo.join("keep.txt"))?, "base+two.txt\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+        Ok(())
+    }
+
+    /// Folders outside git (and repos with no commits) are worked in directly.
+    #[test]
+    fn a_run_in_a_plain_folder_has_no_worktree() -> anyhow::Result<()> {
+        use crate::dispatch::{Did, work_once_scripted};
+        use crate::leaderboard::{Candidate, Reach};
+        let (dir, arity, db) = scratch_arity("worktree-plain")?;
+        std::fs::write(dir.join("config.json"), json!({ "workers": [] }).to_string())?;
+        let plain = std::fs::canonicalize({
+            let p = std::env::temp_dir().join(format!("arity-wt-plain-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p)?;
+            std::fs::write(p.join("keep.txt"), "base\n")?;
+            p
+        })?;
+        let only = vec![Candidate { model: "lab:coder".into(), reach: Reach::Local }];
+        let f = TaskFields { title: "t".into(), assignee: board::AGENT.into(), dir: Some(plain.to_string_lossy().into_owned()), ..Default::default() };
+        board::add_task(db.conn(), &f, None)?;
+        let did = work_once_scripted(&db, &dir, &only, &coder("a.txt", "a\n"))?;
+        assert!(matches!(did, Did::Ran { .. }), "{:?}", did.describe());
+        assert_eq!(arity.folder("task-1".into())?.as_deref(), plain.to_str());
+        assert_eq!(std::fs::read_to_string(plain.join("a.txt"))?, "a\n");
+        assert!(arity.worktree_diff("task-1".into())?.is_none());
+        assert!(!arity.discard_worktree("task-1".into())?);
+        assert!(arity.apply_worktree("task-1".into()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
         Ok(())
     }
 

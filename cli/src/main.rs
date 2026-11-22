@@ -31,6 +31,11 @@ const USAGE: &str = "usage:
   arity reset  <conv> [note...]              start the model afresh from here; the thread keeps every message
   arity folder <conv> [<path> | --clear]     the folder a conversation's file and shell tools work in;
                                              tasks filed there take it with them
+  arity diff   <conv>                        what a coding run changed in its own git worktree: files, +ins/-del,
+                                             and the unified patch; the folder's repo is untouched until apply
+  arity apply  <conv>                        apply that run's changes to the real checkout and remove its
+                                             worktree; refused, changing nothing, if they conflict with edits there
+  arity discard <conv>                       throw the run's worktree away without applying it
   arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
                                              drawn among the top three its choice allows
   arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
@@ -246,6 +251,38 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 arity.set_folder(arg(1), Some(absolute(&arg(2))?))?;
                 println!("{} reads {}", arg(1), arity.folder(arg(1))?.unwrap_or_default());
+            }
+        }
+        ("diff", 2) => match arity.worktree_diff(arg(1))? {
+            None => println!("No worktree for {}: its folder is not in a git repo, or it has none", arg(1)),
+            Some(d) => {
+                println!("{}  [{}]  base {}", d.work_dir, d.status, d.base_commit.chars().take(10).collect::<String>());
+                match d.status.as_str() {
+                    "applied" => println!("Changes applied to {}", d.repo_root),
+                    "discarded" => println!("Worktree discarded"),
+                    _ if d.files_changed == 0 => println!("No changes"),
+                    _ => {
+                        for f in &d.files {
+                            println!("  {:<9} +{} / -{}  {}", f.status, f.insertions, f.deletions, f.path);
+                        }
+                        println!("{} file(s) changed, +{} / -{}\n", d.files_changed, d.insertions, d.deletions);
+                        print!("{}", d.patch);
+                        if !d.patch.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                }
+            }
+        },
+        ("apply", 2) => {
+            let out = arity.apply_worktree(arg(1))?;
+            println!("{}", out.summary);
+        }
+        ("discard", 2) => {
+            if arity.discard_worktree(arg(1))? {
+                println!("Discarded the worktree of {}; the real checkout was not touched", arg(1));
+            } else {
+                println!("No active worktree for {}", arg(1));
             }
         }
         ("task", n) if n >= 2 => {

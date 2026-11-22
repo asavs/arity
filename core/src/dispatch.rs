@@ -133,6 +133,10 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
     match work {
         Work::GaveUp(did) => Ok(did),
         Work::Trial { trial, task, conv, model } => {
+            if let Err(e) = isolate(db.conn(), data_dir, &conv) {
+                let wait = retry_later(db.conn(), trial, &format!("{e:#}"))?;
+                return Ok(Did::Failed { task, trial, error: format!("failed; retrying in {wait} s") });
+            }
             // Renew the lease after every step, so a long run is not taken over.
             let mut renew = |_: crate::Event| {
                 let _ = db.conn().execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS]);
@@ -182,6 +186,22 @@ pub fn work_once_with(db: &Journal, data_dir: &Path, reachable: &dyn Fn() -> Res
             }
         }
     }
+}
+
+/// Give the run in `conv` its own detached git worktree when its attached
+/// folder is inside a git repo with at least one commit, so concurrent coding
+/// runs never touch each other or the user's checkout until the result is
+/// reviewed and applied. The worktree is made from the *source* folder (the
+/// user's real checkout, which sub-tasks inherit too), and is reused if the run
+/// is taken over or continued. Folders outside git, and repos with no commits
+/// yet, are left alone: the run works directly in the attached folder.
+pub(crate) fn isolate(c: &Connection, data_dir: &Path, conv: &str) -> Result<()> {
+    let Some(dir) = crate::board::source_folder_of(c, conv)? else { return Ok(()) };
+    if crate::worktree::git_root(&dir).is_none() {
+        return Ok(());
+    }
+    crate::worktree::ensure_for_conversation(c, data_dir, conv, &dir)?;
+    Ok(())
 }
 
 /// End a run that kept dying with a failed result, so its parent hears of it
@@ -457,6 +477,10 @@ pub(crate) fn work_once_scripted(db: &Journal, data_dir: &Path, reach: &[Candida
     match work {
         Work::GaveUp(did) => Ok(did),
         Work::Trial { trial, task, conv, model } => {
+            if let Err(e) = isolate(db.conn(), data_dir, &conv) {
+                let wait = retry_later(db.conn(), trial, &format!("{e:#}"))?;
+                return Ok(Did::Failed { task, trial, error: format!("failed; retrying in {wait} s") });
+            }
             let mut renew = |_: crate::Event| {
                 let _ = db.conn().execute("UPDATE trials SET lease_until = ?2 WHERE id = ?1", params![trial, now() + LEASE_SECS]);
             };

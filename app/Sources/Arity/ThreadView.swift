@@ -45,7 +45,7 @@ struct ThreadView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text(error).font(.callout).textSelection(.enabled)
                     Spacer()
-                    Button("Retry") { store.retry() }.disabled(busy)
+                    if !store.errorIsWorktree { Button("Retry") { store.retry() }.disabled(busy) }
                     Button("Dismiss") { store.error = nil }
                 }
                 .padding(10)
@@ -61,6 +61,11 @@ struct ThreadView: View {
                         .padding(.horizontal, 14)
                         .padding(.top, 10)
                         .padding(.bottom, 6)
+                    Divider()
+                }
+                if let diff = store.worktreeDiff {
+                    WorktreeDiffBar(diff: diff, running: busy || task.runState == .running || task.runState == .failing)
+                        .id(task.id)
                     Divider()
                 }
                 TaskDock(task: task).id(task.id)
@@ -321,6 +326,176 @@ struct ThreadView: View {
         guard !text.isEmpty else { return }
         message = ""
         store.send(text, how: how)
+    }
+}
+
+/// What a coding run changed in its own git worktree, right above the rating stars: the files with
+/// their line counts, the diff itself folded away, and Apply to Repo or Discard. The checkout is
+/// untouched until Apply, so the changes can be read before the run is rated.
+private struct WorktreeDiffBar: View {
+    @Environment(Store.self) private var store
+    let diff: WorktreeDiffInfo
+    /// The run is going now: its worktree is in use, so it can be neither applied nor discarded.
+    let running: Bool
+    @State private var expanded = false
+    @State private var confirmingDiscard = false
+    @State private var rendered = AttributedString()
+
+    private var active: Bool { diff.status == "active" }
+    private var hasChanges: Bool { diff.filesChanged > 0 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button { withAnimation(.snappy(duration: 0.18)) { expanded.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .opacity(active && hasChanges ? 1 : 0)
+                        summary
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!(active && hasChanges))
+                .help(active ? "Isolated git worktree at \(diff.workDir). \(repoName) is untouched until you apply it."
+                             : "Applied or discarded; the worktree is gone")
+                Spacer(minLength: 8)
+                if active {
+                    Button("Discard") { confirmingDiscard = true }
+                        .controlSize(.small)
+                        .disabled(running || store.worktreeBusy)
+                        .help(running ? "Wait for the run to stop before discarding its worktree"
+                                      : "Throw this run's changes away; \(repoName) is not touched")
+                        .confirmationDialog("Discard this run's changes?", isPresented: $confirmingDiscard) {
+                            Button("Discard Worktree", role: .destructive) { store.discardWorktree() }
+                        } message: {
+                            Text("The \(diff.filesChanged) changed file\(diff.filesChanged == 1 ? "" : "s") in its worktree are deleted. \(repoName) is not touched.")
+                        }
+                    if hasChanges {
+                        Button("Apply to Repo", systemImage: "square.and.arrow.down.on.square") { store.applyWorktree() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(running || store.worktreeBusy)
+                            .help(running ? "Wait for the run to stop before applying its changes"
+                                          : "Apply these changes to \(diff.repoRoot)")
+                    }
+                    if store.worktreeBusy { ProgressView().controlSize(.small) }
+                }
+            }
+            if expanded && active && hasChanges {
+                details
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.secondary)
+        .task(id: diff.patch) { rendered = Self.highlight(diff.patch) }
+    }
+
+    private var repoName: String { URL(fileURLWithPath: diff.repoRoot).lastPathComponent }
+
+    @ViewBuilder private var summary: some View {
+        switch diff.status {
+        case "applied":
+            Label("Applied to repo", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case "discarded":
+            Label("Worktree discarded", systemImage: "trash")
+                .foregroundStyle(.secondary)
+        default:
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
+                if hasChanges {
+                    Text("\(diff.filesChanged) file\(diff.filesChanged == 1 ? "" : "s") changed").fontWeight(.medium)
+                    Text("+\(diff.insertions)").foregroundStyle(.green).monospacedDigit()
+                    Text("−\(diff.deletions)").foregroundStyle(.red).monospacedDigit()
+                } else {
+                    Text("No changes yet").foregroundStyle(.secondary)
+                }
+                Text("in its own worktree").font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(diff.files, id: \.path) { file in
+                    HStack(spacing: 8) {
+                        Image(systemName: Self.symbol(file.status))
+                            .foregroundStyle(Self.tint(file.status))
+                            .frame(width: 14)
+                            .help(file.status.capitalized)
+                        Text(file.path).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text("+\(file.insertions)").foregroundStyle(.green)
+                        Text("−\(file.deletions)").foregroundStyle(.red)
+                    }
+                    .font(.caption.monospacedDigit())
+                }
+            }
+            ScrollView([.horizontal, .vertical]) {
+                Text(rendered)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize()
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
+            .background(.background, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+            if diff.truncated {
+                Label("The diff is cut at 64 KiB; the file list above is complete.", systemImage: "scissors")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func symbol(_ status: String) -> String {
+        switch status {
+        case "added": "plus.circle.fill"
+        case "deleted": "minus.circle.fill"
+        case "renamed": "arrow.right.circle.fill"
+        default: "pencil.circle.fill"
+        }
+    }
+
+    private static func tint(_ status: String) -> Color {
+        switch status {
+        case "added": .green
+        case "deleted": .red
+        case "renamed": .cyan
+        default: .orange
+        }
+    }
+
+    /// Green for added lines, red for removed, cyan for hunk headers, quiet for file headers.
+    private static func highlight(_ patch: String) -> AttributedString {
+        var out = AttributedString()
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            var run = AttributedString(line + "\n")
+            if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff ") || line.hasPrefix("index ")
+                || line.hasPrefix("new file") || line.hasPrefix("deleted file") || line.hasPrefix("similarity")
+                || line.hasPrefix("rename ") || line.hasPrefix("old mode") || line.hasPrefix("new mode") {
+                run.foregroundColor = .secondary
+                if line.hasPrefix("diff ") { run.font = .system(.caption, design: .monospaced).bold() }
+            } else if line.hasPrefix("@@") {
+                run.foregroundColor = .cyan
+            } else if line.hasPrefix("+") {
+                run.foregroundColor = .green
+                run.backgroundColor = Color.green.opacity(0.12)
+            } else if line.hasPrefix("-") {
+                run.foregroundColor = .red
+                run.backgroundColor = Color.red.opacity(0.12)
+            }
+            out += run
+        }
+        return out
     }
 }
 

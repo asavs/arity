@@ -80,6 +80,7 @@ impl Journal {
         crate::turn::migrate(&conn)?;
         conn.execute_batch(crate::leaderboard::TABLES)?;
         crate::board::migrate(&conn)?;
+        conn.execute_batch(crate::worktree::TABLES)?;
         Ok(Self { conn })
     }
 
@@ -147,7 +148,8 @@ impl Journal {
                  || '.' || (SELECT count(*) FROM ratings)
                  || '.' || (SELECT count(*) || ':' || ifnull(sum(seq), 0) FROM turns)
                  || '.' || (SELECT ifnull(max(id), 0) || ':' || count(*) FROM queued)
-                 || '.' || (SELECT count(*) || ':' || ifnull(sum(length(dir)), 0) FROM folders)",
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(length(dir)), 0) FROM folders)
+                 || '.' || (SELECT count(*) || ':' || ifnull(sum(status != 'active'), 0) FROM worktrees)",
             [],
             |r| r.get(0),
         )?)

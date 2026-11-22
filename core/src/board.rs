@@ -697,7 +697,7 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
     // So does the folder, unless one is given.
     let dir = match (&f.dir, origin) {
         (Some(d), _) => Some(d.clone()),
-        (None, Some(conv)) => folder_of(conn, conv)?.map(|p| p.to_string_lossy().into_owned()),
+        (None, Some(conv)) => source_folder_of(conn, conv)?.map(|p| p.to_string_lossy().into_owned()),
         (None, None) => None,
     };
     // The tools never offer delegation at the floor; this only guards the rule.
@@ -727,9 +727,22 @@ pub fn add_task(conn: &Connection, f: &TaskFields, origin: Option<&str>) -> Resu
     Ok(id)
 }
 
-/// The folder a conversation's file tools read: the one set for it, or for a
-/// run, its task's.
+/// The folder a conversation's file tools read and write: its isolated git
+/// worktree if a run of it has one, else the one set for it, or for a run, its
+/// task's (see `source_folder_of`).
 pub fn folder_of(conn: &Connection, conv: &str) -> Result<Option<std::path::PathBuf>> {
+    if let Some(work_dir) = crate::worktree::work_dir_of(conn, conv)? {
+        return Ok(Some(work_dir));
+    }
+    source_folder_of(conn, conv)
+}
+
+/// The folder attached to a conversation by the user, or for a run its task's,
+/// ignoring any worktree. This is the user's real checkout, so it is what a
+/// worktree is made from and what a sub-task inherits: sub-tasks get sibling
+/// worktrees of the real repo, never a worktree nested in their parent's, and
+/// applying one always lands in the user's own checkout.
+pub fn source_folder_of(conn: &Connection, conv: &str) -> Result<Option<std::path::PathBuf>> {
     let dir: Option<String> = conn
         .query_row("SELECT dir FROM folders WHERE conversation = ?1", params![conv], |r| r.get(0))
         .optional()?;

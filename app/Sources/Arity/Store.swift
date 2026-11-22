@@ -18,6 +18,11 @@ final class Store {
     var draft: TaskFields?
     /// The folder attached to the selected chat, enabling file and shell tools in it.
     var folder: String?
+    /// What the selected run changed in its own git worktree, for review before it is applied.
+    /// Nil for a chat, or a run whose folder is not in a git repo.
+    var worktreeDiff: WorktreeDiffInfo? = nil
+    /// An apply or discard is running, off the main thread.
+    var worktreeBusy = false
     /// Tokens the selected thread used and how full its context is, as its providers reported them.
     var conversationUsage: ConversationUsage?
     var scores: [Score] = []
@@ -64,7 +69,9 @@ final class Store {
     /// Sends from this window not yet seen running in the core.
     private var starting: Set<String> = []
     private var active: Set<String> = []
-    var error: String?
+    var error: String? { didSet { if error == nil { errorIsWorktree = false } } }
+    /// The error came from applying or discarding a worktree, which Retry would not help.
+    private(set) var errorIsWorktree = false
     /// The signed-in ChatGPT account's email, or nil.
     var chatgptAccount: String?
     /// A ChatGPT sign-in is waiting for the browser.
@@ -122,6 +129,61 @@ final class Store {
             if pendingCard?.conv != selection { draft = thread?.card }
             folder = attempt { try core.folder(conversation: selection) } ?? nil
             conversationUsage = attempt { try core.usage(conversation: selection) }
+            loadWorktreeDiff()
+        }
+    }
+
+    private var diffLoading = false
+    private var diffStale = false
+
+    /// Reread what the selected run changed in its worktree. Git does the work, so it runs off
+    /// the main thread; a request made while one runs makes it go round again once it is done.
+    private func loadWorktreeDiff() {
+        guard let conv = selection, thread?.task?.run != nil else { worktreeDiff = nil; return }
+        if diffLoading { diffStale = true; return }
+        diffLoading = true
+        let core = self.core
+        Task.detached(priority: .utility) {
+            let result = Result { try core.worktreeDiff(conversation: conv) }
+            await MainActor.run {
+                self.diffLoading = false
+                if self.selection == conv {
+                    let diff = (try? result.get()) ?? nil
+                    if diff != self.worktreeDiff { self.worktreeDiff = diff }
+                }
+                if self.diffStale { self.diffStale = false; self.loadWorktreeDiff() }
+            }
+        }
+    }
+
+    /// Apply the selected run's changes to the real checkout and remove its worktree.
+    /// A conflict with edits already in the checkout shows as the error, and nothing changes.
+    func applyWorktree() {
+        guard let conv = selection else { return }
+        changeWorktree(conv) { _ = try $0.applyWorktree(conversation: conv) }
+    }
+
+    /// Throw the selected run's worktree away without applying it.
+    func discardWorktree() {
+        guard let conv = selection else { return }
+        changeWorktree(conv) { _ = try $0.discardWorktree(conversation: conv) }
+    }
+
+    private func changeWorktree(_ conv: String, _ work: @escaping @Sendable (Arity) throws -> Void) {
+        guard !worktreeBusy else { return }
+        error = nil
+        worktreeBusy = true
+        let core = self.core
+        Task.detached {
+            let result = Result { try work(core) }
+            await MainActor.run {
+                self.worktreeBusy = false
+                if case .failure(let e) = result, self.selection == conv {
+                    self.error = Self.describe(e)
+                    self.errorIsWorktree = true
+                }
+                self.refresh(force: true)
+            }
         }
     }
 
@@ -130,10 +192,12 @@ final class Store {
         flushCard()
         pickReason = nil
         choiceChanged = false
+        worktreeDiff = nil
         guard let selection else { messages = []; draft = nil; folder = nil; conversationUsage = nil; return }
         messages = attempt { try core.messages(conversation: selection) } ?? []
         folder = attempt { try core.folder(conversation: selection) } ?? nil
         conversationUsage = attempt { try core.usage(conversation: selection) }
+        loadWorktreeDiff()
         draft = thread?.card
         if let last = attempt({ try core.lastModel(conversation: selection) }), let last {
             model = last
