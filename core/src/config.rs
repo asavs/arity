@@ -332,6 +332,22 @@ pub fn remove_provider(data_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set or disable automatic pre-turn compaction (`auto_compact_tokens`) in `config.json`.
+pub fn set_auto_compact_tokens(data_dir: &Path, tokens: Option<u64>) -> Result<()> {
+    let value = match tokens {
+        None | Some(0) => Value::Null,
+        Some(n) => {
+            anyhow::ensure!(n >= 4_000, "auto-compaction threshold must be at least 4,000 tokens (or off)");
+            json!(n)
+        }
+    };
+    let mut v = read(data_dir)?;
+    v["auto_compact_tokens"] = value;
+    parse(&v)?;
+    std::fs::write(path(data_dir), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
 /// Add a model to `workers`, or take it out. Leaves the rest of the file as it is.
 pub fn set_worker(data_dir: &Path, model: &str, on: bool) -> Result<()> {
     let mut v = read(data_dir)?;
@@ -375,6 +391,20 @@ mod tests {
         assert_eq!(parse(&json!({ "auto_compact_tokens": 50000 }))?.auto_compact_tokens, Some(50000));
         assert_eq!(parse(&json!({ "auto_compact_tokens": null }))?.auto_compact_tokens, None);
         assert_eq!(parse(&json!({ "auto_compact_tokens": 0 }))?.auto_compact_tokens, None);
+        Ok(())
+    }
+
+    #[test]
+    fn auto_compact_tokens_saves_and_disables() -> Result<()> {
+        let d = std::env::temp_dir().join(format!("arity-compact-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(load(&d)?.auto_compact_tokens, Some(DEFAULT_AUTO_COMPACT_TOKENS));
+        set_auto_compact_tokens(&d, Some(64_000))?;
+        assert_eq!(load(&d)?.auto_compact_tokens, Some(64_000));
+        set_auto_compact_tokens(&d, None)?;
+        assert_eq!(load(&d)?.auto_compact_tokens, None);
+        assert!(set_auto_compact_tokens(&d, Some(500)).is_err());
+        let _ = std::fs::remove_dir_all(&d);
         Ok(())
     }
 

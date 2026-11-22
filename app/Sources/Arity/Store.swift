@@ -35,6 +35,7 @@ final class Store {
     var hooks: [HookConfig] = []
     var builtinHooks: [BuiltinHookInfo] = []
     var tools: [ToolInfo] = []
+    var autoCompactTokens: UInt64? = 120_000
     /// OpenAI, OpenCode, Nous, this Mac, and any the user added, each with its plans.
     var accounts: [Account] = []
     /// What checking each provider's key found. Missing while a check runs.
@@ -497,6 +498,16 @@ final class Store {
         builtinHooks = core.builtinHooks()
         hooks = attempt { try core.hooks() } ?? hooks
         tools = attempt { try core.tools(conversation: selection) } ?? tools
+        if let limit = attempt({ try core.autoCompactTokens() }) {
+            autoCompactTokens = limit
+        }
+    }
+
+    func setAutoCompactTokens(_ tokens: UInt64?) {
+        error = nil
+        if attempt({ try core.setAutoCompactTokens(tokens: tokens) }) != nil {
+            autoCompactTokens = tokens
+        }
     }
 
     @discardableResult

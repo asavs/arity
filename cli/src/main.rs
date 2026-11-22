@@ -75,6 +75,7 @@ const USAGE: &str = "usage:
   arity hook   rm | enable | disable <name>  remove, enable or disable a hook; a before_tool hook may print
                                              {\"action\":\"block\"|\"rewrite\"|\"ask\",\"reason\":...}, and ask
                                              parks the call for arity approve / deny
+  arity auto-compact [off | <tokens>]        show or set the prompt-token auto-compaction threshold
   arity login | logout                       sign in to ChatGPT, or out
 
 fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
@@ -288,6 +289,32 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let note = (n > 2).then(|| args[2..].join(" "));
             arity.reset_context(arg(1), note)?;
             println!("{}'s model starts fresh from here; `arity log {}` still shows everything", arg(1), arg(1));
+        }
+        ("auto-compact", 1) => match arity.auto_compact_tokens()? {
+            Some(n) => println!("auto-compact at {} tokens", n),
+            None => println!("auto-compact is off (overflow errors still compact once)"),
+        },
+        ("auto-compact", 2) => {
+            let raw = arg(1);
+            let value = if matches!(raw.to_ascii_lowercase().as_str(), "off" | "none" | "0" | "false") {
+                None
+            } else {
+                let s = raw.trim().to_ascii_lowercase();
+                let n: u64 = if let Some(k) = s.strip_suffix('k') {
+                    k.parse::<u64>()
+                        .map_err(|_| format!("expected a token count like 120000 or 120k, or `off`, got {raw:?}"))?
+                        .saturating_mul(1_000)
+                } else {
+                    s.parse::<u64>()
+                        .map_err(|_| format!("expected a token count like 120000 or 120k, or `off`, got {raw:?}"))?
+                };
+                Some(n)
+            };
+            arity.set_auto_compact_tokens(value)?;
+            match value {
+                Some(n) => println!("auto-compact set to {n} tokens"),
+                None => println!("auto-compact turned off"),
+            }
         }
         ("folder", 2) => match arity.folder(arg(1))? {
             Some(dir) => println!("{dir}"),

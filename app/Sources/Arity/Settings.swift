@@ -41,6 +41,7 @@ struct SettingsSheet: View {
                     Text("A task for an agent goes to one of these, picked blind.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                ContextSection()
                 ToolsSection()
                 HooksSection()
             }
@@ -427,6 +428,60 @@ private struct AddProviderSheet: View {
             name = preset.name
             url = preset.url
             needsKey = preset.needsKey
+        }
+    }
+}
+
+private struct ContextSection: View {
+    @Environment(Store.self) private var store
+    @State private var lastEnabledTokens: UInt64 = 120_000
+
+    private static let presets: [(String, UInt64)] = [
+        ("64k tokens", 64_000),
+        ("120k tokens (default)", 120_000),
+        ("200k tokens", 200_000),
+        ("400k tokens", 400_000),
+    ]
+
+    private var enabled: Bool { store.autoCompactTokens != nil }
+
+    var body: some View {
+        Section {
+            Toggle("Auto-compact long threads", isOn: Binding(
+                get: { enabled },
+                set: { on in
+                    if on {
+                        store.setAutoCompactTokens(lastEnabledTokens)
+                    } else {
+                        if let current = store.autoCompactTokens { lastEnabledTokens = current }
+                        store.setAutoCompactTokens(nil)
+                    }
+                }
+            ))
+            if let current = store.autoCompactTokens {
+                Picker("Threshold", selection: Binding(
+                    get: { current },
+                    set: {
+                        lastEnabledTokens = $0
+                        store.setAutoCompactTokens($0)
+                    }
+                )) {
+                    ForEach(Self.presets, id: \.1) { label, value in
+                        Text(label).tag(value)
+                    }
+                    if !Self.presets.contains(where: { $0.1 == current }) {
+                        Text("\(current.formatted()) tokens (custom)").tag(current)
+                    }
+                }
+            }
+        } header: {
+            Text("Context")
+        } footer: {
+            Text("Before a turn starts past this prompt size, Arity summarizes earlier history into a head marker while keeping every message visible and forkable. Context-length overflow errors always compact once.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear {
+            if let current = store.autoCompactTokens { lastEnabledTokens = current }
         }
     }
 }

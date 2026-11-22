@@ -921,6 +921,16 @@ impl Arity {
         Ok(config::set_hook_enabled(&self.dir, &name, enabled)?)
     }
 
+    /// Prompt token threshold for automatic pre-turn compaction (`None` if disabled).
+    pub fn auto_compact_tokens(&self) -> Result<Option<u64>> {
+        Ok(config::load(&self.dir)?.auto_compact_tokens)
+    }
+
+    /// Set or disable automatic pre-turn compaction in `config.json`.
+    pub fn set_auto_compact_tokens(&self, tokens: Option<u64>) -> Result<()> {
+        Ok(config::set_auto_compact_tokens(&self.dir, tokens)?)
+    }
+
     /// Every tool registered in the default harness and whether it is offered to `conversation`
     /// (or to a chat with no folder when `conversation` is None).
     pub fn tools(&self, conversation: Option<String>) -> Result<Vec<ToolInfo>> {
