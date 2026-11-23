@@ -13,11 +13,22 @@ struct Sidebar: View {
         List(selection: $store.selection) {
             ForEach(Self.groups, id: \.0) { group, title in
                 let threads = store.threads.filter { $0.group == group }
-                // A new chat has nothing said in it yet, so the core does not list it.
-                let new = group == .chat && store.thread == nil ? store.selection : nil
-                if !threads.isEmpty || new != nil {
+                let unlisted = group == .chat ? store.unlistedChats : []
+                if !threads.isEmpty || !unlisted.isEmpty {
                     Section(title) {
-                        if let new { Label("New chat", systemImage: "plus.bubble").tag(new) }
+                        ForEach(unlisted, id: \.self) { name in
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("New chat")
+                                    if let preview = store.draftPreview(for: name) {
+                                        Text(preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                            } icon: {
+                                Image(systemName: "plus.bubble")
+                            }
+                            .tag(name)
+                        }
                         ForEach(threads, id: \.name) { ThreadRow(thread: $0).tag($0.name) }
                     }
                 }

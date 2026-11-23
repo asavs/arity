@@ -55,8 +55,28 @@ final class Store {
     private var choiceChanged = false
     /// The searchable list for naming a model (Other…) is open.
     var choosingModel = false
-    /// A message that could not be sent, handed back to the composer.
-    var unsent: String?
+    /// Unsent composer text, kept with its conversation while the app is open.
+    private var messageDrafts: [String: String] = [:]
+
+    var messageDraft: String {
+        get { selection.flatMap { messageDrafts[$0] } ?? "" }
+        set {
+            guard let selection else { return }
+            messageDrafts[selection] = newValue.isEmpty ? nil : newValue
+        }
+    }
+
+    /// Local conversations the journal has not listed yet, including unsent new chats.
+    var unlistedChats: [String] {
+        var names = Set(messageDrafts.keys).union(starting)
+        if let selection { names.insert(selection) }
+        return names.subtracting(threads.map(\.name)).sorted()
+    }
+
+    func draftPreview(for conversation: String) -> String? {
+        messageDrafts[conversation]?.split(whereSeparator: \.isNewline).first.map(String.init)
+    }
+
     var showSettings = false
     /// The papercut popover is open.
     var filingPapercut = false
@@ -215,7 +235,7 @@ final class Store {
 
     /// A chat exists once something is said in it, so a new one is only a name until the first send.
     func newChat() {
-        let taken = Set(threads.map(\.name))
+        let taken = Set(threads.map(\.name)).union(messageDrafts.keys).union(running)
         selection = (1...).lazy.map { "chat-\($0)" }.first { !taken.contains($0) }
     }
 
@@ -223,18 +243,22 @@ final class Store {
     /// does not change model part way; a new choice picks again from the next message.
     /// `how` is when it joins a turn already running there, as for any participant's
     /// message. Inbox starts nothing: it waits there for the chat's next turn.
-    func send(_ text: String, how: Delivery = .steer) {
-        guard let conv = selection else { return }
+    func sendDraft(how: Delivery = .steer) {
+        let draft = messageDraft
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let conv = selection, !text.isEmpty else { return }
         flushCard()
         let worker = isWorkerRun
         if how == .inbox {
-            _ = attempt { try core.sendAs(conversation: conv, model: worker ? "" : model, text: text, how: .inbox) }
+            guard attempt({ try core.sendAs(conversation: conv, model: worker ? "" : model, text: text, how: .inbox) }) != nil else { return }
+            messageDrafts.removeValue(forKey: conv)
             refresh(force: true)
             return
         }
+        messageDrafts.removeValue(forKey: conv)
         let pick = worker ? nil : choice.flatMap { messages.isEmpty || choiceChanged || model.isEmpty ? $0 : nil }
         if !worker { choiceChanged = false }
-        run(conv, pick: pick, fixedModel: worker ? "" : nil, unsent: text) { core, model in
+        run(conv, pick: pick, fixedModel: worker ? "" : nil, unsent: draft) { core, model in
             try core.sendAs(conversation: conv, model: model, text: text, how: how)
         }
     }
@@ -590,7 +614,12 @@ final class Store {
                 case .failure(let e):
                     await MainActor.run {
                         self.starting.remove(conv)
-                        if self.selection == conv { self.error = Self.describe(e); self.unsent = unsent }
+                        if let unsent {
+                            // Keep any text written since Send, even if another chat is now selected.
+                            let newerDraft = self.messageDrafts[conv]
+                            self.messageDrafts[conv] = [unsent, newerDraft].compactMap { $0 }.joined(separator: "\n\n")
+                        }
+                        if self.selection == conv { self.error = Self.describe(e) }
                     }
                     return
                 }

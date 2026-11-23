@@ -7,38 +7,14 @@ import SwiftUI
 /// stars to rate the result.
 struct ThreadView: View {
     @Environment(Store.self) private var store
-    @State private var message = ""
     @FocusState private var composing: Bool
-    /// The view is scrolled to the end, so a growing reply keeps it there. Scrolling up lets go.
-    @State private var pinned = true
 
     private var busy: Bool { store.selection.map(store.running.contains) ?? false }
 
     var body: some View {
-        @Bindable var store = store
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(store.messages, id: \.id) { MessageRow(message: $0) }
-                        if busy {
-                            ProgressView().controlSize(.small).id("busy")
-                        }
-                    }
-                    .padding()
-                }
-                .defaultScrollAnchor(.bottom)
-                .onScrollGeometryChange(for: Bool.self) { g in
-                    g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 40
-                } action: { _, atEnd in pinned = atEnd }
-                .onChange(of: store.messages.last?.text) {
-                    if pinned { proxy.scrollTo(busy ? "busy" : store.messages.last?.id, anchor: .bottom) }
-                }
-                .onChange(of: store.messages.count) {
-                    if pinned { proxy.scrollTo(busy ? "busy" : store.messages.last?.id, anchor: .bottom) }
-                }
-                .onChange(of: store.selection) { pinned = true }
-            }
+            TranscriptView(messages: store.messages, busy: busy)
+                .id(store.selection)
 
             if let error = store.error {
                 HStack(alignment: .top) {
@@ -105,9 +81,6 @@ struct ThreadView: View {
             }
         }
         .onAppear { composing = true }
-        .onChange(of: store.unsent) {
-            if let text = store.unsent { message = text; store.unsent = nil }
-        }
     }
 
     private var stopAllTitle: String {
@@ -154,23 +127,24 @@ struct ThreadView: View {
     /// model when the chat's first message is sent.
     private var modelChoice: some View {
         @Bindable var store = store
-        return HStack(spacing: 4) {
-            Picker("Model", selection: $store.choice) {
+        return Menu {
+            Picker("Routing", selection: $store.choice) {
                 ForEach(Choice.all, id: \.self) { Text($0.title).tag(Optional($0)).help($0.blurb) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .help(store.choice?.blurb ?? "Pick for me instead of naming a model")
-
-            Button(store.choice == nil ? shortName(store.model) : "Other…") { store.choosingModel = true }
-                .buttonStyle(.borderless)
-                .foregroundStyle(store.choice == nil ? .primary : .secondary)
-                .lineLimit(1)
-                .help("Name a model yourself")
-                .popover(isPresented: $store.choosingModel, arrowEdge: .bottom) {
-                    ModelChooser(models: store.models) { store.chooseModel($0) }
+                if store.choice == nil {
+                    Text(shortName(store.model)).tag(nil as Choice?)
                 }
+            }
+            Button("Choose a Model…") { store.choosingModel = true }
+        } label: {
+            Text(store.choice?.title ?? shortName(store.model))
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(maxWidth: 120)
+        .accessibilityLabel("Model: \(store.choice?.title ?? shortName(store.model))")
+        .help(store.choice?.blurb ?? "Choose the model for this chat")
+        .popover(isPresented: $store.choosingModel, arrowEdge: .bottom) {
+            ModelChooser(models: store.models) { store.chooseModel($0) }
         }
     }
 
@@ -179,7 +153,9 @@ struct ThreadView: View {
         if let folder = store.folder {
             HStack(spacing: 3) {
                 Image(systemName: "folder")
-                Text(URL(fileURLWithPath: folder).lastPathComponent).lineLimit(1)
+                Text(URL(fileURLWithPath: folder).lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Button("Detach Folder", systemImage: "xmark.circle.fill") { store.setFolder(nil) }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
@@ -190,7 +166,8 @@ struct ThreadView: View {
             .font(.caption)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(.quaternary, in: Capsule())
-            .fixedSize()
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 150)
             .help("Attached to \(folder). Gives this chat and the tasks filed here file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash).")
         } else {
             Button("Attach a Folder", systemImage: "folder.badge.plus") { chooseFolder() }
@@ -219,82 +196,76 @@ struct ThreadView: View {
         }
     }
 
-    /// The message field and model choice. Collapsed to a line or so while a card is open.
     private func composer(prompt: String, lines: ClosedRange<Int>) -> some View {
         @Bindable var store = store
-        return HStack(alignment: .bottom, spacing: 8) {
-            if !store.isWorkerRun {
-                modelChoice
-                folderButton
-
-                if store.draft == nil {
-                    Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.borderless)
-                        .keyboardShortcut("t")
-                        .disabled(busy)
-                        .help("Draft a task in this chat (⌘T)")
-                }
-            }
-
-            TextField(prompt, text: $message, axis: .vertical)
+        let empty = store.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return VStack(alignment: .leading, spacing: 10) {
+            TextField(prompt, text: $store.messageDraft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(lines)
                 .focused($composing)
-                .onSubmit { send() }
+                .onSubmit { store.sendDraft() }
                 .onKeyPress(.return, phases: .down) { press in
-                    // ⌥↩ after this turn; ↩ alone steers.
-                    if press.modifiers.contains(.option) { send(.afterTurn); return .handled }
+                    if press.modifiers == .option {
+                        store.sendDraft(how: .afterTurn)
+                        return .handled
+                    }
                     return .ignored
                 }
-                .onExitCommand { if busy { store.stop() } }
 
-            // While a turn runs, Stop sits where Send is, until something is typed to send after it.
-            if busy && message.isEmpty && store.activeChildren > 0 {
-                // Its sub-tasks run on their own: Stop leaves them going; Stop All stops them too.
-                Menu {
-                    Button("Stop This Reply  ⎋") { store.stop() }
-                    Button(stopAllTitle) { store.stopAll() }
-                } label: {
-                    Image(systemName: "stop.circle.fill")
-                } primaryAction: {
-                    store.stop()
-                }
-                .menuStyle(.button)
-                .menuIndicator(.visible)
-                .font(.title2)
-                .buttonStyle(.borderless)
-                .fixedSize()
-                .keyboardShortcut(.cancelAction)
-                .help("Stop the reply (Esc); or stop it and every task it handed out")
-            } else if busy && message.isEmpty {
-                Button("Stop", systemImage: "stop.circle.fill") { store.stop() }
-                    .labelStyle(.iconOnly)
-                    .font(.title2)
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut(.cancelAction)
-                    .help("Stop the reply (Esc)")
-            } else {
-                Menu {
-                    if busy {
-                        Button("Steer: Cut In Now  ↩") { send(.steer) }
-                        Button("Send After This Turn  ⌥↩") { send(.afterTurn) }
+            HStack(spacing: 8) {
+                if !store.isWorkerRun {
+                    modelChoice
+                    folderButton
+                    if store.draft == nil {
+                        Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.borderless)
+                            .keyboardShortcut("t")
+                            .disabled(busy)
+                            .help("Draft a task in this chat (⌘T)")
                     }
-                    Button("Leave a Note for Its Next Turn") { send(.inbox) }
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                } primaryAction: {
-                    send()
                 }
-                .menuStyle(.button)
-                .menuIndicator(.visible)
-                .font(.title2)
-                .buttonStyle(.borderless)
-                .fixedSize()
-                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help(busy ? "Steer: cut in now (↩); after this turn (⌥↩); or leave a note" : "Send (↩); or leave a note without a reply")
+                Spacer(minLength: 0)
+                deliveryActions(empty: empty)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
+        .padding(10)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
+    }
+
+    private func deliveryActions(empty: Bool) -> some View {
+        HStack(spacing: 6) {
+            Menu("Delivery Options", systemImage: "ellipsis.circle") {
+                Button("Leave a Note", systemImage: "tray") { store.sendDraft(how: .inbox) }
+            }
+            .labelStyle(.iconOnly)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .disabled(empty)
+            .help("Leave a note without starting a reply")
+
+            if busy {
+                Button("Stop", systemImage: "stop.circle.fill") { store.stop() }
+                    .keyboardShortcut(.cancelAction)
+                    .help("Stop this reply (Esc)")
+                Button("Queue", systemImage: "clock") { store.sendDraft(how: .afterTurn) }
+                    .disabled(empty)
+                    .help("Send after this turn (⌥↩)")
+                Button("Steer", systemImage: "arrow.turn.up.right") { store.sendDraft() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(empty)
+                    .help("Cut in with this message (↩)")
+            } else {
+                Button("Send", systemImage: "arrow.up.circle.fill") { store.sendDraft() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(empty)
+                    .help("Send (↩)")
+            }
+        }
+        .controlSize(.small)
     }
 
     /// A task drafted in this conversation, where the composer usually sits.
@@ -324,13 +295,130 @@ struct ThreadView: View {
         .padding(10)
     }
 
-    /// While a turn runs, `how` says when the message joins it: the same
-    /// timings an agent's messages and reports have.
-    private func send(_ how: Delivery = .steer) {
-        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        message = ""
-        store.send(text, how: how)
+}
+
+private struct TranscriptView: View {
+    let messages: [Message]
+    let busy: Bool
+
+    @State private var followingLatest = true
+    @State private var scrollPhase = ScrollPhase.idle
+
+    private static let end = "transcript-end"
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(rows) { row in
+                        switch row {
+                        case .message(let message):
+                            MessageRow(message: message)
+                        case .activity(let messages):
+                            ToolActivityRow(messages: messages)
+                        }
+                    }
+                    if busy { ProgressView().controlSize(.small) }
+                    Color.clear.frame(height: 0).id(Self.end)
+                }
+                .padding()
+            }
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .onScrollGeometryChange(for: Geometry.self, of: Geometry.init) { old, new in
+                if Self.isUserScrolling(scrollPhase), old.offset != new.offset {
+                    followingLatest = new.nearBottom
+                } else if followingLatest && old.extent != new.extent {
+                    proxy.scrollTo(Self.end, anchor: .bottom)
+                }
+            }
+            .onScrollPhaseChange { old, new, context in
+                scrollPhase = new
+                if new == .idle && Self.isUserScrolling(old) {
+                    followingLatest = Geometry(context.geometry).nearBottom
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !followingLatest {
+                    Button("Jump to Latest", systemImage: "arrow.down.circle") {
+                        followingLatest = true
+                        proxy.scrollTo(Self.end, anchor: .bottom)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .padding(12)
+                }
+            }
+        }
+    }
+
+    private static func isUserScrolling(_ phase: ScrollPhase) -> Bool {
+        phase == .interacting || phase == .decelerating
+    }
+
+    private struct Geometry: Equatable {
+        let offset: CGFloat
+        let extent: CGFloat
+
+        var nearBottom: Bool { offset >= extent - 40 }
+
+        init(_ geometry: ScrollGeometry) {
+            offset = geometry.contentOffset.y
+            extent = geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height
+        }
+    }
+
+    private enum Row: Identifiable {
+        case message(Message)
+        case activity([Message])
+
+        var id: String {
+            switch self {
+            case .message(let message): message.id
+            case .activity(let messages): "activity-" + messages[0].id
+            }
+        }
+    }
+
+    private var rows: [Row] {
+        var rows: [Row] = []
+        var activity: [Message] = []
+        for message in messages {
+            if message.kind == .toolCall || message.kind == .toolResult {
+                activity.append(message)
+            } else {
+                if !activity.isEmpty {
+                    rows.append(.activity(activity))
+                    activity = []
+                }
+                rows.append(.message(message))
+            }
+        }
+        if !activity.isEmpty { rows.append(.activity(activity)) }
+        return rows
+    }
+}
+
+private struct ToolActivityRow: View {
+    let messages: [Message]
+    @State private var expanded = false
+
+    private var title: String {
+        let calls = messages.count(where: { $0.kind == .toolCall })
+        if calls == 0 { return messages.count == 1 ? "Tool result" : "\(messages.count) tool results" }
+        return calls == 1 ? "1 tool call" : "\(calls) tool calls"
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(messages, id: \.id) { MessageRow(message: $0) }
+            }
+            .padding(.top, 4)
+        } label: {
+            Label(title, systemImage: "wrench.and.screwdriver")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -742,6 +830,7 @@ struct MessageRow: View {
             Label(message.text, systemImage: "wrench.and.screwdriver")
                 .font(.callout.monospaced())
                 .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         case .report:
             VStack(alignment: .leading, spacing: 4) {
                 Label("Task result", systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.secondary)
