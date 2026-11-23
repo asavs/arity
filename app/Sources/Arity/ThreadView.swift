@@ -303,50 +303,52 @@ private struct TranscriptView: View {
 
     @State private var followingLatest = true
     @State private var scrollPhase = ScrollPhase.idle
-
-    private static let end = "transcript-end"
+    @State private var position = ScrollPosition(edge: .bottom)
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(rows) { row in
-                        switch row {
-                        case .message(let message):
-                            MessageRow(message: message)
-                        case .activity(let messages):
-                            ToolActivityRow(messages: messages)
-                        }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(rows) { row in
+                    switch row {
+                    case .message(let message):
+                        MessageRow(message: message)
+                    case .activity(let messages):
+                        ToolActivityRow(messages: messages)
                     }
-                    if busy { ProgressView().controlSize(.small) }
-                    Color.clear.frame(height: 0).id(Self.end)
                 }
-                .padding()
+                if busy { ProgressView().controlSize(.small) }
             }
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .onScrollGeometryChange(for: Geometry.self, of: Geometry.init) { old, new in
-                if Self.isUserScrolling(scrollPhase), old.offset != new.offset {
-                    followingLatest = new.nearBottom
-                } else if followingLatest && old.extent != new.extent {
-                    proxy.scrollTo(Self.end, anchor: .bottom)
-                }
+            .padding()
+        }
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(followingLatest ? .bottom : nil, for: .sizeChanges)
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: Geometry.self, of: Geometry.init) { old, new in
+            guard old.offset != new.offset else { return }
+            if Self.isUserScrolling(scrollPhase) {
+                followingLatest = new.nearBottom
+            } else if scrollPhase == .idle && position.isPositionedByUser && old.extent == new.extent {
+                // A mouse wheel or scrollbar can move the view between scroll phases.
+                followingLatest = new.nearBottom
+                if followingLatest { position.scrollTo(edge: .bottom) }
             }
-            .onScrollPhaseChange { old, new, context in
-                scrollPhase = new
-                if new == .idle && Self.isUserScrolling(old) {
-                    followingLatest = Geometry(context.geometry).nearBottom
-                }
+        }
+        .onScrollPhaseChange { old, new, context in
+            scrollPhase = new
+            if new == .idle && Self.isUserScrolling(old) {
+                followingLatest = Geometry(context.geometry).nearBottom
+                if followingLatest { position.scrollTo(edge: .bottom) }
             }
-            .overlay(alignment: .bottomTrailing) {
-                if !followingLatest {
-                    Button("Jump to Latest", systemImage: "arrow.down.circle") {
-                        followingLatest = true
-                        proxy.scrollTo(Self.end, anchor: .bottom)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .padding(12)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !followingLatest {
+                Button("Jump to Latest", systemImage: "arrow.down.circle") {
+                    followingLatest = true
+                    position.scrollTo(edge: .bottom)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .padding(12)
             }
         }
     }
