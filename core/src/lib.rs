@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 pub use agent::Harness;
 pub use board::{Priority, RunState, TaskFields, TaskState};
-pub use turn::{Delivery, Live};
+pub use turn::{Delivery, FollowUp, Live};
 pub use catalog::KeyCheck;
 pub use config::{HookConfig, HookEvent};
 pub use hooks::{BeforeTool, Hook, HookCtx, HookRegistry, YieldAction};
@@ -139,6 +139,8 @@ pub struct Thread {
     pub name: String,
     /// The task's title, or how the chat began.
     pub title: String,
+    /// The attached source folder, shared by a task and its runs.
+    pub folder: Option<String>,
     pub group: ThreadGroup,
     /// When something last happened in it, UTC, "YYYY-MM-DD HH:MM:SS".
     pub updated: String,
@@ -495,6 +497,10 @@ impl Arity {
     pub fn threads(&self) -> Result<Vec<Thread>> {
         let db = self.journal()?;
         let mut conversations = db.conversations()?;
+        let folders = board::attached_folders(db.conn())?;
+        // An attachment is enough to locate a new chat before its first journal entry.
+        let listed: std::collections::HashSet<_> = conversations.iter().map(|c| c.0.clone()).collect();
+        conversations.extend(folders.keys().filter(|name| !listed.contains(*name)).map(|name| (name.clone(), String::new())));
         let running = turn::running(db.conn())?;
         let mut out = Vec::new();
         // A run's own todos are its scratchpad, shown in its thread rather than listed.
@@ -512,6 +518,7 @@ impl Arity {
             let can_continue = t.conversation.is_some() && can_continue(&db, &name, &db.chain(&name)?, &running)?;
             let active_children = board::active_children(db.conn(), &name)?;
             out.push(Thread {
+                folder: folders.get(&name).cloned().or_else(|| t.fields.dir.clone()),
                 name,
                 title: t.fields.title.clone(),
                 group,
@@ -536,8 +543,9 @@ impl Arity {
             let can_continue = can_continue(&db, &name, &chain, &running)?;
             let active_children = board::active_children(db.conn(), &name)?;
             out.push(Thread {
+                folder: folders.get(&name).cloned(),
                 name,
-                title,
+                title: if updated.is_empty() { "New chat".into() } else { title },
                 group,
                 updated,
                 task: None,
@@ -604,6 +612,11 @@ impl Arity {
     pub fn send_as(&self, conversation: String, model: String, text: String, how: Delivery) -> Result<()> {
         self.send_as_with(&conversation, &model, &text, how, &mut |_| {})?;
         Ok(())
+    }
+
+    /// Route a composer follow-up to existing work. Idle conversations use the normal send path.
+    pub fn follow_up(&self, conversation: String, text: String, interrupt: Option<String>) -> Result<FollowUp> {
+        Ok(turn::follow_up(&self.journal()?, &conversation, &text, interrupt.as_deref())?)
     }
 
     /// Stop the turn running in a conversation, in whichever process runs it.
@@ -1927,6 +1940,24 @@ mod tests {
         assert_eq!((active("chat-1"), active("task-1")), (0, 0));
         assert_eq!(arity.stop_subtree("chat-1".into())?, 0, "nothing left to stop");
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn sidebar_folders_cover_unsent_chats_and_unstarted_tasks() -> anyhow::Result<()> {
+        let (dir, arity, db) = scratch_arity("sidebar-folder")?;
+        let path = dir.canonicalize()?.to_string_lossy().into_owned();
+        arity.set_folder("chat-1".into(), Some(path.clone()))?;
+        let threads = arity.threads()?;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].title, "New chat");
+        assert_eq!(threads[0].folder.as_ref(), Some(&path));
+        db.append("chat-1", "user", &json!({ "text": "Planning" }), None)?;
+        board::add_task(db.conn(), &TaskFields { title: "Review".into(), ..Default::default() }, Some("chat-1"))?;
+        arity.set_folder("chat-1".into(), None)?;
+        let threads = arity.threads()?;
+        assert_eq!(threads.iter().find(|t| t.name == "chat-1").unwrap().folder, None);
+        assert_eq!(threads.iter().find(|t| t.title == "Review").unwrap().folder.as_ref(), Some(&path));
         Ok(())
     }
 

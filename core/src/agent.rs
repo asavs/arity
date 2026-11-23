@@ -631,6 +631,31 @@ mod tests {
     }
 
     #[test]
+    fn follow_up_only_cuts_the_confirmed_reply() -> Result<()> {
+        use turn::FollowUp;
+        let db = Journal::open(&scratch("follow-up"))?;
+        let send = |text: &str, token: Option<&str>| turn::follow_up(&db, "c", text, token);
+        assert_eq!(send("idle", None)?, FollowUp::Idle);
+        let lease = Lease::take(&db, "c", "m")?.unwrap();
+        assert_eq!(send("during tool", None)?, FollowUp::Queued);
+        assert_eq!(lease.drain(&db)?, 1);
+        lease.live.push("first reply");
+        until("stream", || turn::partial(db.conn(), "c").unwrap().is_some());
+        let FollowUp::ConfirmInterrupt { reply } = send("correction", None)? else { panic!("expected confirmation") };
+        assert!(turn::queued(db.conn(), "c")?.is_empty());
+        lease.commit(&db, &json!({"text":"first reply"}), "m")?;
+        lease.live.push("second reply");
+        until("next stream", || turn::partial(db.conn(), "c").unwrap().is_some());
+        assert_eq!(send("old confirmation", Some(&reply))?, FollowUp::Queued);
+        let stop = || db.conn().query_row("SELECT stop FROM turns WHERE conversation='c'", [], |r| r.get::<_, i64>(0));
+        assert_eq!(stop()?, 0);
+        let FollowUp::ConfirmInterrupt { reply } = send("correction", None)? else { panic!("expected confirmation") };
+        assert_eq!(send("correction", Some(&reply))?, FollowUp::Queued);
+        assert_eq!(stop()?, 2);
+        Ok(())
+    }
+
+    #[test]
     fn a_streamed_reply_shows_as_it_comes_and_ends_as_one_entry() -> Result<()> {
         let path = scratch("stream");
         let db = Journal::open(&path)?;

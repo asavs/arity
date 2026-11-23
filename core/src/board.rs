@@ -765,6 +765,12 @@ pub fn source_folder_of(conn: &Connection, conv: &str) -> Result<Option<std::pat
     Ok(dir.map(std::path::PathBuf::from))
 }
 
+/// All explicit attachments, including conversations without a first message yet.
+pub fn attached_folders(conn: &Connection) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT conversation, dir FROM folders")?;
+    Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Set or clear the folder a conversation reads. It must be an existing directory.
 pub fn set_folder(conn: &Connection, conv: &str, dir: Option<&str>) -> Result<()> {
     match dir.map(str::trim).filter(|d| !d.is_empty()) {

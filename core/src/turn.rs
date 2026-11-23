@@ -79,6 +79,8 @@ pub enum Delivery {
     /// between replies as context; an idle conversation has it there for its
     /// next turn. Work to be done is a task on the board, not this.
     Inbox,
+    /// Answer at the next boundary between model replies without cutting a reply or tool short.
+    BetweenReplies,
 }
 
 impl Delivery {
@@ -87,6 +89,7 @@ impl Delivery {
             Delivery::Steer => "steer",
             Delivery::AfterTurn => "after_turn",
             Delivery::Inbox => "inbox",
+            Delivery::BetweenReplies => "between_replies",
         }
     }
 
@@ -95,6 +98,7 @@ impl Delivery {
             "steer" => Delivery::Steer,
             "after_turn" => Delivery::AfterTurn,
             "inbox" => Delivery::Inbox,
+            "between_replies" => Delivery::BetweenReplies,
             _ => return None,
         })
     }
@@ -336,6 +340,34 @@ pub fn deliver(c: &Connection, conv: &str, kind: &str, body: &Value, how: Delive
     drain(c, conv, true)?;
     insert(c, conv, kind, body, None)?;
     Ok(true)
+}
+
+#[derive(Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FollowUp {
+    Idle,
+    Queued,
+    ConfirmInterrupt { reply: String },
+}
+
+/// Decide and enqueue under the same write lock. A confirmation applies only to
+/// the model reply the user saw, even if the lease or journal advances meanwhile.
+pub fn follow_up(db: &Journal, conv: &str, text: &str, interrupt: Option<&str>) -> Result<FollowUp> {
+    db.immediate(|c| {
+        let turn: Option<(String, bool)> = c.query_row(
+            "SELECT owner || ':' || COALESCE((SELECT head FROM conversations WHERE name = ?1), 0),
+                    partial != '' AND stop = 0
+             FROM turns WHERE conversation = ?1 AND lease_until >= ?2",
+            params![conv, now()], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let how = match turn {
+            Some((reply, true)) if interrupt.is_none() => return Ok(FollowUp::ConfirmInterrupt { reply }),
+            Some((reply, true)) if interrupt == Some(reply.as_str()) => Delivery::Steer,
+            None if !crate::approvals::has_pending(c, conv)? => return Ok(FollowUp::Idle),
+            _ => Delivery::BetweenReplies,
+        };
+        deliver(c, conv, "user", &json!({ "text": text }), how)?;
+        Ok(FollowUp::Queued)
+    })
 }
 
 /// The user's message as a steer, as the front ends send by default.

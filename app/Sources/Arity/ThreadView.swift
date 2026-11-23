@@ -1,6 +1,14 @@
 import ArityCore
 import SwiftUI
 
+private extension View {
+    func chatColumn() -> some View {
+        frame(maxWidth: 740)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity)
+    }
+}
+
 /// The selected thread: what was said in it, and below that whatever it needs
 /// next. For a chat that is the composer, with a task card when one is being
 /// drafted. For a task it is the task: its card, how its run is going, or the
@@ -8,6 +16,7 @@ import SwiftUI
 struct ThreadView: View {
     @Environment(Store.self) private var store
     @FocusState private var composing: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     private var busy: Bool { store.selection.map(store.running.contains) ?? false }
 
@@ -26,7 +35,7 @@ struct ThreadView: View {
                 }
                 .padding(10)
                 .background(.orange.opacity(0.1))
-            } else if store.canContinue && !busy {
+            } else if store.thread?.task != nil && store.canContinue && !busy {
                 continueBar
             }
 
@@ -35,11 +44,11 @@ struct ThreadView: View {
                 ApprovalBanner(approval: approval, more: store.pendingApprovals.count - 1).id(approval.id)
             }
 
-            Divider()
             if let task = store.thread?.task {
+                Divider()
                 if task.runState != nil {
                     composer(prompt: workerPrompt(task), lines: 1...5)
-                        .padding(.horizontal, 14)
+                        .chatColumn()
                         .padding(.top, 10)
                         .padding(.bottom, 6)
                     Divider()
@@ -51,9 +60,13 @@ struct ThreadView: View {
                 }
                 TaskDock(task: task).id(task.id)
             } else if let card = store.draft {
+                Divider()
                 cardComposer(card)
             } else {
-                composer(prompt: "Message", lines: 1...8).padding(10)
+                composer(prompt: "Message", lines: 1...8)
+                    .chatColumn()
+                    .padding(.top, 8)
+                    .padding(.bottom, 16)
             }
         }
         .navigationTitle(store.thread?.title ?? "New chat")
@@ -64,6 +77,25 @@ struct ThreadView: View {
                     UsagePill(usage: usage)
                 }
                 Menu("Thread Actions", systemImage: "ellipsis.circle") {
+                    if busy {
+                        Button("Pause Reply", systemImage: "pause.fill") { store.stop() }
+                            .keyboardShortcut(.cancelAction)
+                    }
+                    if store.thread?.task == nil || store.thread?.task?.runState != nil {
+                        Button("Leave a Note", systemImage: "tray") { store.sendDraft(how: .inbox) }
+                            .disabled(store.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .help("Leave the draft as a note without starting a reply")
+                    }
+                    if store.thread?.task == nil {
+                        if store.folder != nil {
+                            Button("Detach Folder", systemImage: "folder.badge.minus") { store.setFolder(nil) }
+                                .disabled(busy)
+                        } else {
+                            Button("Attach a Folder…", systemImage: "folder.badge.plus") { chooseFolder() }
+                                .disabled(busy)
+                        }
+                        Divider()
+                    }
                     Group {
                         Button("Compact Context") { store.compact() }
                             .help("Replace what the model reads with a summary it writes; every message stays here")
@@ -77,8 +109,22 @@ struct ThreadView: View {
                             .help("Stop this thread and every task it handed out; each can be continued later")
                     }
                 }
-                .help("Compact or reset the model's context, or stop its sub-tasks")
+                .help("Thread Actions")
             }
+        }
+        .alert("Interrupt this reply?", isPresented: Binding(
+            get: { store.interruptRequest != nil },
+            set: { if !$0 { store.interruptRequest = nil } }
+        ), presenting: store.interruptRequest) { request in
+            Button("Send After Reply") {
+                if store.selection == request.conversation && store.messageDraft == request.draft {
+                    store.sendDraft(how: .betweenReplies)
+                }
+            }
+            Button("Interrupt and Send") { store.submitDraft(interrupting: request) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Arity is writing a reply. Sending now will end it here and keep the text written so far.")
         }
         .onAppear { composing = true }
     }
@@ -136,45 +182,22 @@ struct ThreadView: View {
             }
             Button("Choose a Model…") { store.choosingModel = true }
         } label: {
-            Text(store.choice?.title ?? shortName(store.model))
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                Text(store.choice?.title ?? shortName(store.model))
+                    .lineLimit(1)
+                    .frame(maxWidth: 100, alignment: .leading)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
         }
         .menuStyle(.borderlessButton)
-        .frame(maxWidth: 120)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Model: \(store.choice?.title ?? shortName(store.model))")
         .help(store.choice?.blurb ?? "Choose the model for this chat")
         .popover(isPresented: $store.choosingModel, arrowEdge: .bottom) {
             ModelChooser(models: store.models) { store.chooseModel($0) }
-        }
-    }
-
-    /// The folder attached to this chat, as a chip with × to detach it, or a button to attach one.
-    @ViewBuilder private var folderButton: some View {
-        if let folder = store.folder {
-            HStack(spacing: 3) {
-                Image(systemName: "folder")
-                Text(URL(fileURLWithPath: folder).lastPathComponent)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Button("Detach Folder", systemImage: "xmark.circle.fill") { store.setFolder(nil) }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .disabled(busy)
-                    .help("Detach the folder")
-            }
-            .font(.caption)
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(.quaternary, in: Capsule())
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 150)
-            .help("Attached to \(folder). Gives this chat and the tasks filed here file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash).")
-        } else {
-            Button("Attach a Folder", systemImage: "folder.badge.plus") { chooseFolder() }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .disabled(busy)
-                .help("Attach a folder to give this chat, and the tasks filed in it, file and shell tools (list_files, read_file, search_files, write_file, edit_file, bash)")
         }
     }
 
@@ -199,12 +222,29 @@ struct ThreadView: View {
     private func composer(prompt: String, lines: ClosedRange<Int>) -> some View {
         @Bindable var store = store
         let empty = store.messageDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return VStack(alignment: .leading, spacing: 10) {
+        let shell = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        return HStack(spacing: 10) {
+            if !store.isWorkerRun && store.draft == nil {
+                Button {
+                    store.attachCard()
+                } label: {
+                    Label("Add a Task Card", systemImage: "plus")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 30, height: 30)
+                        .background(.primary.opacity(0.07), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("t")
+                .disabled(busy)
+                .help("Draft a task in this chat (⌘T)")
+            }
             TextField(prompt, text: $store.messageDraft, axis: .vertical)
                 .textFieldStyle(.plain)
+                .font(.system(size: 15))
                 .lineLimit(lines)
                 .focused($composing)
-                .onSubmit { store.sendDraft() }
+                .onSubmit { store.submitDraft() }
                 .onKeyPress(.return, phases: .down) { press in
                     if press.modifiers == .option {
                         store.sendDraft(how: .afterTurn)
@@ -212,60 +252,37 @@ struct ThreadView: View {
                     }
                     return .ignored
                 }
-
-            HStack(spacing: 8) {
-                if !store.isWorkerRun {
-                    modelChoice
-                    folderButton
-                    if store.draft == nil {
-                        Button("Add a Task Card", systemImage: "checklist") { store.attachCard() }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.borderless)
-                            .keyboardShortcut("t")
-                            .disabled(busy)
-                            .help("Draft a task in this chat (⌘T)")
-                    }
-                }
-                Spacer(minLength: 0)
-                deliveryActions(empty: empty)
-                    .fixedSize(horizontal: true, vertical: false)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if !store.isWorkerRun {
+                modelChoice
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
+            deliveryButton(empty: empty)
         }
-        .padding(10)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
+        .padding(9)
+        .background {
+            shell.fill(colorScheme == .dark ? Color(white: 0.20) : .white)
+                .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+        }
+        .overlay(shell.strokeBorder(.primary.opacity(0.10)).allowsHitTesting(false))
     }
 
-    private func deliveryActions(empty: Bool) -> some View {
-        HStack(spacing: 6) {
-            Menu("Delivery Options", systemImage: "ellipsis.circle") {
-                Button("Leave a Note", systemImage: "tray") { store.sendDraft(how: .inbox) }
-            }
-            .labelStyle(.iconOnly)
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .disabled(empty)
-            .help("Leave a note without starting a reply")
-
-            if busy {
-                Button("Stop", systemImage: "stop.circle.fill") { store.stop() }
-                    .keyboardShortcut(.cancelAction)
-                    .help("Stop this reply (Esc)")
-                Button("Queue", systemImage: "clock") { store.sendDraft(how: .afterTurn) }
-                    .disabled(empty)
-                    .help("Send after this turn (⌥↩)")
-                Button("Steer", systemImage: "arrow.turn.up.right") { store.sendDraft() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(empty)
-                    .help("Cut in with this message (↩)")
-            } else {
-                Button("Send", systemImage: "arrow.up.circle.fill") { store.sendDraft() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(empty)
-                    .help("Send (↩)")
-            }
+    private func deliveryButton(empty: Bool) -> some View {
+        let pause = busy && empty
+        return Button {
+            if pause { store.stop() } else { store.submitDraft() }
+        } label: {
+            Label(pause ? "Pause Reply" : "Send", systemImage: pause ? "pause.fill" : "arrow.up")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(empty && !pause ? Color.secondary : .white)
+                .frame(width: 30, height: 30)
+                .background(empty && !pause ? Color.secondary.opacity(0.12) : .accentColor, in: Circle())
         }
-        .controlSize(.small)
+        .buttonStyle(.plain)
+        .disabled(empty && !pause)
+        .help(pause ? "Pause this reply (Esc)" : "Send (↩)")
     }
 
     /// A task drafted in this conversation, where the composer usually sits.
@@ -292,7 +309,8 @@ struct ThreadView: View {
         .padding(14)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator))
-        .padding(10)
+        .chatColumn()
+        .padding(.vertical, 10)
     }
 
 }
@@ -307,18 +325,25 @@ private struct TranscriptView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
+            // Measure the full transcript before resolving the initial bottom anchor.
+            VStack(alignment: .leading, spacing: 16) {
                 ForEach(rows) { row in
                     switch row {
-                    case .message(let message):
-                        MessageRow(message: message)
+                    case .message(let message, let stop):
+                        VStack(alignment: .leading, spacing: 4) {
+                            MessageRow(message: message)
+                            if let stop { MessageRow(message: stop) }
+                        }
+                        .padding(.top, (message.kind == .user || message.kind == .assistant)
+                                 && message.id != messages.first?.id ? 6 : 0)
                     case .activity(let messages):
                         ToolActivityRow(messages: messages)
                     }
                 }
                 if busy { ProgressView().controlSize(.small) }
             }
-            .padding()
+            .chatColumn()
+            .padding(.vertical, 18)
         }
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(followingLatest ? .bottom : nil, for: .sizeChanges)
@@ -340,14 +365,20 @@ private struct TranscriptView: View {
                 if followingLatest { position.scrollTo(edge: .bottom) }
             }
         }
-        .overlay(alignment: .bottomTrailing) {
+        .overlay(alignment: .bottom) {
             if !followingLatest {
-                Button("Jump to Latest", systemImage: "arrow.down.circle") {
+                Button {
                     followingLatest = true
                     position.scrollTo(edge: .bottom)
+                } label: {
+                    Label("Jump to Latest", systemImage: "arrow.down")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 30, height: 30)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(.quaternary))
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.plain)
+                .help("Jump to Latest")
                 .padding(12)
             }
         }
@@ -370,12 +401,12 @@ private struct TranscriptView: View {
     }
 
     private enum Row: Identifiable {
-        case message(Message)
+        case message(Message, stop: Message? = nil)
         case activity([Message])
 
         var id: String {
             switch self {
-            case .message(let message): message.id
+            case .message(let message, _): message.id
             case .activity(let messages): "activity-" + messages[0].id
             }
         }
@@ -384,7 +415,11 @@ private struct TranscriptView: View {
     private var rows: [Row] {
         var rows: [Row] = []
         var activity: [Message] = []
+        var previousWasStop = false
         for message in messages {
+            let isStop = message.kind == .notice && message.text == "Stopped."
+            defer { previousWasStop = isStop }
+            if isStop && previousWasStop { continue }
             if message.kind == .toolCall || message.kind == .toolResult {
                 activity.append(message)
             } else {
@@ -392,7 +427,11 @@ private struct TranscriptView: View {
                     rows.append(.activity(activity))
                     activity = []
                 }
-                rows.append(.message(message))
+                if isStop, case .message(let reply, nil) = rows.last, reply.kind == .assistant {
+                    rows[rows.count - 1] = .message(reply, stop: message)
+                } else {
+                    rows.append(.message(message))
+                }
             }
         }
         if !activity.isEmpty { rows.append(.activity(activity)) }
@@ -802,6 +841,7 @@ struct MessageRow: View {
 
     var body: some View {
         content
+            .font(.system(size: 15))
             .contextMenu {
                 Button("Fork From Here") { store.fork(at: message.entry) }
                 Button("Copy") {
@@ -817,17 +857,25 @@ struct MessageRow: View {
         case .user:
             HStack {
                 Spacer(minLength: 60)
-                Text(message.text)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(message.text)
+                        .textSelection(.enabled)
+                        .lineSpacing(2)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                    if message.id.hasPrefix("queued.") {
+                        Label("Waiting to deliver", systemImage: "clock")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         case .assistant:
             VStack(alignment: .leading, spacing: 3) {
                 Text(shortName(message.model)).font(.caption).foregroundStyle(.secondary)
                 Text(markdown(message.text)).textSelection(.enabled)
             }
-            .padding(.trailing, 60)
+            .lineSpacing(2)
         case .toolCall:
             Label(message.text, systemImage: "wrench.and.screwdriver")
                 .font(.callout.monospaced())
@@ -836,9 +884,10 @@ struct MessageRow: View {
         case .report:
             VStack(alignment: .leading, spacing: 4) {
                 Label("Task result", systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.secondary)
-                Text(message.text).textSelection(.enabled)
+                Text(markdown(message.text)).textSelection(.enabled)
+                    .lineSpacing(2)
             }
-            .padding(10)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
         case .notice:

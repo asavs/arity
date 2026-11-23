@@ -212,6 +212,7 @@ final class Store {
     }
 
     private func loadSelection() {
+        interruptRequest = nil
         error = nil
         flushCard()
         pickReason = nil
@@ -239,11 +240,36 @@ final class Store {
         selection = (1...).lazy.map { "chat-\($0)" }.first { !taken.contains($0) }
     }
 
+    struct InterruptRequest {
+        let conversation: String
+        let draft: String
+        let reply: String
+    }
+
+    var interruptRequest: InterruptRequest?
+
+    func submitDraft(interrupting request: InterruptRequest? = nil) {
+        guard let conv = selection, !messageDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let request, request.conversation != conv || request.draft != messageDraft { return }
+        flushCard()
+        let text = messageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let route = attempt({ try core.followUp(conversation: conv, text: text, interrupt: request?.reply) }) else { return }
+        switch route {
+        case .idle:
+            sendDraft(how: .betweenReplies)
+        case .queued:
+            messageDrafts.removeValue(forKey: conv)
+            refresh(force: true)
+        case .confirmInterrupt(let reply):
+            interruptRequest = InterruptRequest(conversation: conv, draft: messageDraft, reply: reply)
+        }
+    }
+
     /// A chat keeps the model its first message was picked for, so a conversation
     /// does not change model part way; a new choice picks again from the next message.
     /// `how` is when it joins a turn already running there, as for any participant's
     /// message. Inbox starts nothing: it waits there for the chat's next turn.
-    func sendDraft(how: Delivery = .steer) {
+    func sendDraft(how: Delivery) {
         let draft = messageDraft
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let conv = selection, !text.isEmpty else { return }
@@ -380,8 +406,8 @@ final class Store {
     /// Attach a folder to the selected chat, or with nil take it away. Works before the first message.
     func setFolder(_ dir: String?) {
         guard let conv = selection else { return }
-        _ = attempt { try core.setFolder(conversation: conv, dir: dir) }
-        folder = attempt { try core.folder(conversation: conv) } ?? nil
+        guard attempt({ try core.setFolder(conversation: conv, dir: dir) }) != nil else { return }
+        refresh(force: true)
     }
 
     func attachCard() {
