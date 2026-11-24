@@ -1,10 +1,13 @@
 pub mod codec;
+pub mod ffi;
 pub mod runner;
 pub mod secrets;
 pub mod store;
 pub mod tools;
 pub mod types;
 pub mod workspace;
+
+uniffi::setup_scaffolding!();
 
 use std::path::PathBuf;
 

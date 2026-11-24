@@ -10,4 +10,7 @@ spike/*/target/
 app/build/
 app/.build/
 app/Sources/ArityCore/arity_core.swift
+.qa-screenshots/
+*.db
+*.db-*
 .DS_Store

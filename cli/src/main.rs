@@ -98,6 +98,31 @@ fn run() -> Result<()> {
             println!("arity {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        sub if matches!(
+            sub,
+            "create"
+                | "chat"
+                | "steer"
+                | "stop"
+                | "fork"
+                | "worker"
+                | "log"
+                | "status"
+                | "diff"
+                | "apply"
+                | "replay-check"
+                | "providers"
+                | "provider"
+                | "limits"
+                | "key"
+                | "login"
+                | "logout"
+                | "whoami"
+        ) && wants_help(rest) =>
+        {
+            println!("{USAGE}");
+            Ok(())
+        }
         "create" => cmd_create(&data_dir, rest),
         "chat" => cmd_chat(&data_dir, rest),
         "steer" => cmd_steer(&data_dir, rest),
@@ -137,6 +162,18 @@ fn run() -> Result<()> {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+fn wants_help(args: &[String]) -> bool {
+    for arg in args {
+        if arg == "--" {
+            break;
+        }
+        if arg == "-h" || arg == "--help" {
+            return true;
+        }
+    }
+    false
+}
 
 fn take_flag_value(args: &[String], idx: &mut usize, flag: &str) -> Result<String> {
     let cur = &args[*idx];
@@ -1145,6 +1182,47 @@ fn cmd_apply(data_dir: &Path, args: &[String]) -> Result<()> {
     let req_id = req_id.unwrap_or_else(random_req_id);
 
     let mut store = Store::open(data_dir)?;
+    if let Some(existing) = store.find_entry_by_request_id(&req_id)? {
+        ensure!(
+            existing.kind == EntryKind::WorkspaceApplied,
+            "request_id '{req_id}' already belongs to {} entry #{}",
+            existing.kind.as_str(),
+            existing.id
+        );
+        let files_applied = existing.body["files_applied"]
+            .as_u64()
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let summary = if files_applied == 0 {
+            "No changes to apply".to_string()
+        } else {
+            format!("Applied {files_applied} changed file(s)")
+        };
+        let applied = workspace::ApplyResult {
+            files_applied,
+            summary,
+        };
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "entry": existing,
+                    "result": applied,
+                }))?
+            );
+        } else {
+            println!(
+                "{} (thread={} entry_id={} req_id={})",
+                applied.summary,
+                existing.thread_id,
+                existing.id,
+                existing.request_id.as_deref().unwrap_or(&req_id),
+            );
+        }
+        return Ok(());
+    }
+
     let thread = store
         .get_thread(&thread_id)?
         .ok_or_else(|| anyhow!("thread '{thread_id}' not found"))?;

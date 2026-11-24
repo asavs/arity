@@ -262,6 +262,10 @@ impl Store {
         get_entry_conn(&self.conn, entry_id)
     }
 
+    pub fn find_entry_by_request_id(&self, request_id: &str) -> Result<Option<Entry>, StoreError> {
+        get_entry_by_request_id(&self.conn, request_id)
+    }
+
     pub fn thread_entries(&self, thread_id: &str, after_id: i64) -> Result<Vec<Entry>, StoreError> {
         let sql = format!(
             "SELECT {ENTRY_COLS} FROM entries WHERE thread_id = ?1 AND id > ?2 ORDER BY id ASC"
@@ -534,7 +538,7 @@ impl Store {
             "applied_tree_sha": applied_tree_sha,
         });
         let entry = insert_and_apply(
-            &tx, thread_id, None, thread.epoch, EntryKind::WorkspaceApplied, Some(request_id),
+            &tx, thread_id, thread.head_entry_id, thread.epoch, EntryKind::WorkspaceApplied, Some(request_id),
             "client", Some(applied_tree_sha), body,
         )?;
         tx.commit()?;
@@ -967,8 +971,8 @@ fn apply_entry_to_projections(tx: &Transaction<'_>, entry: &Entry) -> Result<(),
         }
         EntryKind::WorkspaceApplied => {
             tx.execute(
-                "UPDATE threads SET status = ?1, last_tree_sha = COALESCE(?2, last_tree_sha), updated_ms = ?3 WHERE id = ?4",
-                params![ThreadStatus::Applied.as_str(), entry.tree_sha, entry.created_ms, entry.thread_id],
+                "UPDATE threads SET head_entry_id = ?1, status = ?2, last_tree_sha = COALESCE(?3, last_tree_sha), updated_ms = ?4 WHERE id = ?5",
+                params![entry.id, ThreadStatus::Applied.as_str(), entry.tree_sha, entry.created_ms, entry.thread_id],
             )?;
         }
         EntryKind::TurnClaimed => {
@@ -1396,6 +1400,13 @@ mod tests {
         let a1 = store.record_workspace_applied("t1-fork", 2, "tree0", "tree9", "req-apply-1").unwrap();
         let a2 = store.record_workspace_applied("t1-fork", 99, "x", "y", "req-apply-1").unwrap();
         assert_eq!(a1, a2);
+        assert_eq!(a1.parent_id, Some(f1.id));
+        assert_eq!(store.find_entry_by_request_id("req-apply-1").unwrap(), Some(a1.clone()));
+        assert_eq!(store.find_entry_by_request_id("req-missing").unwrap(), None);
+        let t1_fork = store.get_thread("t1-fork").unwrap().unwrap();
+        assert_eq!(t1_fork.head_entry_id, Some(a1.id));
+        let chain = store.causal_chain(a1.id).unwrap();
+        assert_eq!(chain.last().map(|e| e.kind), Some(EntryKind::WorkspaceApplied));
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -1016,9 +1016,49 @@ fn cli_step3_cross_codec_fork_diff_and_apply() {
         "diff must NOT include step4_only_on_main.txt:\n{diff_text}"
     );
 
-    // Run `arity apply branch-resp --json` and verify the source git repo.
-    let apply_json = arity_json(&data_dir, &["apply", "branch-resp", "--json"]);
+    // Run `arity apply branch-resp --req-id apply-idem-1 --json` twice and verify idempotency
+    // without re-running `git apply`, plus causal chain linkage.
+    let apply_json = arity_json(
+        &data_dir,
+        &["apply", "branch-resp", "--req-id", "apply-idem-1", "--json"],
+    );
     assert_eq!(apply_json["result"]["files_applied"].as_u64(), Some(4));
+
+    let apply_json_2 = arity_json(
+        &data_dir,
+        &["apply", "branch-resp", "--req-id", "apply-idem-1", "--json"],
+    );
+    assert_eq!(
+        apply_json_2["entry"]["id"],
+        apply_json["entry"]["id"],
+        "duplicate apply with same --req-id must return identical entry"
+    );
+    assert_eq!(
+        apply_json_2["result"]["files_applied"].as_u64(),
+        Some(4)
+    );
+
+    // Verify `arity log branch-resp --causal --json` ends with `workspace.applied`.
+    let causal_log = arity_json(&data_dir, &["log", "branch-resp", "--causal", "--json"]);
+    let causal_entries = causal_log.as_array().expect("causal log array");
+    let tip = causal_entries.last().expect("non-empty causal chain");
+    assert_eq!(tip["kind"].as_str(), Some("workspace.applied"));
+    assert_eq!(tip["id"], apply_json["entry"]["id"]);
+    assert!(tip["parent_id"].as_i64().is_some());
+
+    // Verify subcommand `--help` / `-h` exits 0 cleanly and prints usage.
+    for help_args in [
+        &["apply", "--help"][..],
+        &["chat", "-h"][..],
+        &["log", "--help"][..],
+        &["provider", "set", "--help"][..],
+    ] {
+        let help_out = arity_ok(&data_dir, help_args);
+        assert!(
+            help_out.contains("Usage:"),
+            "expected usage output for {help_args:?}, got:\n{help_out}"
+        );
+    }
 
     assert_eq!(
         fs::read_to_string(repo_dir.join("a.txt")).expect("read a.txt"),
