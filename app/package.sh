@@ -19,12 +19,11 @@ OUT=app/build
 APP="$OUT/Arity.app"
 DMG="$OUT/Arity-$VERSION-$ARCH.dmg"
 
-echo "==> Building release Arity.app ($VERSION, $ARCH)..."
-PROFILE=release app/build.sh --no-open
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+CLI_BIN="$TARGET_DIR/release/arity"
 
-echo "==> Building release arity CLI..."
-cargo build --release -q -p arity-cli
-CLI_BIN="target/release/arity"
+echo "==> Building release Arity.app and arity CLI ($VERSION, $ARCH)..."
+PROFILE=release app/build.sh --no-open
 
 # Bundle the CLI inside Arity.app/Contents/Resources/arity too so anyone who
 # drags Arity.app to /Applications has the matching binary on hand.

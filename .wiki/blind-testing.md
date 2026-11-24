@@ -29,7 +29,7 @@ The role sets the defaults. A trial changes something from those defaults.
 5. **Score.** The grade is joined to the trial record and averaged into the variant's score.
 6. **Next pick.** Scores inform the router's next choice.
 
-The same task is not run twice. Each task gets one variant, and comparisons build up across many tasks.
+**A task can be run several times.** Several agents can try the same task, each as its own run with its own variant. Each run is rated, and whoever asked chooses the best result or has the results combined into one. Runs of the same task are the most direct comparison between variants, because the brief is identical; the choice of a winner is itself a signal. A task run once still counts, and comparisons also build up across many tasks.
 
 ## Slots
 
