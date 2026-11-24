@@ -1,0 +1,85 @@
+name: Build Linux CLI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          persist-credentials: false
+      - name: Check target and release version
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "arity-cli") | .version')
+          if [[ "$GITHUB_EVENT_NAME" == release || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$version" = "$RELEASE_TAG"
+          fi
+          echo "CLI_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ARITY_HOME=$(mktemp -d)" >> "$GITHUB_ENV"
+      - name: Compile the standalone Linux binary
+        run: cargo build --locked --release -p arity-cli --bin arity
+      - name: Test Rust core and standalone CLI
+        run: cargo test --locked --workspace --release
+      - name: Package and smoke-test the installed CLI
+        run: |
+          archive="arity-$CLI_VERSION-linux-$(uname -m).tar.gz"
+          mkdir -p dist "$RUNNER_TEMP/install"
+          tar -czf "dist/$archive" -C target/release arity -C "$GITHUB_WORKSPACE" LICENSE
+          (cd dist && sha256sum "$archive" > "$archive.sha256" && sha256sum -c "$archive.sha256")
+          tar -xzf "dist/$archive" -C "$RUNNER_TEMP/install"
+          cli="$RUNNER_TEMP/install/arity"
+          test "$("$cli" --version)" = "arity $CLI_VERSION"
+          "$cli" --help
+          "$cli" create smoke --dir "$GITHUB_WORKSPACE" --model openai:test
+          "$cli" status smoke
+          "$cli" replay-check --json | jq -e '.ok and .threads == 1'
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+      - name: Attach verified CLI archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY"

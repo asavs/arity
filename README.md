@@ -24,6 +24,42 @@ One append-only SQLite journal (`arity.db`) and git-tree workspace engine sit un
 
 ## Quickstart (`0.0.1`)
 
+### Install the standalone CLI on Linux
+
+Use the archive for your Linux architecture (`uname -m` returns `x86_64` or `aarch64`). The binaries target Ubuntu 22.04 and compatible glibc distributions. Git is required for workspaces. The prebuilt CLI runs without Rust, Swift, or the Mac app.
+
+Run this in Bash to download the matching archive, verify its SHA-256 checksum, and install `arity` for your user account.
+
+```bash
+(
+  set -eu
+  cd "$(mktemp -d)"
+  base=https://github.com/asavs/arity/releases/download/0.0.1
+  archive="arity-0.0.1-linux-$(uname -m).tar.gz"
+  curl -fLO "$base/$archive"
+  curl -fLO "$base/$archive.sha256"
+  sha256sum -c "$archive.sha256"
+  tar -xzf "$archive" arity
+  install -Dm755 arity "$HOME/.local/bin/arity"
+)
+export PATH="$HOME/.local/bin:$PATH"
+arity --version
+```
+
+The last command should print `arity 0.0.1`. Add the `export PATH` line to `~/.bashrc` if your shell does not already include `~/.local/bin`. Linux state lives in `~/.local/share/arity` by default. [Release downloads](https://github.com/asavs/arity/releases/tag/0.0.1)
+
+### Install on Windows with WSL 2
+
+Windows users run the Linux CLI inside WSL 2. On Windows 11 or Windows 10 build 19041 and later, open PowerShell as Administrator and install Ubuntu.
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Restart if prompted, open Ubuntu, and complete the first-run user setup. If Ubuntu is already installed, `wsl -l -v` in PowerShell shows its WSL version. Use `wsl --set-version Ubuntu 2` if it shows version 1.
+
+**Inside Ubuntu**, install the prerequisites with `sudo apt update && sudo apt install -y curl git ca-certificates`, then run the Linux install block above. Run `arity` and your repository commands in that same Ubuntu shell. [Microsoft's WSL installation guide](https://learn.microsoft.com/en-us/windows/wsl/install)
+
 ### Build & Launch the Mac App
 
 ```bash
@@ -40,21 +76,22 @@ One append-only SQLite journal (`arity.db`) and git-tree workspace engine sit un
 ### CLI Usage
 
 ```bash
-# Configure credentials (stored mode 0600 in ~/Library/Application Support/Arity)
+# Configure credentials in the Arity data directory
 arity key set openai sk-...
 arity login                          # or sign in with ChatGPT (Plus/Pro OAuth)
 arity providers                      # inspect configured providers & readiness
 
 # Create an isolated git-worktree thread and run a turn
-arity create --repo . --model openai:gpt-4.1 --title "Refactor parser"
+arity create 1 --dir . --model openai:gpt-4.1
 arity chat 1 "Inspect core/src and summarize module boundaries"
 
-# Steer or queue follow-ups on a live thread (--mode steer | after_turn | inbox)
+# Steer a live thread (use arity chat --mode after_turn or inbox to queue a message)
 arity steer 1 "Focus on store.rs invariants first"
 
 # Time-travel: fork from any historical entry's exact git tree_sha onto another model
 arity log 1 --causal
-arity fork 1 --entry 12 --model mlx:mlx-community/Qwen3.5-4B-MLX-4bit
+# Substitute an entry ID from the log and a model available to you
+arity fork 12 parser-fork --model mlx:mlx-community/Qwen3.5-4B-MLX-4bit
 
 # Review changes against base checkout, apply cleanly, and verify projection replay
 arity diff 1
@@ -78,7 +115,7 @@ arity replay-check
 1. **One Durable History (`entries`):** `threads` and `deliveries` are pure projections updated in the same `BEGIN IMMEDIATE` transaction as `entries` and verified byte-for-byte via `arity replay-check`.
 2. **Single Writer (`arity-worker`):** Neither the CLI nor `Arity.app` executes model turns or tools in-process. Frontends only append idempotent intents (`request_id TEXT UNIQUE`); only the worker claims `epoch + 1` and advances `head_entry_id`.
 3. **Truncation & Crash Safety:** Truncated or malformed streams never emit `model.completed` and never fire tools. Mutating tools (`write_file`, `edit_file`, `bash`) commit `tool.call` before running, reap child process groups via a pipe-EOF watchdog on `SIGKILL`, and stamp a shadow-index git `tree_sha` onto `tool.result`. Missing receipts on crash become `status = "unknown"` (never auto-rerun) and restore `last_tree_sha`.
-4. **One Clean Data Directory (`$ARITY_HOME`):** Defaults to `~/Library/Application Support/Arity` and holds only `arity.db`, `workspaces/`, `keys.json` (`0600`), and `codex-auth.json` (`0600`)—no unlocked JSON cache sidecars.
+4. **One Clean Data Directory (`$ARITY_HOME`):** Defaults to `~/Library/Application Support/Arity` on macOS and `~/.local/share/arity` on Linux and WSL. It holds `arity.db`, `workspaces/`, `keys.json` (`0600`), and `codex-auth.json` (`0600`)—no unlocked JSON cache sidecars.
 
 ---
 

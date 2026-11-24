@@ -1,0 +1,2 @@
+- Use a bare SemVer tag without a `v` prefix.
+- Omit the version number from the release title and headings.

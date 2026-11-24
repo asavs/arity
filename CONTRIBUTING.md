@@ -52,6 +52,8 @@ Note: Inside `Arity.app/Contents/MacOS/`, the main SwiftUI executable is `Arity`
 
 ## Release Gates & Tagging
 
+Follow the [release naming rules](.github/release.md) for tags, titles, and headings.
+
 Before cutting a release tag:
 
 1. Bump versions in `core/Cargo.toml`, `cli/Cargo.toml`, and `app/Info.plist` (`CFBundleShortVersionString` + `CFBundleVersion`).

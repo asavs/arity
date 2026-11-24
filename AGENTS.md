@@ -24,6 +24,7 @@ Operational guide for coding agents (`arity`, `pi`, Claude Code, Codex, Cursor) 
 4. **Additive schema & zero sidecars.** Schema changes on `arity.db` must be strictly additive (`CREATE TABLE IF NOT EXISTS` / guarded migrations). Never introduce unlocked JSON state sidecar files beside `arity.db` (`0600` `keys.json` and `codex-auth.json` are the sole exceptions).
 5. **Isolated test state.** Never touch the user's live `~/Library/Application Support/Arity` during automated tests or QA runs. Always set `ARITY_HOME="$(mktemp -d)"`.
 6. **Tag naming.** Git release tags use bare SemVer (`0.0.1`, `0.0.2`, `0.1.0`) with **no `v` prefix**.
+7. **Owner attribution.** Use the `asavs` Git identity for commits and tags made on behalf of the owner. Omit agent co-author trailers.
 
 ## Verification Commands
 

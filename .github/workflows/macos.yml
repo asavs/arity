@@ -1,0 +1,28 @@
+name: Test and build on macOS
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Prepare an isolated data directory
+        run: echo "ARITY_HOME=$(mktemp -d)" >> "$GITHUB_ENV"
+      - name: Lint and test the Rust workspace
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --workspace
+      - name: Build the Mac app and its CLI worker
+        run: |
+          cargo fetch --locked
+          ./app/build.sh --no-open
+          app/build/Arity.app/Contents/MacOS/arity-worker replay-check
