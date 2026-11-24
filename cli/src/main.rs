@@ -1,1045 +1,1426 @@
-//! `arity`, the command-line front end. Everything it does goes through
-//! `arity_core::Arity`, the same object the Mac app uses.
+//! Intent-only CLI and detached single-writer worker entrypoint for Arity v0.0.1.
+//!
+//! Invariant: ONLY `arity worker --thread <id> [--once]` invokes `runner::run_turn_once`.
+//! Every other subcommand exclusively appends idempotent intents to SQLite and reads/tails state.
 
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use arity_core::{Access, Arity, Choice, Delivery, Event, Figures, HookConfig, HookEvent, KeyCheck, Message, MessageKind, PendingApproval, Priority, RunState, TaskFields, TaskState, Thread, ThreadGroup, Usage};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use arity_core::codec::ModelClient;
+use arity_core::runner::{self, DEFAULT_SYSTEM_PROMPT};
+use arity_core::secrets;
+use arity_core::store::{LeaseRow, Store};
+use arity_core::types::{
+    DeliveryMode, Entry, EntryKind, ProviderConfig, ThreadRow, ThreadStatus, WireCodec, now_ms,
+};
+use arity_core::workspace;
 use serde_json::{Value, json};
 
-const USAGE: &str = "usage:
-  arity ls                                   every thread: chats and tasks, by what needs you
-  arity board                                the same list, tasks only
-  arity log    <thread>                      read a thread
-  arity chat   <conv> <model> <message...>   send a message; <model> may be - for a chat's last model or a
-                                             task's worker (kept hidden until rated), or --smart, --fast,
-                                             --free or --private to let Arity pick for a chat;
-                                             if a turn is running there, the message steers it (cutting off its
-                                             reply), or with --after-turn joins when it would end;
-                                             --inbox leaves it for the next turn and starts nothing;
-                                             --dir <path> first attaches a folder (see folder)
-  arity resume <conv> [model]                carry on a conversation that stopped
-  arity continue <conv> [--smart|--fast|--free|--private|--model <m>]
-                                             carry on where it stopped short, writing nothing to ask: a reply
-                                             cut off by stop, an unanswered message or report, a stopped run
-  arity stop   <conv> [--all | --subtree]    stop the turn running in a conversation, from anywhere; --all also
-                                             stops every task it handed out, at any depth, until continued, and
-                                             denies the tool calls waiting for approval there
-  arity approvals [conv]                     tool calls a hook parked until you allow or deny them
-  arity approve <id> [--no-resume] [note...] allow one; a chat carries on here at once (unless --no-resume),
-                                             a run carries on with the dispatcher (the app or arity work)
-  arity deny   <id> [--no-resume] [note...]  deny one; the model is told \"Tool call denied by user: <note>\"
-                                             and carries on the same way
-  arity fork   <entry> <new-conv>            branch a conversation at an entry
-  arity usage  <conv>                        tokens used, how full the context is, and how much was cached
-  arity compact <conv> [instructions...]     replace the model's context with a summary it writes;
-                                             the thread keeps every message
-  arity reset  <conv> [note...]              start the model afresh from here; the thread keeps every message
-  arity folder <conv> [<path> | --clear]     the folder a conversation's file and shell tools work in;
-                                             tasks filed there take it with them
-  arity diff   <conv>                        what a coding run changed in its own git worktree: files, +ins/-del,
-                                             and the unified patch; the folder's repo is untouched until apply
-  arity apply  <conv>                        apply that run's changes to the real checkout and remove its
-                                             worktree; refused, changing nothing, if they conflict with edits there
-  arity discard <conv>                       throw the run's worktree away without applying it
-  arity task   <title...> [fields] [-- brief] add a task; --agent hands it to a blindly picked model,
-                                             drawn among the top three its choice allows
-  arity edit   <task> [fields] [-- brief]    change a task; --agent hands it off
-  arity done   <task>                        mark a task done
-  arity papercut [--about <t>] [--in <conv>] <note...>
-                                             note that something got in the way; it goes on your list
-  arity papercuts                            open papercuts
-  arity draft  <conv>                        the task card open in a conversation
-  arity draft  <conv> --new                  open an empty card; the next model turn helps fill it
-  arity draft  <conv> [fields] [-- brief]    edit the card
-  arity draft  <conv> --add | --dismiss      put the card on the board, or close it
-  arity work   [--once]                      run tasks for agents and deliver their results
-  arity runs                                 runs, models hidden until rated
-  arity rate   <run> <1-5> <note...>         rate a run yourself
-  arity scores                               average rating per model
-  arity leaderboard                          per model: quality and speed, public and Arity's own
-  arity reveal <run>                         which model did a run
-  arity models [--refresh]                   models the configured providers offer
-  arity providers                            accounts, their plans, and which have a key
-  arity provider add <name> <url> [--key]    add an OpenAI-compatible endpoint; --key if it needs one
-  arity provider rm <name>                   remove one you added, and its key
-  arity key    set <provider>                store an API key, from a hidden prompt or stdin
-  arity key    check <provider>              whether the provider takes its key; runs no model
-  arity key    rm <provider>                 forget it
-  arity workers [add|rm <model>]             the models tasks for agents are picked from
-  arity tools  [conv]                        tools available in a conversation (or a chat without a folder)
-  arity hooks                                configured pre/post hooks, plus built-in hooks
-  arity hook   add <name> --event <e> [--tool <t>] -- <command...>
-                                             add or replace a hook; event is before_tool, after_tool,
-                                             on_yield or after_turn; --tool filters by tool name(s)
-  arity hook   rm | enable | disable <name>  remove, enable or disable a hook; a before_tool hook may print
-                                             {\"action\":\"block\"|\"rewrite\"|\"ask\",\"reason\":...}, and ask
-                                             parks the call for arity approve / deny
-  arity auto-compact [off | <tokens>]        show or set the prompt-token auto-compaction threshold
-  arity login | logout                       sign in to ChatGPT, or out
+const USAGE: &str = "\
+arity v0.0.1
 
-fields: --title <t>  --agent | --me  --smart | --fast | --free | --private  --priority low|normal|high|urgent
-        --due YYYY-MM-DD  --blocked-by <id,id>  --tag <t> (repeatable)  --no-tags
-        --dir <path> | --no-dir  the folder its run may inspect, edit and run commands in; left out, the chat's
+Usage:
+  arity [--data-dir <path>] <command> [options]
 
-data: $ARITY_HOME, or ~/Library/Application Support/Arity";
+Commands:
+  create <thread> --model <spec> [--dir <path>] [--system <text>] [--req-id <id>] [--json]
+  chat <thread> [--model <spec>] [--dir <path>] [--system <text>] [--mode steer|after_turn|inbox] [--req-id <id>] [--no-spawn] [--no-wait] <text...>
+  steer <thread> [--model <spec>] [--req-id <id>] [--no-spawn] [--json] <text...>
+  stop <thread> [--req-id <id>] [--json]
+  fork <from_entry_id> <new_thread> [--model <spec>] [--req-id <id>] [--json]
+  worker --thread <thread> [--once]
+  log <thread> [--causal] [--json]
+  status [<thread>] [--json]
+  diff <thread> [--json]
+  apply <thread> [--req-id <id>] [--json]
+  replay-check [--json]
+  providers [--json]
+  provider set <name> <url> --wire chat_completions|responses [--needs-key] [--key-name <k>] [--session-header <h>] [--models <m1,m2>] [--json]
+  limits [<provider>] [--json]
+  key set <name> [<key>]
+  key rm <name>
+  login
+  logout
+  whoami";
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(e) = run(&args) {
-        eprintln!("arity: {e}");
+    if let Err(err) = run() {
+        eprintln!("error: {err:#}");
         std::process::exit(1);
     }
 }
 
-/// The longest title a listing prints; the full one is in `log` and the app.
-const LISTED_TITLE: usize = 80;
+fn run() -> Result<()> {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        println!("{USAGE}");
+        return Ok(());
+    }
 
-fn clip(s: &str) -> String {
-    match s.char_indices().nth(LISTED_TITLE) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                let val = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow!("--data-dir requires a path"))?;
+                data_dir = Some(PathBuf::from(val));
+                args.drain(i..=i + 1);
+            }
+            s if s.starts_with("--data-dir=") => {
+                let val = s.trim_start_matches("--data-dir=");
+                data_dir = Some(PathBuf::from(val));
+                args.remove(i);
+            }
+            "--" => break,
+            _ => i += 1,
+        }
+    }
+
+    let data_dir = data_dir.unwrap_or_else(arity_core::default_data_dir);
+    let Some((cmd, rest)) = args.split_first() else {
+        println!("{USAGE}");
+        return Ok(());
+    };
+
+    match cmd.as_str() {
+        "-h" | "--help" | "help" => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        "-V" | "--version" | "version" => {
+            println!("arity {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        "create" => cmd_create(&data_dir, rest),
+        "chat" => cmd_chat(&data_dir, rest),
+        "steer" => cmd_steer(&data_dir, rest),
+        "stop" => cmd_stop(&data_dir, rest),
+        "fork" => cmd_fork(&data_dir, rest),
+        "worker" => cmd_worker(&data_dir, rest),
+        "log" => cmd_log(&data_dir, rest),
+        "status" => cmd_status(&data_dir, rest),
+        "diff" => cmd_diff(&data_dir, rest),
+        "apply" => cmd_apply(&data_dir, rest),
+        "replay-check" => cmd_replay_check(&data_dir, rest),
+        "providers" => cmd_providers(&data_dir, rest),
+        "provider" => cmd_provider(&data_dir, rest),
+        "limits" => cmd_limits(&data_dir, rest),
+        "key" => cmd_key(&data_dir, rest),
+        "login" => {
+            let who = secrets::codex_auth::login(&data_dir)?;
+            println!("signed in as {who}");
+            Ok(())
+        }
+        "logout" => {
+            secrets::codex_auth::logout(&data_dir)?;
+            println!("signed out");
+            Ok(())
+        }
+        "whoami" => {
+            match secrets::codex_auth::account(&data_dir) {
+                Some(who) => println!("{who}"),
+                None => println!("not signed in"),
+            }
+            Ok(())
+        }
+        other => bail!("unknown command '{other}'\n\n{USAGE}"),
     }
 }
 
-fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let arity = Arity::new(None);
-    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
-    let is_worker = |conv: &str| -> Result<bool, Box<dyn std::error::Error>> {
-        Ok(arity.threads()?.iter().any(|t| t.name == conv && t.task.as_ref().and_then(|k| k.run).is_some()))
-    };
-    let who_for = |conv: &str, model: &str| -> Result<String, Box<dyn std::error::Error>> {
-        if model.is_empty() || model == "-" {
-            Ok(arity.last_model(conv.into())?.unwrap_or_else(|| "model".into()))
-        } else {
-            Ok(model.into())
-        }
-    };
-    match (arg(0).as_str(), args.len()) {
-        ("ls" | "board", 1) => {
-            let me = arity.me();
-            let mut group = None;
-            for t in arity.threads()?.iter().filter(|t| arg(0) == "ls" || t.task.is_some()) {
-                if group != Some(t.group) {
-                    group = Some(t.group);
-                    println!("{}", match t.group {
-                        ThreadGroup::NeedsYou => "Needs you",
-                        ThreadGroup::Running => "Running",
-                        ThreadGroup::Open => "Open",
-                        ThreadGroup::Chat => "Chats",
-                        ThreadGroup::Done => "Done",
-                    });
-                }
-                println!("{}", thread_line(t, &me));
-                let waiting = t.task.as_ref().filter(|k| arg(0) == "board" && k.run_state == Some(RunState::NeedsRating));
-                if let Some(r) = waiting.and_then(|k| k.result.as_ref()) {
-                    println!("{:>10}{}", "", r.replace('\n', "\n          "));
-                }
-            }
-        }
-        ("log", 2) => {
-            let messages = arity.messages(arg(1))?;
-            if messages.is_empty() && !arity.threads()?.iter().any(|t| t.name == arg(1)) {
-                return Err(format!("no thread {}; `arity ls` lists them", arg(1)).into());
-            }
-            messages.iter().for_each(print)
-        }
-        ("chat", n) if n >= 4 => {
-            let conv = arg(1);
-            let model = match (is_worker(&conv)?, choice(&arg(2))) {
-                (true, _) => "-".into(),
-                (false, Some(c)) => {
-                    let pick = arity.pick(c)?;
-                    println!("      {}: {}", pick.model, pick.reason);
-                    pick.model
-                }
-                (false, None) => arg(2),
-            };
-            let mut rest = &args[3..];
-            if rest.first().is_some_and(|a| a == "--dir") {
-                let dir = rest.get(1).ok_or("--dir needs a path")?;
-                arity.set_folder(conv.clone(), Some(absolute(dir)?))?;
-                rest = &rest[2..];
-            }
-            let (how, words) = match rest.first().map(String::as_str) {
-                Some("--after-turn") => (Delivery::AfterTurn, &rest[1..]),
-                Some("--inbox") => (Delivery::Inbox, &rest[1..]),
-                _ => (Delivery::Steer, rest),
-            };
-            if words.is_empty() {
-                return Err("nothing to send".into());
-            }
-            let who = who_for(&conv, &model)?;
-            stop_on_ctrl_c(&conv);
-            if !arity.send_as_with(&conv, &model, &words.join(" "), how, &mut streamer(&who))? {
-                println!("a turn is running in {conv}; the message joins it");
-            } else if !arity.pending_approvals(Some(conv.clone()))?.is_empty() {
-                println!("{conv} waits for you to allow or deny a tool call (arity approvals {conv}); the message joins after");
-            } else if how == Delivery::Inbox {
-                println!("left in {conv} for its next turn");
-            }
-        }
-        ("resume", 2 | 3) => {
-            let conv = arg(1);
-            let model = if is_worker(&conv)? || args.len() == 2 { "-".into() } else { arg(2) };
-            let who = who_for(&conv, &model)?;
-            stop_on_ctrl_c(&conv);
-            if !arity.resume_with(&conv, &model, &mut streamer(&who))? {
-                println!("a turn is already running in {conv}");
-            }
-        }
-        ("continue", 2..=4) => {
-            let conv = arg(1);
-            let model = match (is_worker(&conv)?, arg(2).as_str()) {
-                (true, _) | (false, "") => None,
-                (false, "--model") if args.len() == 4 => Some(arg(3)),
-                (false, flag) => match choice(flag) {
-                    Some(c) if args.len() == 3 => {
-                        let pick = arity.pick(c)?;
-                        println!("      {}: {}", pick.model, pick.reason);
-                        Some(pick.model)
-                    }
-                    _ => return Err(format!("unexpected {:?}; see `arity help`", args[2..].join(" ")).into()),
-                },
-            };
-            let who = who_for(&conv, model.as_deref().unwrap_or("-"))?;
-            stop_on_ctrl_c(&conv);
-            let ended = arity.continue_with(&conv, model.as_deref(), &mut streamer(&who))?;
-            println!("{conv}: {ended}");
-        }
-        ("stop", 2) => match arity.stop(arg(1))? {
-            true => println!("stopping {}", arg(1)),
-            false => println!("nothing is running in {}", arg(1)),
-        },
-        ("stop", 3) if arg(2) == "--all" || arg(2) == "--subtree" => match arity.stop_subtree(arg(1))? {
-            0 => println!("nothing is running in {} or below it", arg(1)),
-            n => println!("stopped {n} conversation{} in and below {}; `arity continue` carries any of them on", if n == 1 { "" } else { "s" }, arg(1)),
-        },
-        ("approvals", 1 | 2) => {
-            let conv = (args.len() == 2).then(|| arg(1));
-            let pending = arity.pending_approvals(conv.clone())?;
-            if pending.is_empty() {
-                match conv {
-                    Some(c) => println!("nothing waits for your approval in {c}"),
-                    None => println!("nothing waits for your approval"),
-                }
-            }
-            for a in &pending {
-                println!("{}", approval_line(a));
-            }
-            if !pending.is_empty() {
-                println!("\n`arity approve <id> [note]` or `arity deny <id> [note]`");
-            }
-        }
-        ("approve" | "deny", n) if n >= 2 => {
-            let id: i64 = arg(1).trim_start_matches('#').parse().map_err(|_| format!("{:?} is not an approval id; see `arity approvals`", arg(1)))?;
-            let mut rest = &args[2..];
-            let resume = rest.first().is_none_or(|a| a != "--no-resume");
-            if !resume {
-                rest = &rest[1..];
-            }
-            let note = (!rest.is_empty()).then(|| rest.join(" "));
-            let allow = arg(0) == "approve";
-            let a = if allow { arity.approve_tool(id, note)? } else { arity.deny_tool(id, note)? };
-            let conv = a.conversation.clone();
-            println!("{} {} in {conv}", if allow { "allowed" } else { "denied" }, a.tool);
-            if !arity.can_continue(conv.clone())? {
-                println!("{conv} carries on with the dispatcher: the app, or `arity work`");
-            } else if !resume {
-                println!("`arity continue {conv}` carries it on");
-            } else {
-                let who = who_for(&conv, "-")?;
-                stop_on_ctrl_c(&conv);
-                let ended = arity.continue_with(&conv, None, &mut streamer(&who))?;
-                println!("{conv}: {ended}");
-            }
-        }
-        ("fork", 3) => {
-            arity.fork(arg(1).parse()?, arg(2))?;
-            println!("{} now branches from entry #{}", arg(2), arg(1));
-        }
-        ("usage", 2) => {
-            let u = arity.usage(arg(1))?;
-            if u.replies_with_usage == 0 {
-                println!("no usage reported in {} yet; some local servers never report it", arg(1));
-            } else {
-                println!(
-                    "context    {} tokens in the last prompt, {} cached",
-                    tokens(u.last_input_tokens),
-                    percent(u.last_cached_tokens, u.last_input_tokens)
-                );
-                println!(
-                    "all told   {} in ({} cached) · {} out · over {} replies",
-                    tokens(u.input_tokens),
-                    percent(u.cached_tokens, u.input_tokens),
-                    tokens(u.output_tokens),
-                    u.replies_with_usage
-                );
-            }
-            if u.compacted_entries > 0 {
-                println!("compacted  {} earlier entries are no longer in the model's context", u.compacted_entries);
-            }
-        }
-        ("compact", n) if n >= 2 => {
-            let instructions = (n > 2).then(|| args[2..].join(" "));
-            let summary = arity.compact(arg(1), instructions)?;
-            println!("compacted {}; the model now reads this summary:\n\n{summary}", arg(1));
-        }
-        ("reset", n) if n >= 2 => {
-            let note = (n > 2).then(|| args[2..].join(" "));
-            arity.reset_context(arg(1), note)?;
-            println!("{}'s model starts fresh from here; `arity log {}` still shows everything", arg(1), arg(1));
-        }
-        ("auto-compact", 1) => match arity.auto_compact_tokens()? {
-            Some(n) => println!("auto-compact at {} tokens", n),
-            None => println!("auto-compact is off (overflow errors still compact once)"),
-        },
-        ("auto-compact", 2) => {
-            let raw = arg(1);
-            let value = if matches!(raw.to_ascii_lowercase().as_str(), "off" | "none" | "0" | "false") {
-                None
-            } else {
-                let s = raw.trim().to_ascii_lowercase();
-                let n: u64 = if let Some(k) = s.strip_suffix('k') {
-                    k.parse::<u64>()
-                        .map_err(|_| format!("expected a token count like 120000 or 120k, or `off`, got {raw:?}"))?
-                        .saturating_mul(1_000)
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+fn take_flag_value(args: &[String], idx: &mut usize, flag: &str) -> Result<String> {
+    let cur = &args[*idx];
+    if let Some((_, v)) = cur.split_once('=') {
+        return Ok(v.to_string());
+    }
+    *idx += 1;
+    args.get(*idx)
+        .cloned()
+        .ok_or_else(|| anyhow!("{flag} requires a value"))
+}
+
+fn flag_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(k, _)| k)
+}
+
+fn random_req_id() -> String {
+    let mut bytes = [0u8; 16];
+    let filled = File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !filled {
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        let t = now_ms() as u64;
+        let pid = std::process::id() as u64;
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let a = t ^ (pid.rotate_left(17));
+        let b = seq.wrapping_mul(0x9e3779b97f4a7c15) ^ t.rotate_right(13);
+        bytes[..8].copy_from_slice(&a.to_le_bytes());
+        bytes[8..].copy_from_slice(&b.to_le_bytes());
+    }
+    let mut hex = String::with_capacity(32);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
+}
+
+fn lease_is_live(lease: Option<&LeaseRow>) -> bool {
+    lease.is_some_and(|l| l.lease_until_ms > now_ms() && Store::pid_is_alive(l.owner_pid))
+}
+
+fn spawn_detached_worker(data_dir: &Path, thread_id: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("failed to resolve current arity binary")?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--data-dir")
+        .arg(data_dir)
+        .args(["worker", "--thread", thread_id, "--once"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().context("failed to spawn background worker")?;
+    Ok(())
+}
+
+fn short_sha(sha: Option<&str>) -> &str {
+    match sha {
+        Some(s) if s.len() >= 12 => &s[..12],
+        Some(s) if !s.is_empty() => s,
+        _ => "-",
+    }
+}
+
+fn read_text_or_stdin(parts: &[String]) -> Result<String> {
+    if !parts.is_empty() {
+        return Ok(parts.join(" "));
+    }
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } != 0;
+    if is_tty {
+        bail!("message text is required");
+    }
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf)?;
+    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+    if trimmed.is_empty() {
+        bail!("message text is required");
+    }
+    Ok(trimmed)
+}
+
+// -----------------------------------------------------------------------------
+// Intent commands (never call runner directly)
+// -----------------------------------------------------------------------------
+
+fn cmd_create(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut dir: Option<String> = None;
+    let mut system: Option<String> = None;
+    let mut req_id: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--model" => model = Some(take_flag_value(args, &mut i, "--model")?),
+            "--dir" => dir = Some(take_flag_value(args, &mut i, "--dir")?),
+            "--system" => system = Some(take_flag_value(args, &mut i, "--system")?),
+            "--req-id" => req_id = Some(take_flag_value(args, &mut i, "--req-id")?),
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for create"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
                 } else {
-                    s.parse::<u64>()
-                        .map_err(|_| format!("expected a token count like 120000 or 120k, or `off`, got {raw:?}"))?
-                };
-                Some(n)
-            };
-            arity.set_auto_compact_tokens(value)?;
-            match value {
-                Some(n) => println!("auto-compact set to {n} tokens"),
-                None => println!("auto-compact turned off"),
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
             }
         }
-        ("folder", 2) => match arity.folder(arg(1))? {
-            Some(dir) => println!("{dir}"),
-            None => println!("{} has no folder", arg(1)),
-        },
-        ("folder", 3) => {
-            if arg(2) == "--clear" {
-                arity.set_folder(arg(1), None)?;
-                println!("{} has no folder now", arg(1));
-            } else {
-                arity.set_folder(arg(1), Some(absolute(&arg(2))?))?;
-                println!("{} reads {}", arg(1), arity.folder(arg(1))?.unwrap_or_default());
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("create requires <thread>"))?;
+    let model = model.ok_or_else(|| anyhow!("create requires --model <provider>:<model>"))?;
+    let system = system.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let already_exists = store.get_thread(&thread_id)?.is_some();
+
+    let (source_dir, base_commit, base_tree_sha) = if !already_exists {
+        if let Some(ref d) = dir {
+            let ws = workspace::init_workspace(data_dir, &thread_id, Path::new(d))?;
+            (
+                Some(ws.source_dir),
+                Some(ws.base_commit),
+                Some(ws.base_tree_sha),
+            )
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let entry = store.create_thread(
+        &thread_id,
+        &model,
+        source_dir.as_deref(),
+        base_commit.as_deref(),
+        base_tree_sha.as_deref(),
+        &system,
+        &req_id,
+    )?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "created thread={} entry_id={} model={} base_tree_sha={} req_id={}",
+            entry.thread_id,
+            entry.id,
+            entry.body["model"].as_str().unwrap_or(&model),
+            short_sha(entry.tree_sha.as_deref()),
+            entry.request_id.as_deref().unwrap_or(&req_id),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_chat(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut dir: Option<String> = None;
+    let mut system: Option<String> = None;
+    let mut mode = DeliveryMode::Steer;
+    let mut req_id: Option<String> = None;
+    let mut no_spawn = false;
+    let mut no_wait = false;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut after_sep = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        if !after_sep {
+            match flag_name(&args[i]) {
+                "--" => {
+                    after_sep = true;
+                    i += 1;
+                    continue;
+                }
+                "--model" => {
+                    model = Some(take_flag_value(args, &mut i, "--model")?);
+                    i += 1;
+                    continue;
+                }
+                "--dir" => {
+                    dir = Some(take_flag_value(args, &mut i, "--dir")?);
+                    i += 1;
+                    continue;
+                }
+                "--system" => {
+                    system = Some(take_flag_value(args, &mut i, "--system")?);
+                    i += 1;
+                    continue;
+                }
+                "--mode" => {
+                    let raw = take_flag_value(args, &mut i, "--mode")?;
+                    mode = DeliveryMode::parse(&raw)?;
+                    i += 1;
+                    continue;
+                }
+                "--req-id" => {
+                    req_id = Some(take_flag_value(args, &mut i, "--req-id")?);
+                    i += 1;
+                    continue;
+                }
+                "--no-spawn" => {
+                    no_spawn = true;
+                    i += 1;
+                    continue;
+                }
+                "--no-wait" => {
+                    no_wait = true;
+                    i += 1;
+                    continue;
+                }
+                other if other.starts_with('-') => bail!("unknown flag '{other}' for chat"),
+                _ => {}
             }
         }
-        ("diff", 2) => match arity.worktree_diff(arg(1))? {
-            None => println!("No worktree for {}: its folder is not in a git repo, or it has none", arg(1)),
-            Some(d) => {
-                println!("{}  [{}]  base {}", d.work_dir, d.status, d.base_commit.chars().take(10).collect::<String>());
-                match d.status.as_str() {
-                    "applied" => println!("Changes applied to {}", d.repo_root),
-                    "discarded" => println!("Worktree discarded"),
-                    _ if d.files_changed == 0 => println!("No changes"),
-                    _ => {
-                        for f in &d.files {
-                            println!("  {:<9} +{} / -{}  {}", f.status, f.insertions, f.deletions, f.path);
-                        }
-                        println!("{} file(s) changed, +{} / -{}\n", d.files_changed, d.insertions, d.deletions);
-                        print!("{}", d.patch);
-                        if !d.patch.ends_with('\n') {
-                            println!();
-                        }
+        if thread_id.is_none() {
+            thread_id = Some(args[i].clone());
+        } else {
+            text_parts.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("chat requires <thread>"))?;
+    let text = read_text_or_stdin(&text_parts)?;
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let created_now = if store.get_thread(&thread_id)?.is_none() {
+        let model_spec = model.as_deref().ok_or_else(|| {
+            anyhow!("thread '{thread_id}' does not exist; pass --model <provider>:<model> to create it")
+        })?;
+        let create_req_id = format!("{req_id}:create");
+        let (source_dir, base_commit, base_tree_sha) = if let Some(ref d) = dir {
+            let ws = workspace::init_workspace(data_dir, &thread_id, Path::new(d))?;
+            (
+                Some(ws.source_dir),
+                Some(ws.base_commit),
+                Some(ws.base_tree_sha),
+            )
+        } else {
+            (None, None, None)
+        };
+        let sys = system.as_deref().unwrap_or(DEFAULT_SYSTEM_PROMPT);
+        store.create_thread(
+            &thread_id,
+            model_spec,
+            source_dir.as_deref(),
+            base_commit.as_deref(),
+            base_tree_sha.as_deref(),
+            sys,
+            &create_req_id,
+        )?;
+        true
+    } else {
+        false
+    };
+
+    let model_override = if created_now { None } else { model.as_deref() };
+    let delivery = store.enqueue_delivery(&thread_id, mode, &text, model_override, &req_id)?;
+
+    let should_spawn = !no_spawn && mode != DeliveryMode::Inbox;
+    if should_spawn && !lease_is_live(store.read_lease(&thread_id)?.as_ref()) {
+        spawn_detached_worker(data_dir, &thread_id)?;
+    }
+
+    if no_wait || mode == DeliveryMode::Inbox {
+        println!(
+            "queued thread={} entry_id={} mode={} req_id={}",
+            delivery.thread_id,
+            delivery.id,
+            mode.as_str(),
+            delivery.request_id.as_deref().unwrap_or(&req_id),
+        );
+        return Ok(());
+    }
+
+    tail_delivery(&store, data_dir, &thread_id, delivery.id, should_spawn)
+}
+
+fn tail_delivery(
+    store: &Store,
+    data_dir: &Path,
+    thread_id: &str,
+    delivery_id: i64,
+    allow_respawn: bool,
+) -> Result<()> {
+    let mut last_entry_id = delivery_id;
+    let mut printed_partial_len: usize = 0;
+    let mut streamed_any = false;
+    let mut accepted = false;
+    let mut last_error: Option<String> = None;
+    let mut respawned = false;
+    let started = Instant::now();
+
+    loop {
+        let new_entries = store.thread_entries(thread_id, last_entry_id)?;
+        for entry in new_entries {
+            last_entry_id = entry.id;
+            match entry.kind {
+                EntryKind::DeliveryAccepted => {
+                    if entry
+                        .body
+                        .get("delivery_ids")
+                        .and_then(Value::as_array)
+                        .is_some_and(|arr| arr.iter().any(|v| v.as_i64() == Some(delivery_id)))
+                    {
+                        accepted = true;
                     }
                 }
-            }
-        },
-        ("apply", 2) => {
-            let out = arity.apply_worktree(arg(1))?;
-            println!("{}", out.summary);
-        }
-        ("discard", 2) => {
-            if arity.discard_worktree(arg(1))? {
-                println!("Discarded the worktree of {}; the real checkout was not touched", arg(1));
-            } else {
-                println!("No active worktree for {}", arg(1));
-            }
-        }
-        ("task", n) if n >= 2 => {
-            let (words, fields) = parse_fields(&args[1..])?;
-            let mut f = TaskFields { title: words.join(" "), ..Default::default() };
-            f.merge(&fields)?;
-            let agent = f.assignee == "agent";
-            let id = arity.add_task(f)?;
-            println!("added task {id}{}", if agent { " for an agent; `arity work` or the app will run it" } else { "" });
-        }
-        ("edit", n) if n >= 3 => {
-            let id: i64 = arg(1).parse()?;
-            let (words, fields) = parse_fields(&args[2..])?;
-            if !words.is_empty() {
-                return Err(format!("unexpected {:?}; use --title to rename", words.join(" ")).into());
-            }
-            let mut f = arity.threads()?.into_iter().filter_map(|t| t.task).find(|t| t.id == id).ok_or(format!("no task {id}"))?.fields;
-            f.merge(&fields)?;
-            arity.update_task(id, f)?;
-            println!("updated task {id}");
-        }
-        ("done", 2) => {
-            arity.set_task_done(arg(1).parse()?, true)?;
-            println!("task {} is done", arg(1));
-        }
-        ("papercut", n) if n >= 2 => {
-            let (mut about, mut conv, mut words) = (None, None, vec![]);
-            let mut rest = args[1..].iter();
-            while let Some(a) = rest.next() {
-                match a.as_str() {
-                    "--about" => about = Some(rest.next().ok_or("--about needs what got in the way")?.clone()),
-                    "--in" => conv = Some(rest.next().ok_or("--in needs a conversation")?.clone()),
-                    _ => words.push(a.as_str()),
+                EntryKind::ModelCompleted => {
+                    let text = entry.body["text"].as_str().unwrap_or("");
+                    flush_remaining_text(text, &mut printed_partial_len, &mut streamed_any)?;
                 }
-            }
-            let id = arity.file_papercut(conv, words.join(" "), about)?;
-            println!("filed papercut {id}");
-        }
-        ("papercuts", 1) => {
-            let me = arity.me();
-            for t in arity.threads()?.iter().filter(|t| {
-                t.task.as_ref().is_some_and(|k| k.state != TaskState::Done && k.fields.tags.iter().any(|g| g == "papercut"))
-            }) {
-                println!("{}", thread_line(t, &me));
-            }
-        }
-        ("draft", n) if n >= 2 => {
-            let conv = arg(1);
-            let rest = &args[2..];
-            let card = || arity.threads().map(|ts| ts.into_iter().find(|t| t.name == conv).and_then(|t| t.card));
-            if rest.iter().any(|a| a == "--new") {
-                arity.open_draft(conv.clone())?;
-            } else if rest.iter().any(|a| a == "--add") {
-                let id = arity.add_draft(conv.clone())?;
-                println!("added task {id} from {conv}'s card");
-                return Ok(());
-            } else if rest.iter().any(|a| a == "--dismiss") {
-                arity.dismiss_draft(conv.clone())?;
-                println!("dismissed {conv}'s card");
-                return Ok(());
-            } else if !rest.is_empty() {
-                let (words, fields) = parse_fields(rest)?;
-                if !words.is_empty() {
-                    return Err(format!("unexpected {:?}; use --title to rename", words.join(" ")).into());
+                EntryKind::ModelInterrupted => {
+                    let text = entry.body["text"].as_str().unwrap_or("");
+                    flush_remaining_text(text, &mut printed_partial_len, &mut streamed_any)?;
                 }
-                let mut f = card()?.ok_or(format!("{conv} has no task card open; --new opens one"))?;
-                f.merge(&fields)?;
-                arity.edit_draft(conv.clone(), f)?;
-            }
-            match card()? {
-                Some(f) => println!("{}", f.describe()),
-                None => println!("{conv} has no task card open"),
-            }
-        }
-        ("work", 1 | 2) => {
-            let once = arg(1) == "--once";
-            loop {
-                match arity.work_once()? {
-                    Some(line) => println!("{line}"),
-                    None if once => break,
-                    None => std::thread::sleep(std::time::Duration::from_secs(1)),
+                EntryKind::ToolCall => {
+                    let name = entry.body["name"].as_str().unwrap_or("");
+                    eprintln!("[tool] {name}");
                 }
-            }
-        }
-        ("runs", 1) => {
-            for r in arity.runs()? {
-                let score = r.score.map(|s| format!("{s}/5")).unwrap_or_else(|| if r.ended.is_some() { "unrated".into() } else { "running".into() });
-                let model = r.model.as_deref().unwrap_or("(hidden)");
-                println!("run {:<3} task {:<3} {:<8} {:<40} {}", r.id, r.task, score, clip(&r.title), model);
-            }
-        }
-        ("rate", n) if n >= 4 => {
-            let before = arity.rate(arg(1).parse()?, arg(2).parse()?, args[3..].join(" "))?;
-            let changed = before.filter(|b| b.to_string() != arg(2)).map(|b| format!(", changed from {b} to {}", arg(2))).unwrap_or_default();
-            println!("rated run {}{changed}; it was {}", arg(1), arity.reveal(arg(1).parse()?)?);
-        }
-        ("scores", 1) => {
-            for s in arity.scores()? {
-                println!("{:>5.2}  {:>3} rated  {}", s.average, s.rated, s.model);
-            }
-        }
-        ("leaderboard", 1) => {
-            // Each figure: the one the pick uses, then where it came from.
-            println!("{:<44} {:<30} {:<26} {}", "model", "quality (0-100)", "first token", "speed");
-            for s in arity.leaderboard()? {
-                let fig = |get: fn(&Figures) -> Option<f64>, n: i64, unit: &str, digits: usize| -> String {
-                    let Some(used) = get(&s.combined) else { return "-".into() };
-                    let mut from = vec![];
-                    if get(&s.public).is_some() { from.push("public".to_string()) }
-                    if get(&s.own).is_some() { from.push(format!("own {n}")) }
-                    format!("{used:.digits$}{unit} ({})", from.join(" + "))
-                };
-                let reach = if s.reachable { "" } else { "  (not reachable)" };
-                let quality = match (s.public.quality, s.shift) {
-                    (Some(_), Some(shift)) => format!("{:.0} (public {shift:+.1} from {} rated)", s.combined.quality.unwrap_or_default(), s.rated),
-                    (Some(q), None) => format!("{q:.0} (public)"),
-                    (None, Some(shift)) => format!("{shift:+.1} from {} rated", s.rated),
-                    (None, None) => "-".into(),
-                };
-                println!(
-                    "{:<44} {:<30} {:<26} {}{reach}",
-                    s.model,
-                    quality,
-                    fig(|f| f.ttft_ms, s.timed, " ms", 0),
-                    fig(|f| f.tokens_per_sec, s.timed, " tok/s", 0),
-                );
-            }
-            println!("\npublic figures and their sources: core/data/leaderboard.json; ratings shift quality by up to 10 points a star from the average rating; own n = timed replies");
-        }
-        ("reveal", 2) => println!("{}", arity.reveal(arg(1).parse()?)?),
-        ("models", 1 | 2) => arity.models(arg(1) == "--refresh")?.iter().for_each(|m| println!("{m}")),
-        ("providers", 1) => {
-            for a in arity.accounts()? {
-                let key = match (&a.key_for, a.has_key) {
-                    (None, _) => String::new(),
-                    (Some(_), true) => " · key set".into(),
-                    (Some(k), false) => format!(" · needs a key: arity key set {k}"),
-                };
-                println!("{}{key}", a.title);
-                for p in a.plans {
-                    let how = match p.access {
-                        Access::SignIn { account: Some(who) } => format!(" · signed in as {who}"),
-                        Access::SignIn { account: None } => " · arity login".into(),
-                        _ => String::new(),
-                    };
-                    println!("  {:<12} {:<10} {}{how}", p.provider, p.title, p.note);
-                    match p.usage {
-                        Usage::Limits { limits, age_secs } => {
-                            let parts: Vec<String> = limits.iter().map(|l| format!("{} of {} {}", l.remaining, l.limit, l.name)).collect();
-                            println!("  {:<12} {:<10} left: {} (as of {age_secs}s ago)", "", "", parts.join(", "));
-                        }
-                        Usage::NoneYet => println!("  {:<12} {:<10} usage shows after the first reply", "", ""),
-                        Usage::NotReported => println!("  {:<12} {:<10} usage not reported", "", ""),
-                        Usage::Unlimited => {}
+                EntryKind::ToolResult => {
+                    let name = entry.body["name"].as_str().unwrap_or("");
+                    let status = entry.body["status"].as_str().unwrap_or("");
+                    if status != "ok" {
+                        eprintln!("[tool:{status}] {name}");
                     }
                 }
+                EntryKind::TurnFinished => {
+                    if let Some(err) = entry.body["error"].as_str() {
+                        last_error = Some(err.to_string());
+                    }
+                }
+                _ => {}
             }
         }
-        ("key", 3) if arg(1) == "set" => {
-            arity.set_key(arg(2), read_secret(&format!("API key for {}: ", arg(2)))?)?;
-            println!("saved the key for {}; {}", arg(2), describe(arity.check_provider(arg(2))?));
-        }
-        ("key", 3) if arg(1) == "check" => println!("{}: {}", arg(2), describe(arity.check_provider(arg(2))?)),
-        ("provider", 4 | 5) if arg(1) == "add" => {
-            arity.add_provider(arg(2), arg(3), arg(4) == "--key")?;
-            println!("added {}{}", arg(2), if arg(4) == "--key" { format!("; now run `arity key set {}`", arg(2)) } else { String::new() });
-        }
-        ("provider", 3) if arg(1) == "rm" => arity.remove_provider(arg(2))?,
-        ("logout", 1) => arity.sign_out_chatgpt()?,
-        ("key", 3) if arg(1) == "rm" => arity.set_key(arg(2), String::new())?,
-        ("workers", 1) => arity.worker_models()?.iter().for_each(|m| println!("{m}")),
-        ("workers", 3) if arg(1) == "add" || arg(1) == "rm" => arity.set_worker(arg(2), arg(1) == "add")?,
-        ("tools", 1 | 2) => {
-            let conv = (args.len() == 2).then(|| arg(1));
-            let tools = arity.tools(conv)?;
-            let name_w = tools.iter().map(|t| t.name.len()).max().unwrap_or(12).max(12);
-            for t in &tools {
-                let status = if t.available { "[on]" } else { "[off]" };
-                println!(
-                    "  {:<name_w$}  {:<5}  {:<15}  {}",
-                    t.name,
-                    status,
-                    t.execution,
-                    first_sentence(&t.description),
-                );
+
+        if !accepted {
+            let still_queued = store
+                .pending_deliveries(thread_id)?
+                .iter()
+                .any(|d| d.entry_id == delivery_id);
+            if !still_queued {
+                accepted = true;
             }
         }
-        ("hooks", 1) => {
-            println!("Built-in hooks");
-            for h in arity.builtin_hooks() {
-                let label = format!("{} [{}]", h.name, h.event.as_str());
-                println!("  {:<28}  {}", label, h.description);
+
+        let lease = store.read_lease(thread_id)?;
+        let live_lease = lease_is_live(lease.as_ref());
+        if let Some(ref l) = lease {
+            if l.partial_text.len() > printed_partial_len
+                && l.partial_text.is_char_boundary(printed_partial_len)
+            {
+                let delta = &l.partial_text[printed_partial_len..];
+                print!("{delta}");
+                io::stdout().flush()?;
+                printed_partial_len = l.partial_text.len();
+                streamed_any = true;
+            } else if l.partial_text.len() < printed_partial_len {
+                printed_partial_len = 0;
             }
-            println!();
-            println!("User hooks");
-            let hooks = arity.hooks()?;
-            if hooks.is_empty() {
-                println!("  (none; add one with `arity hook add <name> --event <e> [--tool <t>] -- <command...>`)");
-            } else {
-                let name_w = hooks.iter().map(|h| h.name.len()).max().unwrap_or(8).max(8);
-                let tool_w = hooks
-                    .iter()
-                    .map(|h| h.tool.as_deref().unwrap_or("*").len())
-                    .max()
-                    .unwrap_or(1)
-                    .max(1);
-                for h in &hooks {
-                    let status = if h.enabled { "[on]" } else { "[off]" };
-                    let tool = h.tool.as_deref().unwrap_or("*");
-                    println!(
-                        "  {:<5}  {:<name_w$}  {:<11}  {:<tool_w$}  {}",
-                        status,
-                        h.name,
-                        h.event.as_str(),
-                        tool,
-                        h.command,
-                    );
+        }
+
+        let thread = store
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread '{thread_id}' not found"))?;
+
+        if accepted
+            && matches!(
+                thread.status,
+                ThreadStatus::Idle | ThreadStatus::Halted | ThreadStatus::Applied
+            )
+            && !live_lease
+        {
+            // One final drain in case TurnFinished / ModelCompleted committed right as lease cleared.
+            for entry in store.thread_entries(thread_id, last_entry_id)? {
+                match entry.kind {
+                    EntryKind::ModelCompleted | EntryKind::ModelInterrupted => {
+                        let text = entry.body["text"].as_str().unwrap_or("");
+                        flush_remaining_text(text, &mut printed_partial_len, &mut streamed_any)?;
+                    }
+                    EntryKind::TurnFinished => {
+                        if let Some(err) = entry.body["error"].as_str() {
+                            last_error = Some(err.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if thread.status == ThreadStatus::Halted
+                && let Some(err) = last_error
+            {
+                bail!("{err}");
+            }
+            return Ok(());
+        }
+
+        // If a previous worker finished just before seeing our delivery, spawn once more.
+        if !accepted
+            && !live_lease
+            && allow_respawn
+            && !respawned
+            && thread.status == ThreadStatus::Idle
+            && started.elapsed() >= Duration::from_millis(300)
+        {
+            respawned = true;
+            spawn_detached_worker(data_dir, thread_id)?;
+        }
+
+        // Guard against hanging if worker halted with an error before accepting the delivery.
+        if !accepted
+            && !live_lease
+            && thread.status == ThreadStatus::Halted
+            && started.elapsed() >= Duration::from_millis(500)
+        {
+            if let Some(err) = last_error {
+                bail!("{err}");
+            }
+            bail!("thread '{thread_id}' halted before accepting delivery {delivery_id}");
+        }
+
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn flush_remaining_text(
+    text: &str,
+    printed_partial_len: &mut usize,
+    streamed_any: &mut bool,
+) -> Result<()> {
+    if text.len() > *printed_partial_len && text.is_char_boundary(*printed_partial_len) {
+        print!("{}", &text[*printed_partial_len..]);
+        *streamed_any = true;
+    }
+    if *streamed_any && !text.ends_with('\n') {
+        println!();
+    }
+    io::stdout().flush()?;
+    *printed_partial_len = 0;
+    *streamed_any = false;
+    Ok(())
+}
+
+fn cmd_steer(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut req_id: Option<String> = None;
+    let mut no_spawn = false;
+    let mut as_json = false;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut after_sep = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        if !after_sep {
+            match flag_name(&args[i]) {
+                "--" => {
+                    after_sep = true;
+                    i += 1;
+                    continue;
+                }
+                "--model" => {
+                    model = Some(take_flag_value(args, &mut i, "--model")?);
+                    i += 1;
+                    continue;
+                }
+                "--req-id" => {
+                    req_id = Some(take_flag_value(args, &mut i, "--req-id")?);
+                    i += 1;
+                    continue;
+                }
+                "--no-spawn" => {
+                    no_spawn = true;
+                    i += 1;
+                    continue;
+                }
+                "--json" => {
+                    as_json = true;
+                    i += 1;
+                    continue;
+                }
+                other if other.starts_with('-') => bail!("unknown flag '{other}' for steer"),
+                _ => {}
+            }
+        }
+        if thread_id.is_none() {
+            thread_id = Some(args[i].clone());
+        } else {
+            text_parts.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("steer requires <thread>"))?;
+    let text = read_text_or_stdin(&text_parts)?;
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let entry = store.enqueue_delivery(
+        &thread_id,
+        DeliveryMode::Steer,
+        &text,
+        model.as_deref(),
+        &req_id,
+    )?;
+
+    if !no_spawn && !lease_is_live(store.read_lease(&thread_id)?.as_ref()) {
+        spawn_detached_worker(data_dir, &thread_id)?;
+    }
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "steered thread={} entry_id={} req_id={}",
+            entry.thread_id,
+            entry.id,
+            entry.request_id.as_deref().unwrap_or(&req_id),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_stop(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut req_id: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--req-id" => req_id = Some(take_flag_value(args, &mut i, "--req-id")?),
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for stop"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
                 }
             }
         }
-        ("hook", n) if n >= 2 && arg(1) == "add" => {
-            let hook = parse_hook_add(&args[2..])?;
-            let name = hook.name.clone();
-            arity.save_hook(hook)?;
-            println!("saved hook {name}");
-        }
-        ("hook", 3) if arg(1) == "rm" => {
-            let name = arg(2);
-            if !arity.remove_hook(name.clone())? {
-                return Err(format!("no hook named {name}").into());
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("stop requires <thread>"))?;
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let entry = store.request_stop(&thread_id, "user", &req_id)?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "stop_requested thread={} entry_id={} req_id={}",
+            entry.thread_id,
+            entry.id,
+            entry.request_id.as_deref().unwrap_or(&req_id),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_fork(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut from_entry_id: Option<i64> = None;
+    let mut new_thread: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut req_id: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--model" => model = Some(take_flag_value(args, &mut i, "--model")?),
+            "--req-id" => req_id = Some(take_flag_value(args, &mut i, "--req-id")?),
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for fork"),
+            _ => {
+                if from_entry_id.is_none() {
+                    let parsed = args[i]
+                        .parse::<i64>()
+                        .with_context(|| format!("invalid entry id '{}'", args[i]))?;
+                    from_entry_id = Some(parsed);
+                } else if new_thread.is_none() {
+                    new_thread = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
             }
-            println!("removed hook {name}");
         }
-        ("hook", 3) if arg(1) == "enable" || arg(1) == "disable" => {
-            let enabled = arg(1) == "enable";
-            let name = arg(2);
-            arity.set_hook_enabled(name.clone(), enabled)?;
-            println!("{} hook {name}", if enabled { "enabled" } else { "disabled" });
+        i += 1;
+    }
+
+    let from_entry_id =
+        from_entry_id.ok_or_else(|| anyhow!("fork requires <from_entry_id> <new_thread>"))?;
+    let new_thread =
+        new_thread.ok_or_else(|| anyhow!("fork requires <from_entry_id> <new_thread>"))?;
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let entry = store.fork_thread(&new_thread, from_entry_id, model.as_deref(), &req_id)?;
+
+    if !lease_is_live(store.read_lease(&new_thread)?.as_ref())
+        && let Some(thread) = store.get_thread(&new_thread)?
+        && let (Some(src), Some(sha)) = (
+            thread.source_dir.as_deref().filter(|s| !s.is_empty()),
+            thread.last_tree_sha.as_deref().filter(|s| !s.is_empty()),
+        )
+    {
+        workspace::materialize_workspace(data_dir, &new_thread, Path::new(src), sha)?;
+    }
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "forked thread={} from_entry_id={} entry_id={} model={} tree_sha={} req_id={}",
+            entry.thread_id,
+            from_entry_id,
+            entry.id,
+            entry.body["model"].as_str().unwrap_or("-"),
+            short_sha(entry.tree_sha.as_deref()),
+            entry.request_id.as_deref().unwrap_or(&req_id),
+        );
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Worker subcommand (the ONLY place that calls runner::run_turn_once)
+// -----------------------------------------------------------------------------
+
+fn cmd_worker(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut once = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--thread" => thread_id = Some(take_flag_value(args, &mut i, "--thread")?),
+            "--once" => once = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for worker"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
+            }
         }
-        ("login", 1) => println!("Signed in to ChatGPT as {}.", arity.sign_in_chatgpt()?),
-        ("" | "help" | "--help" | "-h", _) => println!("{USAGE}"),
-        (cmd, _) => {
-            eprintln!("{USAGE}");
-            return Err(format!("`{cmd}` needs other arguments; see above").into());
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("worker requires --thread <thread>"))?;
+    let client = ModelClient::new();
+    if once {
+        runner::run_turn_once(data_dir, &thread_id, &client)?;
+    } else {
+        runner::run_worker_until_idle(data_dir, &thread_id, &client)?;
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Read / inspection / workspace / admin commands
+// -----------------------------------------------------------------------------
+
+fn cmd_log(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut causal = false;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--causal" => causal = true,
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for log"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("log requires <thread>"))?;
+    let store = Store::open(data_dir)?;
+    let thread = store
+        .get_thread(&thread_id)?
+        .ok_or_else(|| anyhow!("thread '{thread_id}' not found"))?;
+
+    let entries = if causal {
+        match thread.head_entry_id {
+            Some(hid) => store.causal_chain(hid)?,
+            None => Vec::new(),
+        }
+    } else {
+        store.thread_entries(&thread_id, 0)?
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    for entry in &entries {
+        let req = entry.request_id.as_deref().unwrap_or("-");
+        println!(
+            "#{} e={} {:<18} tree={} req={} {}",
+            entry.id,
+            entry.epoch,
+            entry.kind.as_str(),
+            short_sha(entry.tree_sha.as_deref()),
+            req,
+            summarize_entry(entry),
+        );
+    }
+    Ok(())
+}
+
+fn summarize_entry(entry: &Entry) -> String {
+    match entry.kind {
+        EntryKind::ThreadCreated => format!(
+            "model={} dir={}",
+            entry.body["model"].as_str().unwrap_or("-"),
+            entry.body["source_dir"].as_str().unwrap_or("-"),
+        ),
+        EntryKind::ThreadForked => format!(
+            "from=#{} model={}",
+            entry.body["from_entry_id"].as_i64().unwrap_or(0),
+            entry.body["model"].as_str().unwrap_or("-"),
+        ),
+        EntryKind::DeliveryQueued => format!(
+            "mode={} text={:?}",
+            entry.body["mode"].as_str().unwrap_or("-"),
+            truncate_preview(entry.body["text"].as_str().unwrap_or(""), 80),
+        ),
+        EntryKind::DeliveryAccepted => format!(
+            "ids={} text={:?}",
+            entry.body["delivery_ids"],
+            truncate_preview(entry.body["text"].as_str().unwrap_or(""), 80),
+        ),
+        EntryKind::ModelCompleted => {
+            let calls = entry.body["tool_calls"]
+                .as_array()
+                .map_or(0, Vec::len);
+            format!(
+                "model={} calls={} text={:?}",
+                entry.body["model"].as_str().unwrap_or("-"),
+                calls,
+                truncate_preview(entry.body["text"].as_str().unwrap_or(""), 80),
+            )
+        }
+        EntryKind::ModelInterrupted => format!(
+            "reason={} text={:?}",
+            entry.body["reason"].as_str().unwrap_or("-"),
+            truncate_preview(entry.body["text"].as_str().unwrap_or(""), 80),
+        ),
+        EntryKind::ToolCall => format!(
+            "call_id={} name={} mutating={}",
+            entry.body["call_id"].as_str().unwrap_or("-"),
+            entry.body["name"].as_str().unwrap_or("-"),
+            entry.body["mutating"].as_bool().unwrap_or(false),
+        ),
+        EntryKind::ToolResult => format!(
+            "call_id={} name={} status={} output={:?}",
+            entry.body["call_id"].as_str().unwrap_or("-"),
+            entry.body["name"].as_str().unwrap_or("-"),
+            entry.body["status"].as_str().unwrap_or("-"),
+            truncate_preview(entry.body["output"].as_str().unwrap_or(""), 80),
+        ),
+        EntryKind::TurnClaimed => format!(
+            "pid={} stale_pgid={}",
+            entry.body["owner_pid"].as_i64().unwrap_or(0),
+            entry.body["stale_pgid"],
+        ),
+        EntryKind::TurnFinished => format!(
+            "status={} reason={} error={}",
+            entry.body["status"].as_str().unwrap_or("-"),
+            entry.body["reason"].as_str().unwrap_or("-"),
+            entry.body["error"].as_str().unwrap_or("-"),
+        ),
+        EntryKind::ThreadStop => format!("reason={}", entry.body["reason"].as_str().unwrap_or("-")),
+        EntryKind::WorkspaceApplied => format!(
+            "files_applied={}",
+            entry.body["files_applied"].as_u64().unwrap_or(0),
+        ),
+    }
+}
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let single: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if single.chars().count() <= max_chars {
+        single
+    } else {
+        let cut: String = single.chars().take(max_chars).collect();
+        format!("{cut}...")
+    }
+}
+
+fn lease_to_json(lease: &LeaseRow) -> Value {
+    json!({
+        "thread_id": lease.thread_id,
+        "epoch": lease.epoch,
+        "owner_pid": lease.owner_pid,
+        "lease_until_ms": lease.lease_until_ms,
+        "live": lease_is_live(Some(lease)),
+        "partial_text_len": lease.partial_text.len(),
+        "active_pgid": lease.active_pgid,
+    })
+}
+
+fn print_thread_status(thread: &ThreadRow, lease: Option<&LeaseRow>, pending: usize) {
+    let lease_str = match lease {
+        Some(l) if lease_is_live(Some(l)) => {
+            format!("pid={} pgid={:?}", l.owner_pid, l.active_pgid)
+        }
+        Some(l) => format!("expired(pid={})", l.owner_pid),
+        None => "-".into(),
+    };
+    println!(
+        "{:<20} status={:<8} epoch={} head={:<5} model={} tree={} pending={} lease={}",
+        thread.id,
+        thread.status.as_str(),
+        thread.epoch,
+        thread
+            .head_entry_id
+            .map_or_else(|| "-".into(), |id| format!("#{id}")),
+        thread.model,
+        short_sha(thread.last_tree_sha.as_deref()),
+        pending,
+        lease_str,
+    );
+}
+
+fn cmd_status(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for status"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let store = Store::open(data_dir)?;
+    if let Some(tid) = thread_id {
+        let thread = store
+            .get_thread(&tid)?
+            .ok_or_else(|| anyhow!("thread '{tid}' not found"))?;
+        let lease = store.read_lease(&tid)?;
+        let pending = store.pending_deliveries(&tid)?;
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "thread": thread,
+                    "lease": lease.as_ref().map(lease_to_json),
+                    "pending_deliveries": pending.len(),
+                }))?
+            );
+        } else {
+            print_thread_status(&thread, lease.as_ref(), pending.len());
+        }
+        return Ok(());
+    }
+
+    let threads = store.list_threads()?;
+    if as_json {
+        let mut items = Vec::with_capacity(threads.len());
+        for t in threads {
+            let lease = store.read_lease(&t.id)?;
+            let pending = store.pending_deliveries(&t.id)?;
+            items.push(json!({
+                "thread": t,
+                "lease": lease.as_ref().map(lease_to_json),
+                "pending_deliveries": pending.len(),
+            }));
+        }
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if threads.is_empty() {
+        println!("no threads");
+    } else {
+        for t in &threads {
+            let lease = store.read_lease(&t.id)?;
+            let pending = store.pending_deliveries(&t.id)?;
+            print_thread_status(t, lease.as_ref(), pending.len());
         }
     }
     Ok(())
 }
 
-fn choice(flag: &str) -> Option<Choice> {
-    Some(match flag {
-        "--smart" => Choice::Smart,
-        "--fast" => Choice::Fast,
-        "--free" => Choice::Free,
-        "--private" => Choice::Private,
-        _ => return None,
-    })
-}
+fn cmd_diff(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut as_json = false;
 
-fn describe(check: KeyCheck) -> String {
-    match check {
-        KeyCheck::Works => "the key works".into(),
-        KeyCheck::Rejected { reason } => format!("the key was rejected: {reason}"),
-        KeyCheck::Unreachable { reason } => format!("could not reach it: {reason}"),
-        KeyCheck::NoKey => "no key set".into(),
-    }
-}
-
-/// One line from stdin, not echoed when it is a terminal.
-fn read_secret(prompt: &str) -> std::io::Result<String> {
-    use std::io::IsTerminal;
-    let tty = std::io::stdin().is_terminal();
-    let stty = |arg: &str| std::process::Command::new("stty").arg(arg).stdin(std::process::Stdio::inherit()).status();
-    if tty {
-        eprint!("{prompt}");
-        stty("-echo")?;
-    }
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line);
-    if tty {
-        stty("echo")?;
-        eprintln!();
-    }
-    read?;
-    Ok(line.trim().to_string())
-}
-
-/// Prints the reply as it arrives, then each message as it is written. The
-/// finished reply's text is already on screen, so only its line is ended.
-fn streamer(model: &str) -> impl FnMut(Event) {
-    let who = model.to_string();
-    let mut streaming = false;
-    move |e| match e {
-        Event::Text(t) => {
-            if !streaming {
-                print!("      {who}: ");
-                streaming = true;
-            }
-            print!("{t}");
-            let _ = std::io::stdout().flush();
-        }
-        Event::Message(m) if streaming && m.kind == MessageKind::Assistant => {
-            println!();
-            streaming = false;
-        }
-        Event::Message(m) => {
-            if std::mem::take(&mut streaming) {
-                println!();
-            }
-            print(m)
-        }
-    }
-}
-
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Ctrl-C stops the turn the way `arity stop` would, keeping the reply so far.
-/// A second Ctrl-C quits at once.
-fn stop_on_ctrl_c(conv: &str) {
-    extern "C" fn on_sigint(_: libc::c_int) {
-        if INTERRUPTED.swap(true, Ordering::SeqCst) {
-            unsafe { libc::_exit(130) };
-        }
-    }
-    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
-    let conv = conv.to_string();
-    std::thread::spawn(move || {
-        while !INTERRUPTED.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let _ = Arity::new(None).stop(conv);
-    });
-}
-
-fn print(m: &Message) {
-    let who = m.model.as_deref().unwrap_or("model");
-    match m.kind {
-        MessageKind::User => println!("#{:<4} you: {}", m.entry, m.text),
-        MessageKind::Assistant => println!("#{:<4} {who}: {}", m.entry, m.text),
-        MessageKind::ToolCall => println!("#{:<4} {who} calls {}", m.entry, m.text),
-        MessageKind::Report => println!("#{:<4} report: {}", m.entry, m.text.replace('\n', "\n          ")),
-        MessageKind::Notice => println!("#{:<4} arity: {}", m.entry, m.text),
-        MessageKind::Rating => println!("#{:<4} rating: {}", m.entry, m.text),
-        MessageKind::TaskCard => println!("#{:<4} card: {}", m.entry, m.text),
-        MessageKind::ToolResult => println!("#{:<4}   -> {}", m.entry, m.text.replace('\n', "\n          ")),
-        MessageKind::Compaction => println!("#{:<4} context: {}", m.entry, m.text.replace('\n', "\n          ")),
-    }
-}
-
-/// 18400 -> "18.4k"
-fn tokens(n: u64) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        _ => format!("{:.2}M", n as f64 / 1e6),
-    }
-}
-
-fn percent(part: u64, whole: u64) -> String {
-    if whole == 0 { "0%".into() } else { format!("{:.0}%", part as f64 * 100.0 / whole as f64) }
-}
-
-/// A folder named on the command line, as the absolute path a run can use from anywhere.
-fn absolute(dir: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let path = std::fs::canonicalize(dir).map_err(|e| format!("no folder {dir}: {e}"))?;
-    if !path.is_dir() {
-        return Err(format!("{dir} is not a folder").into());
-    }
-    Ok(path.to_string_lossy().into_owned())
-}
-
-/// Split arguments into plain words (a title) and field flags, as the JSON the
-/// core's tools take. Everything after `--` is the brief.
-fn parse_fields(args: &[String]) -> Result<(Vec<String>, Value), Box<dyn std::error::Error>> {
-    let mut words = vec![];
-    let mut fields = json!({});
-    let mut tags: Option<Vec<String>> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
-        match a.as_str() {
-            "--" => {
-                fields["brief"] = json!(it.by_ref().cloned().collect::<Vec<_>>().join(" "));
-            }
-            "--title" => fields["title"] = json!(value(a)?),
-            "--agent" => fields["assignee"] = json!("agent"),
-            "--me" => fields["assignee"] = json!("user"),
-            "--for" => fields["assignee"] = json!(value(a)?),
-            "--smart" | "--fast" | "--free" | "--private" => fields["choice"] = json!(&a[2..]),
-            "--local" => fields["choice"] = json!("private"),
-            "--any" => fields["choice"] = json!("smart"),
-            "--priority" => fields["priority"] = json!(value(a)?),
-            "--due" => fields["due"] = json!(value(a)?),
-            "--no-due" => fields["due"] = Value::Null,
-            "--dir" => fields["dir"] = json!(absolute(&value(a)?)?),
-            "--no-dir" => fields["dir"] = Value::Null,
-            "--blocked-by" => {
-                let ids: Vec<Value> = value(a)?.split(',').filter(|s| !s.is_empty()).map(|s| json!(s.trim())).collect();
-                fields["blocked_by"] = json!(ids);
-            }
-            "--tag" => tags.get_or_insert_with(Vec::new).push(value(a)?),
-            "--no-tags" => tags = Some(vec![]),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}").into()),
-            word => words.push(word.to_string()),
-        }
-    }
-    if let Some(tags) = tags {
-        fields["tags"] = json!(tags);
-    }
-    Ok((words, fields))
-}
-
-/// `  task-3    3 ready     for agent   write a poem  · high · due 2026-12-01 · blocked by 2 · #fun`
-/// `  chat-1                              how do I ...  · card open`
-/// `  #4   chat-1        bash · safety_guard · 2m ago: git push publishes commits to a remote`
-/// `       {"command":"git push origin main"}`
-fn approval_line(a: &PendingApproval) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    let age = match (now - a.created_at).max(0) {
-        s @ 0..60 => format!("{s}s ago"),
-        s @ 60..3600 => format!("{}m ago", s / 60),
-        s @ 3600..86400 => format!("{}h ago", s / 3600),
-        s => format!("{}d ago", s / 86400),
-    };
-    let args = clip(&a.args.replace('\n', " "));
-    format!("  {:<4} {:<12}  {} · {} · {age}: {}\n       {args}", format!("#{}", a.id), a.conversation, a.tool, a.hook, a.reason)
-}
-
-fn thread_line(thread: &Thread, me: &str) -> String {
-    let mut flow = String::new();
-    if thread.pending_approvals > 0 {
-        let n = thread.pending_approvals;
-        flow.push_str(&format!("  · {n} tool call{} to allow or deny; arity approvals {}", if n == 1 { "" } else { "s" }, thread.name));
-    }
-    if thread.can_continue {
-        flow.push_str("  · stopped short; arity continue");
-    }
-    if thread.active_children > 0 {
-        flow.push_str(&format!("  · {} sub-task{} going", thread.active_children, if thread.active_children == 1 { "" } else { "s" }));
-    }
-    let Some(t) = &thread.task else {
-        let card = if thread.card.is_some() { "  · card open" } else { "" };
-        return format!("  {:<12} {:<24} {}{card}{flow}", thread.name, "", clip(&thread.title));
-    };
-    let f = &t.fields;
-    let state = match t.state {
-        TaskState::Open => "open",
-        TaskState::Ready => "ready",
-        TaskState::Assigned => "assigned",
-        TaskState::InGates => "in gates",
-        TaskState::Done => "done",
-    };
-    let who = if f.assignee == me { "for me".to_string() } else { format!("for {}", f.assignee) };
-    let mut extra = vec![];
-    match t.run_state {
-        Some(RunState::Running) => extra.push("running".to_string()),
-        Some(RunState::Waiting) => extra.push("waiting on sub-tasks".into()),
-        Some(RunState::NeedsApproval) => extra.push("needs your approval".into()),
-        Some(RunState::Failing) => extra.push("retrying".into()),
-        Some(RunState::Paused) => extra.push("stopped; arity continue".into()),
-        Some(RunState::NeedsRating) => extra.push(format!("needs rating (run {})", t.run.unwrap_or_default())),
-        Some(RunState::Rated) => extra.push(format!("rated {}/5", t.score.unwrap_or_default())),
-        None => {}
-    }
-    if f.priority != Priority::Normal {
-        extra.push(format!("{:?}", f.priority).to_lowercase());
-    }
-    if f.choice != Choice::Smart {
-        extra.push(format!("{:?}", f.choice).to_lowercase());
-    }
-    if let Some(d) = &f.due {
-        extra.push(format!("due {d}"));
-    }
-    if !f.blocked_by.is_empty() {
-        let ids: Vec<String> = f.blocked_by.iter().map(|i| i.to_string()).collect();
-        extra.push(format!("blocked by {}", ids.join(",")));
-    }
-    extra.extend(f.tags.iter().map(|t| format!("#{t}")));
-    if let Some(d) = &f.dir {
-        extra.push(format!("in {d}"));
-    }
-    if let Some(origin) = &t.origin {
-        extra.push(format!("from {origin}"));
-    }
-    let extra = if extra.is_empty() { String::new() } else { format!("  · {}", extra.join(" · ")) };
-    format!("  {:<12} {:>3} {:<9} {:<10} {}{extra}{flow}", thread.name, t.id, state, who, clip(&f.title))
-}
-
-fn first_sentence(s: &str) -> String {
-    let first_line = s.lines().next().unwrap_or("").trim();
-    let sentence = match first_line.find(". ") {
-        Some(i) => &first_line[..=i],
-        None => first_line,
-    };
-    clip(sentence)
-}
-
-/// Parse arguments after `arity hook add`:
-/// `<name> --event <e> [--tool <t>] [--disabled] (--command <cmd> | -- <command...>)`
-fn parse_hook_add(args: &[String]) -> Result<HookConfig, Box<dyn std::error::Error>> {
-    let mut name: Option<String> = None;
-    let mut event: Option<HookEvent> = None;
-    let mut tool: Option<String> = None;
-    let mut command: Option<String> = None;
-    let mut enabled = true;
-
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
-        match a.as_str() {
-            "--" => {
-                if command.is_some() {
-                    return Err("specify either --command or -- <command...>, not both".into());
-                }
-                let joined = it.by_ref().cloned().collect::<Vec<_>>().join(" ");
-                command = Some(joined);
-            }
-            "--event" => {
-                let raw = value(a)?;
-                let parsed = HookEvent::parse(&raw).ok_or_else(|| {
-                    format!("unknown hook event {raw:?}; expected before_tool, after_tool, on_yield, or after_turn")
-                })?;
-                event = Some(parsed);
-            }
-            "--tool" => {
-                let raw = value(a)?;
-                let trimmed = raw.trim();
-                tool = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
-            }
-            "--command" => {
-                if command.is_some() {
-                    return Err("specify either --command or -- <command...>, not both".into());
-                }
-                command = Some(value(a)?);
-            }
-            "--disabled" => enabled = false,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}").into()),
-            word => {
-                if name.is_none() {
-                    name = Some(word.to_string());
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for diff"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
                 } else {
-                    return Err(format!("unexpected argument {word:?} (put the command after -- or --command)").into());
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("diff requires <thread>"))?;
+    let store = Store::open(data_dir)?;
+    let thread = store
+        .get_thread(&thread_id)?
+        .ok_or_else(|| anyhow!("thread '{thread_id}' not found"))?;
+    let src = thread
+        .source_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no attached workspace"))?;
+    let base_sha = thread
+        .base_tree_sha
+        .as_deref()
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no base_tree_sha"))?;
+    let last_sha = thread
+        .last_tree_sha
+        .as_deref()
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no last_tree_sha"))?;
+
+    let diff = workspace::diff_trees(Path::new(src), base_sha, last_sha)?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&diff)?);
+        return Ok(());
+    }
+
+    if diff.files.is_empty() {
+        println!("no changes");
+        return Ok(());
+    }
+    for f in &diff.files {
+        println!("{:<10} {}", f.status, f.path);
+    }
+    if !diff.patch.is_empty() {
+        println!();
+        print!("{}", diff.patch);
+    }
+    Ok(())
+}
+
+fn cmd_apply(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut thread_id: Option<String> = None;
+    let mut req_id: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match flag_name(&args[i]) {
+            "--req-id" => req_id = Some(take_flag_value(args, &mut i, "--req-id")?),
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for apply"),
+            _ => {
+                if thread_id.is_none() {
+                    thread_id = Some(args[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", args[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let thread_id = thread_id.ok_or_else(|| anyhow!("apply requires <thread>"))?;
+    let req_id = req_id.unwrap_or_else(random_req_id);
+
+    let mut store = Store::open(data_dir)?;
+    let thread = store
+        .get_thread(&thread_id)?
+        .ok_or_else(|| anyhow!("thread '{thread_id}' not found"))?;
+    if lease_is_live(store.read_lease(&thread_id)?.as_ref()) {
+        bail!("cannot apply thread '{thread_id}' while an active runner holds the lease");
+    }
+
+    let src = thread
+        .source_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no attached workspace"))?;
+    let base_sha = thread
+        .base_tree_sha
+        .as_deref()
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no base_tree_sha"))?;
+    let last_sha = thread
+        .last_tree_sha
+        .as_deref()
+        .ok_or_else(|| anyhow!("thread '{thread_id}' has no last_tree_sha"))?;
+
+    let applied = workspace::apply_tree(Path::new(src), base_sha, last_sha)?;
+    let entry = store.record_workspace_applied(
+        &thread_id,
+        applied.files_applied,
+        base_sha,
+        last_sha,
+        &req_id,
+    )?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "entry": entry,
+                "result": applied,
+            }))?
+        );
+    } else {
+        println!(
+            "{} (thread={} entry_id={} req_id={})",
+            applied.summary,
+            entry.thread_id,
+            entry.id,
+            entry.request_id.as_deref().unwrap_or(&req_id),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_replay_check(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut as_json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => as_json = true,
+            other => bail!("unknown argument '{other}' for replay-check"),
+        }
+    }
+
+    let mut store = Store::open(data_dir)?;
+    let threads_before = store.list_threads()?;
+    let deliveries_before = store.list_deliveries()?;
+
+    store.rebuild_projections()?;
+
+    let threads_after = store.list_threads()?;
+    let deliveries_after = store.list_deliveries()?;
+
+    ensure!(
+        threads_before == threads_after,
+        "replay mismatch in threads table"
+    );
+    ensure!(
+        deliveries_before == deliveries_after,
+        "replay mismatch in deliveries table"
+    );
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "threads": threads_after.len(),
+                "deliveries": deliveries_after.len(),
+            }))?
+        );
+    } else {
+        println!(
+            "replay-check ok: verified {} thread(s) and {} delivery(ies)",
+            threads_after.len(),
+            deliveries_after.len(),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_providers(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut as_json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => as_json = true,
+            other => bail!("unknown argument '{other}' for providers"),
+        }
+    }
+
+    let store = Store::open(data_dir)?;
+    let providers = store.list_providers()?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&providers)?);
+    } else {
+        for p in &providers {
+            println!(
+                "{:<14} wire={:<16} needs_key={:<5} key={} url={}",
+                p.name,
+                p.wire.as_str(),
+                p.needs_key,
+                p.key_name,
+                p.url,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_provider(data_dir: &Path, args: &[String]) -> Result<()> {
+    let Some((sub, rest)) = args.split_first() else {
+        bail!("usage: arity provider set <name> <url> --wire chat_completions|responses [--needs-key] [--key-name <k>]");
+    };
+    if sub != "set" {
+        bail!("unknown provider subcommand '{sub}'; expected 'set'");
+    }
+
+    let mut name: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut wire: Option<WireCodec> = None;
+    let mut needs_key = false;
+    let mut key_name: Option<String> = None;
+    let mut session_header: Option<String> = None;
+    let mut models: Vec<String> = Vec::new();
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match flag_name(&rest[i]) {
+            "--wire" => {
+                let raw = take_flag_value(rest, &mut i, "--wire")?;
+                wire = Some(WireCodec::parse(&raw)?);
+            }
+            "--needs-key" => needs_key = true,
+            "--key-name" => key_name = Some(take_flag_value(rest, &mut i, "--key-name")?),
+            "--session-header" => {
+                session_header = Some(take_flag_value(rest, &mut i, "--session-header")?)
+            }
+            "--models" => {
+                let raw = take_flag_value(rest, &mut i, "--models")?;
+                models = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for provider set"),
+            _ => {
+                if name.is_none() {
+                    name = Some(rest[i].clone());
+                } else if url.is_none() {
+                    url = Some(rest[i].clone());
+                } else {
+                    bail!("unexpected positional argument '{}'", rest[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let name = name.ok_or_else(|| anyhow!("provider set requires <name> <url> --wire <codec>"))?;
+    let url = url.ok_or_else(|| anyhow!("provider set requires <name> <url> --wire <codec>"))?;
+    let wire = wire.ok_or_else(|| anyhow!("provider set requires --wire chat_completions|responses"))?;
+
+    let config = ProviderConfig {
+        key_name: key_name.unwrap_or_else(|| name.clone()),
+        name,
+        url,
+        wire,
+        needs_key,
+        session_header,
+        models,
+    };
+
+    let mut store = Store::open(data_dir)?;
+    store.upsert_provider(&config)?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&config)?);
+    } else {
+        println!(
+            "saved provider={} wire={} url={} needs_key={} key_name={}",
+            config.name,
+            config.wire.as_str(),
+            config.url,
+            config.needs_key,
+            config.key_name,
+        );
+    }
+    Ok(())
+}
+
+fn cmd_limits(data_dir: &Path, args: &[String]) -> Result<()> {
+    let mut provider: Option<String> = None;
+    let mut as_json = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--json" => as_json = true,
+            other if other.starts_with('-') => bail!("unknown flag '{other}' for limits"),
+            _ => {
+                if provider.is_none() {
+                    provider = Some(arg.clone());
+                } else {
+                    bail!("unexpected positional argument '{arg}'");
                 }
             }
         }
     }
 
-    let name = name
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or("hook add needs a name")?;
-    let event = event.ok_or("--event is required (before_tool, after_tool, on_yield, or after_turn)")?;
-    let command = command
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or("hook add needs a command via --command <cmd> or -- <command...>")?;
-
-    Ok(HookConfig { name, event, tool, command, enabled })
+    let store = Store::open(data_dir)?;
+    let limits = store.list_rate_limits(provider.as_deref())?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&limits)?);
+    } else if limits.is_empty() {
+        println!("no rate limits recorded");
+    } else {
+        for r in &limits {
+            let reset = r
+                .reset_secs
+                .map_or_else(|| "-".into(), |s| format!("{s}s"));
+            println!(
+                "{:<14} {:<18} remaining={}/{} reset={} observed_ms={}",
+                r.provider, r.limit_name, r.remaining, r.limit_val, reset, r.observed_ms,
+            );
+        }
+    }
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
-    }
-
-    #[test]
-    fn parse_hook_add_with_dash_dash_command() {
-        let cfg = parse_hook_add(&s(&[
-            "fmt_check",
-            "--event",
-            "after_tool",
-            "--tool",
-            "edit_file,write_file",
-            "--",
-            "cargo",
-            "fmt",
-            "--check",
-        ]))
-        .unwrap();
-        assert_eq!(
-            cfg,
-            HookConfig {
-                name: "fmt_check".into(),
-                event: HookEvent::AfterTool,
-                tool: Some("edit_file,write_file".into()),
-                command: "cargo fmt --check".into(),
-                enabled: true,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_hook_add_with_command_flag_and_disabled() {
-        let cfg = parse_hook_add(&s(&[
-            "test-gate",
-            "--event",
-            "on_yield",
-            "--disabled",
-            "--command",
-            "cargo test --quiet",
-        ]))
-        .unwrap();
-        assert_eq!(
-            cfg,
-            HookConfig {
-                name: "test-gate".into(),
-                event: HookEvent::OnYield,
-                tool: None,
-                command: "cargo test --quiet".into(),
-                enabled: false,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_hook_add_rejects_invalid_and_missing_args() {
-        // Invalid event
-        let err = parse_hook_add(&s(&["h", "--event", "bogus", "--", "true"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("unknown hook event"), "{err}");
-
-        // Missing event
-        let err = parse_hook_add(&s(&["h", "--", "true"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--event"), "{err}");
-
-        // Missing name
-        let err = parse_hook_add(&s(&["--event", "before_tool", "--", "true"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("name"), "{err}");
-
-        // Missing command
-        let err = parse_hook_add(&s(&["h", "--event", "after_turn"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("command"), "{err}");
-
-        // Empty command after --
-        let err = parse_hook_add(&s(&["h", "--event", "after_turn", "--"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("command"), "{err}");
-
-        // Both --command and --
-        let err = parse_hook_add(&s(&["h", "--event", "before_tool", "--command", "echo a", "--", "echo", "b"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not both"), "{err}");
-
-        // Unknown flag
-        let err = parse_hook_add(&s(&["h", "--event", "before_tool", "--nope", "--", "true"]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("unknown flag"), "{err}");
-    }
-
-    #[test]
-    fn token_counts_read_short() {
-        assert_eq!((tokens(950), tokens(18_400), tokens(2_500_000)), ("950".into(), "18.4k".into(), "2.50M".into()));
-        assert_eq!((percent(13_248, 18_400), percent(1, 0)), ("72%".into(), "0%".into()));
-    }
-
-    #[test]
-    fn first_sentence_extracts_and_clips() {
-        assert_eq!(
-            first_sentence("Read a file in the attached folder. Second sentence here."),
-            "Read a file in the attached folder."
-        );
-        assert_eq!(
-            first_sentence("Single sentence without trailing text"),
-            "Single sentence without trailing text"
-        );
-        let long = "a".repeat(120);
-        let clipped = first_sentence(&long);
-        assert!(clipped.ends_with('…'));
-        assert_eq!(clipped.chars().count(), LISTED_TITLE + 1);
+fn cmd_key(data_dir: &Path, args: &[String]) -> Result<()> {
+    let Some((sub, rest)) = args.split_first() else {
+        bail!("usage: arity key set <name> [<key>] | arity key rm <name>");
+    };
+    match sub.as_str() {
+        "set" => {
+            let name = rest
+                .first()
+                .ok_or_else(|| anyhow!("key set requires <name> [<key>]"))?;
+            let key = if let Some(k) = rest.get(1) {
+                k.clone()
+            } else {
+                let mut line = String::new();
+                io::stdin().read_line(&mut line)?;
+                line.trim().to_string()
+            };
+            ensure!(!key.is_empty(), "key must not be empty; use `arity key rm {name}` to remove");
+            secrets::keys::set(data_dir, name, &key)?;
+            println!("saved key '{name}'");
+            Ok(())
+        }
+        "rm" => {
+            let name = rest
+                .first()
+                .ok_or_else(|| anyhow!("key rm requires <name>"))?;
+            secrets::keys::set(data_dir, name, "")?;
+            println!("removed key '{name}'");
+            Ok(())
+        }
+        other => bail!("unknown key subcommand '{other}'; expected 'set' or 'rm'"),
     }
 }

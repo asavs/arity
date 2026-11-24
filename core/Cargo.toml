@@ -1,28 +1,19 @@
 [package]
 name = "arity-core"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 [lib]
 name = "arity_core"
-# lib for the CLI, staticlib for the Mac app, cdylib only so uniffi-bindgen can read the interface.
-crate-type = ["lib", "staticlib", "cdylib"]
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"
-required-features = ["bindgen"]
-
-[features]
-bindgen = ["uniffi/cli"]
 
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
+libc = "0.2"
 rand = "0.10.4"
 reqwest = { version = "0.13.5", features = ["blocking", "json"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2"
-uniffi = "0.32.2"

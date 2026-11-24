@@ -1,113 +1,905 @@
-//! Tool registry and built-in board tools.
-//!
-//! Board tools are `Execution::Atomic`: they run inside `Journal::immediate`, so
-//! a tool's effect on SQLite and the `tool` entry recording it commit together.
-//! External tools are `Execution::External`: they commit a `tool_intent` entry
-//! first, execute outside any SQLite transaction so heartbeats and UI stay
-//! responsive, and then commit the `tool` result entry. Errors become the tool's
-//! output, so the model can see them and recover.
+//! Path-jailed read/write/edit tools and process-group-reaped `bash` execution.
 
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use rusqlite::Connection;
+use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::board::{self, AGENT, RunState, TaskFields, TaskState};
-use crate::journal::Journal;
-use crate::model::ToolCall;
-use crate::approvals::{self, PriorDecision};
-use crate::{draft, turn};
+use crate::types::{ToolReceiptStatus, ToolSpec};
+
+/// Maximum size of a single tool output returned to the model/journal.
+const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+/// Maximum bytes captured per stream from a single `bash` command.
+const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Folders skipped during directory listing and recursive search.
+const IGNORED_DIRS: [&str; 4] = [".git", "target", ".build", "node_modules"];
+
+const MAX_ENTRIES: usize = 200;
+const DEFAULT_DEPTH: u64 = 2;
+const MAX_DEPTH: u64 = 8;
+const DEFAULT_LINES: usize = 200;
+const MAX_LINES: usize = 400;
+const MAX_MATCHES: usize = 80;
+const MAX_LINE_CHARS: usize = 400;
+const MAX_SEARCH_BYTES: u64 = 1 << 20;
+const MAX_SEARCH_FILES: usize = 20_000;
+
+const DEFAULT_TIMEOUT_SECS: f64 = 60.0;
+const MAX_TIMEOUT_SECS: f64 = 300.0;
+const READER_JOIN_TIMEOUT: Duration = Duration::from_millis(250);
+const WATCHDOG_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
+
+static ATOMIC_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
-pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub parameters: Value,
+pub struct ToolExecOutput {
+    pub status: ToolReceiptStatus,
+    pub output: String,
+    pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Replay {
-    /// Safe to re-run after a crash interrupted execution before the result committed.
-    Safe,
-    /// Must NOT re-run after a crash interrupted execution; emit an interrupted error result instead.
-    Unsafe,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Execution {
-    /// Runs inside `Journal::immediate` alongside the `tool` result entry.
-    Atomic,
-    /// Commits a `tool_intent` entry before running outside any SQLite transaction,
-    /// then commits the `tool` result entry.
-    External { replay: Replay },
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolOutput {
-    pub text: String,
-    pub is_error: bool,
-    pub details: Option<Value>,
-}
-
-impl ToolOutput {
-    pub fn ok(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: false, details: None }
+impl ToolExecOutput {
+    fn ok(output: impl Into<String>) -> Self {
+        Self {
+            status: ToolReceiptStatus::Ok,
+            output: output.into(),
+            exit_code: None,
+        }
     }
 
-    pub fn err(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: true, details: None }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolVisibility {
-    pub caller: Caller,
-    pub folder: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ToolHookDecision {
-    Continue,
-    RewriteArgs(Value),
-    Block(String),
-    /// Park the call until the user allows or denies it; `hook` is who asked.
-    AskApproval { hook: String, reason: String },
-}
-
-/// What became of a tool call.
-#[derive(Debug, Clone)]
-pub enum ToolRun {
-    /// It has a `tool` entry: it ran, or was refused, blocked or denied.
-    Executed(ToolOutput),
-    /// It waits for the user to allow or deny it, with no `tool` entry yet.
-    Parked(approvals::Approval),
-}
-
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn execution(&self) -> Execution;
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec>;
-
-    fn run_atomic(&self, _db: &Connection, _conv: &str, _model: &str, _args: &Value) -> Result<ToolOutput> {
-        anyhow::bail!("{} is not an atomic tool", self.name())
-    }
-
-    fn run_external(&self, _vis: &ToolVisibility, _args: &Value) -> Result<ToolOutput> {
-        anyhow::bail!("{} is not an external tool", self.name())
-    }
-
-    fn refused_message(&self, _vis: &ToolVisibility) -> Option<String> {
-        None
+    fn err(output: impl Into<String>) -> Self {
+        Self {
+            status: ToolReceiptStatus::Error,
+            output: output.into(),
+            exit_code: None,
+        }
     }
 }
 
-/// Maximum size of a single tool output committed to the journal.
-pub const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+pub fn is_mutating_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file" | "bash")
+}
 
-/// Bound `text` to at most `max_bytes` UTF-8 bytes, truncating cleanly on a
-/// char boundary and appending a truncation notice when bytes are omitted.
-pub fn bound_output(text: String, max_bytes: usize) -> String {
+pub fn tool_specs(has_workspace: bool) -> Vec<ToolSpec> {
+    if !has_workspace {
+        return Vec::new();
+    }
+    vec![
+        ToolSpec {
+            name: "list_files".into(),
+            description: "List the files and folders in the attached folder, or a folder inside it. Folders end with /. Version control, build output and dependencies are left out.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "A folder, relative to the attached folder. Left out, the folder itself." },
+                    "max_depth": { "type": "integer", "description": "How many levels down to list; 2 by default." }
+                }
+            }),
+            mutating: false,
+        },
+        ToolSpec {
+            name: "read_file".into(),
+            description: "Read a text file in the attached folder, with numbered lines: 200 lines unless you ask for a range, at most 400 at a time. Says how many lines the file has.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative to the attached folder." },
+                    "start_line": { "type": "integer", "description": "The first line, counting from 1." },
+                    "end_line": { "type": "integer", "description": "The last line." }
+                },
+                "required": ["path"]
+            }),
+            mutating: false,
+        },
+        ToolSpec {
+            name: "search_files".into(),
+            description: "Find text in the files of the attached folder, ignoring case. Each match is path:line: text; at most 80.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The text to find." },
+                    "path": { "type": "string", "description": "A folder or file to search, relative to the attached folder. Left out, all of it." }
+                },
+                "required": ["query"]
+            }),
+            mutating: false,
+        },
+        ToolSpec {
+            name: "write_file".into(),
+            description: "Create or overwrite a UTF-8 text file in the attached folder, creating parent directories as needed. Paths are relative to the attached folder; .git cannot be modified.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path, relative to the attached folder." },
+                    "content": { "type": "string", "description": "Full UTF-8 text content to write to the file." }
+                },
+                "required": ["path", "content"]
+            }),
+            mutating: true,
+        },
+        ToolSpec {
+            name: "edit_file".into(),
+            description: "Edit an existing UTF-8 text file in the attached folder by exact string replacement. Pass old_text and new_text (with optional replace_all), or pass edits as an array of {old_text, new_text} replacements matched against the original file.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path, relative to the attached folder." },
+                    "old_text": { "type": "string", "description": "Exact text to replace; must appear uniquely unless replace_all is true." },
+                    "new_text": { "type": "string", "description": "Replacement text." },
+                    "replace_all": { "type": "boolean", "description": "Replace every occurrence of old_text instead of requiring a unique match. False by default." },
+                    "edits": {
+                        "type": "array",
+                        "description": "Multiple non-overlapping exact replacements matched against the original file.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": { "type": "string", "description": "Exact text to replace; must match uniquely." },
+                                "new_text": { "type": "string", "description": "Replacement text." }
+                            },
+                            "required": ["old_text", "new_text"]
+                        }
+                    }
+                },
+                "required": ["path"]
+            }),
+            mutating: true,
+        },
+        ToolSpec {
+            name: "bash".into(),
+            description: "Run a shell command in the attached folder and return its combined stdout and stderr.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to run in the attached folder." },
+                    "timeout": { "type": "number", "description": "Timeout in seconds; 60 by default, at most 300." }
+                },
+                "required": ["command"]
+            }),
+            mutating: true,
+        },
+    ]
+}
+
+/// Send `SIGKILL` to an entire Unix process group (`-pgid`) when `pgid > 1`.
+pub fn reap_process_group(pgid: i64) {
+    #[cfg(unix)]
+    if pgid > 1 {
+        let own_pgrp = unsafe { libc::getpgrp() } as i64;
+        if pgid != own_pgrp {
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
+}
+
+/// Execute a single tool call jailed to `work_dir`.
+pub fn execute_tool(
+    work_dir: Option<&Path>,
+    name: &str,
+    arguments_json: &str,
+    on_spawn_pgid: &mut dyn FnMut(i64),
+    should_abort: &mut dyn FnMut() -> bool,
+) -> ToolExecOutput {
+    if should_abort() {
+        return ToolExecOutput {
+            status: ToolReceiptStatus::Aborted,
+            output: "tool execution aborted".into(),
+            exit_code: None,
+        };
+    }
+
+    let Some(root) = work_dir else {
+        return ToolExecOutput::err(
+            "error: no folder is attached to this thread, so workspace tools are unavailable",
+        );
+    };
+
+    let args: Value = if arguments_json.trim().is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str(arguments_json) {
+            Ok(v @ Value::Object(_)) => v,
+            Ok(_) => {
+                return ToolExecOutput::err("error: tool arguments must be a JSON object");
+            }
+            Err(e) => {
+                return ToolExecOutput::err(format!("error: invalid tool arguments JSON: {e}"));
+            }
+        }
+    };
+
+    let root_real = match fs::canonicalize(root) {
+        Ok(r) => r,
+        Err(e) => {
+            return ToolExecOutput::err(format!(
+                "error: the attached folder {} cannot be read: {e}",
+                root.display()
+            ));
+        }
+    };
+
+    let result = match name {
+        "list_files" => execute_list(&root_real, &args).map(ToolExecOutput::ok),
+        "read_file" => execute_read(&root_real, &args).map(ToolExecOutput::ok),
+        "search_files" => execute_search(&root_real, &args).map(ToolExecOutput::ok),
+        "write_file" => execute_write(&root_real, &args).map(ToolExecOutput::ok),
+        "edit_file" => execute_edit(&root_real, &args).map(ToolExecOutput::ok),
+        "bash" => return execute_bash(&root_real, &args, on_spawn_pgid, should_abort),
+        other => Err(anyhow!("unknown tool {other}")),
+    };
+
+    match result {
+        Ok(mut out) => {
+            out.output = bound_output(out.output, MAX_TOOL_OUTPUT_BYTES);
+            out
+        }
+        Err(e) => ToolExecOutput::err(bound_output(format!("error: {e:#}"), MAX_TOOL_OUTPUT_BYTES)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path jailing & atomic writes
+// ---------------------------------------------------------------------------
+
+fn is_git_segment(seg: &std::ffi::OsStr) -> bool {
+    seg.to_string_lossy().eq_ignore_ascii_case(".git")
+}
+
+fn contains_git_component(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        Component::Normal(seg) => is_git_segment(seg),
+        _ => false,
+    })
+}
+
+fn is_ignored_dir_name(name: &std::ffi::OsStr) -> bool {
+    let s = name.to_string_lossy();
+    s.eq_ignore_ascii_case(".git") || IGNORED_DIRS.contains(&s.as_ref())
+}
+
+fn shown_rel(root_real: &Path, path: &Path) -> String {
+    let rel = path
+        .strip_prefix(root_real)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    if rel.is_empty() { ".".into() } else { rel }
+}
+
+/// Resolve a readable path jailed strictly inside `root_real`.
+///
+/// Rejects `.git` (case-insensitively) both before and after symlink resolution,
+/// rejects `..` escaping `root_real`, rejects absolute paths outside `root_real`,
+/// and rejects symlinks resolving outside `root_real`.
+fn resolve_readable(root_real: &Path, path: Option<&str>) -> Result<PathBuf> {
+    let Some(raw) = path.map(str::trim).filter(|p| !p.is_empty() && *p != ".") else {
+        return Ok(root_real.to_path_buf());
+    };
+
+    let rel_path = Path::new(raw);
+    if rel_path.is_absolute() {
+        bail!("{raw} is outside the attached folder; paths must be relative to the attached folder");
+    }
+
+    let mut depth: isize = 0;
+    for comp in rel_path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => {
+                bail!("{raw} is outside the attached folder; paths must be relative to the attached folder");
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    bail!("{raw} is outside the attached folder; only paths inside it can be read");
+                }
+            }
+            Component::Normal(seg) => {
+                if is_git_segment(seg) {
+                    bail!("{raw} targets .git, which cannot be accessed");
+                }
+                depth += 1;
+            }
+        }
+    }
+
+    let joined = root_real.join(rel_path);
+    let real = fs::canonicalize(&joined).map_err(|e| {
+        if fs::symlink_metadata(&joined).is_ok() {
+            anyhow!("{raw} traverses a broken symlink: {e}")
+        } else {
+            anyhow!("no file or folder {raw} in the attached folder")
+        }
+    })?;
+    if !real.starts_with(root_real) {
+        bail!("{raw} is outside the attached folder; only paths inside it can be read");
+    }
+    if let Ok(inside) = real.strip_prefix(root_real)
+        && contains_git_component(inside)
+    {
+        bail!("{raw} resolves into .git, which cannot be accessed");
+    }
+    Ok(real)
+}
+
+/// Resolve a writable path jailed strictly inside `root_real`.
+///
+/// Rejects empty paths, absolute paths, `..` traversal, `.git` paths
+/// (case-insensitively), and any symlink (including dangling symlinks or
+/// symlinks in existing ancestors) pointing outside `root_real` or into `.git`.
+fn resolve_writable(root_real: &Path, rel: &str) -> Result<PathBuf> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        bail!("path must not be empty");
+    }
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        bail!("{rel} is an absolute path; paths must be relative to the attached folder");
+    }
+
+    let mut clean_rel = PathBuf::new();
+    for comp in rel_path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => {
+                bail!("{rel} is an absolute path; paths must be relative to the attached folder");
+            }
+            Component::ParentDir => {
+                bail!("{rel} contains '..'; paths must stay inside the attached folder");
+            }
+            Component::CurDir => {}
+            Component::Normal(seg) => {
+                if is_git_segment(seg) {
+                    bail!("{rel} targets .git, which cannot be modified");
+                }
+                clean_rel.push(seg);
+            }
+        }
+    }
+    if clean_rel.as_os_str().is_empty() {
+        bail!("path must name a file inside the attached folder");
+    }
+
+    let candidate = root_real.join(&clean_rel);
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = candidate.as_path();
+
+    loop {
+        match fs::symlink_metadata(cursor) {
+            Ok(meta) => {
+                let real = fs::canonicalize(cursor).map_err(|e| {
+                    if meta.file_type().is_symlink() {
+                        anyhow!("{rel} traverses a broken symlink: {e}")
+                    } else {
+                        anyhow!("cannot resolve {rel}: {e}")
+                    }
+                })?;
+                if !real.starts_with(root_real) {
+                    bail!("{rel} resolves outside the attached folder");
+                }
+                if let Ok(inside) = real.strip_prefix(root_real)
+                    && contains_git_component(inside)
+                {
+                    bail!("{rel} resolves into .git, which cannot be modified");
+                }
+                let mut resolved = real;
+                for seg in tail.into_iter().rev() {
+                    resolved.push(seg);
+                }
+                if let Ok(inside) = resolved.strip_prefix(root_real)
+                    && contains_git_component(inside)
+                {
+                    bail!("{rel} resolves into .git, which cannot be modified");
+                }
+                return Ok(resolved);
+            }
+            Err(_) => {
+                let Some(name) = cursor.file_name() else {
+                    bail!("{rel} resolves outside the attached folder");
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = cursor.parent() else {
+                    bail!("{rel} resolves outside the attached folder");
+                };
+                cursor = parent;
+            }
+        }
+    }
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Atomically write `bytes` to `target` via temp-file + rename in the target
+/// directory, preserving existing file permissions when `target` already exists.
+fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("target path has no parent: {}", target.display()))?;
+    let existing_perms = fs::metadata(target).ok().map(|m| m.permissions());
+
+    let seq = ATOMIC_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".arity-tmp-{}-{seq}", std::process::id()));
+    let mut guard = TempFileGuard::new(tmp_path.clone());
+
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| anyhow!("create temp file {}: {e}", tmp_path.display()))?;
+        file.write_all(bytes)?;
+        file.flush()?;
+    }
+
+    if let Some(perms) = existing_perms {
+        fs::set_permissions(&tmp_path, perms)?;
+    }
+
+    fs::rename(&tmp_path, target)?;
+    guard.disarm();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Read-only file tools: list_files, read_file, search_files
+// ---------------------------------------------------------------------------
+
+fn parse_optional_u64(args: &Value, key: &str) -> Result<Option<u64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be a positive whole number")),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| anyhow!("{key} must be a positive whole number")),
+        Some(_) => bail!("{key} must be a positive whole number"),
+    }
+}
+
+fn children(root_real: &Path, dir: &Path) -> Vec<(PathBuf, bool)> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, bool)> = read
+        .flatten()
+        .filter(|e| !is_ignored_dir_name(&e.file_name()))
+        .filter_map(|e| {
+            let kind = e.file_type().ok()?;
+            if kind.is_symlink() {
+                let real = fs::canonicalize(e.path()).ok()?;
+                if !real.starts_with(root_real) {
+                    return None;
+                }
+                if let Ok(inside) = real.strip_prefix(root_real)
+                    && contains_git_component(inside)
+                {
+                    return None;
+                }
+                // Shown under its own name, but never walked into (prevents loops).
+                return Some((e.path(), false));
+            }
+            Some((e.path(), kind.is_dir()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn execute_list(root_real: &Path, args: &Value) -> Result<String> {
+    let path = args.get("path").and_then(Value::as_str);
+    let depth = parse_optional_u64(args, "max_depth")?
+        .unwrap_or(DEFAULT_DEPTH)
+        .clamp(1, MAX_DEPTH);
+
+    let start = resolve_readable(root_real, path)?;
+    if !start.is_dir() {
+        bail!(
+            "{} is a file; read it with read_file",
+            shown_rel(root_real, &start)
+        );
+    }
+
+    let mut lines = Vec::new();
+    let mut more = 0usize;
+    let mut stack: Vec<(PathBuf, bool, u64)> = children(root_real, &start)
+        .into_iter()
+        .rev()
+        .map(|(p, d)| (p, d, 1))
+        .collect();
+
+    while let Some((p, is_dir, level)) = stack.pop() {
+        if lines.len() >= MAX_ENTRIES {
+            more += 1;
+            continue;
+        }
+        let name = shown_rel(root_real, &p);
+        lines.push(if is_dir { format!("{name}/") } else { name });
+        if is_dir && level < depth {
+            stack.extend(
+                children(root_real, &p)
+                    .into_iter()
+                    .rev()
+                    .map(|(c, d)| (c, d, level + 1)),
+            );
+        }
+    }
+
+    if lines.is_empty() {
+        return Ok(format!("{} is empty", shown_rel(root_real, &start)));
+    }
+    if more > 0 {
+        lines.push(format!(
+            "(stopped at {MAX_ENTRIES} entries; {more} more not shown: list a folder inside, or a smaller max_depth)"
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn text_of(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn cut_line(line: &str) -> String {
+    match line.char_indices().nth(MAX_LINE_CHARS) {
+        Some((i, _)) => format!("{} …", &line[..i]),
+        None => line.to_string(),
+    }
+}
+
+fn execute_read(root_real: &Path, args: &Value) -> Result<String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow!("read_file needs a path"))?;
+    let start = parse_optional_u64(args, "start_line")?;
+    let end = parse_optional_u64(args, "end_line")?;
+
+    let file = resolve_readable(root_real, Some(path))?;
+    let name = shown_rel(root_real, &file);
+    if file.is_dir() {
+        bail!("{name} is a folder; list it with list_files");
+    }
+    let text = text_of(&file)
+        .ok_or_else(|| anyhow!("{name} is a binary file or not UTF-8 text, so it cannot be read"))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return Ok(format!("{name} is empty"));
+    }
+
+    let start_idx = start.unwrap_or(1).max(1) as usize;
+    if start_idx > total {
+        bail!("{name} has {total} lines; start_line {start_idx} is past the end");
+    }
+    let wanted_end = end.map_or(start_idx + DEFAULT_LINES - 1, |e| e as usize);
+    if wanted_end < start_idx {
+        bail!("end_line must not be before start_line");
+    }
+    let end_idx = wanted_end.min(start_idx + MAX_LINES - 1).min(total);
+
+    let mut out = vec![format!("{name}: lines {start_idx}-{end_idx} of {total}")];
+    out.extend((start_idx..=end_idx).map(|n| format!("{n:>5}  {}", cut_line(lines[n - 1]))));
+    if end_idx < total {
+        out.push(format!(
+            "(more after line {end_idx}: read on with start_line {})",
+            end_idx + 1
+        ));
+    }
+    Ok(out.join("\n"))
+}
+
+fn execute_search(root_real: &Path, args: &Value) -> Result<String> {
+    let query = args.get("query").and_then(Value::as_str).unwrap_or_default();
+    if query.trim().is_empty() {
+        bail!("search_files needs a query");
+    }
+    let path = args.get("path").and_then(Value::as_str);
+
+    let start = resolve_readable(root_real, path)?;
+    let needle = query.to_lowercase();
+    let mut matches = Vec::new();
+    let mut more = false;
+    let mut seen = 0usize;
+    let mut stack = vec![(start.clone(), start.is_dir())];
+
+    'walk: while let Some((p, is_dir)) = stack.pop() {
+        if is_dir {
+            stack.extend(children(root_real, &p).into_iter().rev());
+            continue;
+        }
+        seen += 1;
+        if seen > MAX_SEARCH_FILES {
+            more = true;
+            break;
+        }
+        if fs::metadata(&p).map_or(true, |m| m.len() > MAX_SEARCH_BYTES) {
+            continue;
+        }
+        let Some(text) = text_of(&p) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&needle) {
+                if matches.len() >= MAX_MATCHES {
+                    more = true;
+                    break 'walk;
+                }
+                matches.push(format!(
+                    "{}:{}: {}",
+                    shown_rel(root_real, &p),
+                    i + 1,
+                    cut_line(line.trim())
+                ));
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(format!(
+            "no matches for {query:?} in {}",
+            shown_rel(root_real, &start)
+        ));
+    }
+    if more {
+        matches.push(format!(
+            "(stopped at {} matches: search a folder inside, or a longer query)",
+            matches.len()
+        ));
+    }
+    Ok(matches.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Mutating file tools: write_file, edit_file
+// ---------------------------------------------------------------------------
+
+fn execute_write(root_real: &Path, args: &Value) -> Result<String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("write_file needs a path"))?;
+    let content = args
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("write_file needs content"))?;
+
+    let target = resolve_writable(root_real, path)?;
+    let shown = shown_rel(root_real, &target);
+
+    if target.is_dir() {
+        bail!("{shown} is a directory");
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("cannot create parent directories for {shown}: {e}"))?;
+    }
+    atomic_write(&target, content.as_bytes())
+        .map_err(|e| anyhow!("cannot write {shown}: {e}"))?;
+
+    Ok(format!("wrote {shown} ({} bytes)", content.len()))
+}
+
+fn extract_str<'a>(obj: &'a Value, snake: &str, camel: &str) -> Result<Option<&'a str>> {
+    match obj.get(snake) {
+        Some(Value::Null) | None => {}
+        Some(Value::String(s)) => return Ok(Some(s.as_str())),
+        Some(_) => bail!("{snake} must be a string"),
+    }
+    match obj.get(camel) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => bail!("{camel} must be a string"),
+    }
+}
+
+fn extract_bool(obj: &Value, snake: &str, camel: &str) -> Result<bool> {
+    match obj.get(snake) {
+        Some(Value::Null) | None => {}
+        Some(Value::Bool(b)) => return Ok(*b),
+        Some(_) => bail!("{snake} must be a boolean"),
+    }
+    match obj.get(camel) {
+        Some(Value::Null) | None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => bail!("{camel} must be a boolean"),
+    }
+}
+
+struct EditSpec {
+    old_text: String,
+    new_text: String,
+}
+
+fn execute_edit(root_real: &Path, args: &Value) -> Result<String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("edit_file needs a path"))?;
+
+    let target = resolve_writable(root_real, path)?;
+    let shown = shown_rel(root_real, &target);
+
+    let meta = fs::metadata(&target)
+        .map_err(|_| anyhow!("no file {shown} in the attached folder"))?;
+    if !meta.is_file() {
+        bail!("{shown} is not a regular file");
+    }
+
+    let old_single = extract_str(args, "old_text", "oldText")?;
+    let new_single = extract_str(args, "new_text", "newText")?;
+    let replace_all = extract_bool(args, "replace_all", "replaceAll")?;
+
+    let edits_arg = match args.get("edits") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(arr)) => Some(arr),
+        Some(_) => bail!("edits must be an array"),
+    };
+
+    let bytes = fs::read(&target).map_err(|e| anyhow!("cannot read {shown}: {e}"))?;
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        bail!("{shown} is a binary file and cannot be edited");
+    }
+    let raw = String::from_utf8(bytes)
+        .map_err(|_| anyhow!("{shown} is not UTF-8 text and cannot be edited"))?;
+    let uses_crlf = raw.contains("\r\n");
+    let normalized = if uses_crlf {
+        raw.replace("\r\n", "\n")
+    } else {
+        raw
+    };
+
+    let (updated, count) = if let Some(arr) = edits_arg {
+        if old_single.is_some() || new_single.is_some() {
+            bail!("pass either old_text/new_text or edits, not both");
+        }
+        if arr.is_empty() {
+            bail!("edits must not be empty");
+        }
+        let mut parsed = Vec::with_capacity(arr.len());
+        for (i, item) in arr.iter().enumerate() {
+            if !item.is_object() {
+                bail!("edits[{i}] must be an object with old_text and new_text");
+            }
+            let old = extract_str(item, "old_text", "oldText")?
+                .ok_or_else(|| anyhow!("edits[{i}] needs old_text"))?;
+            let new = extract_str(item, "new_text", "newText")?
+                .ok_or_else(|| anyhow!("edits[{i}] needs new_text"))?;
+            parsed.push(EditSpec {
+                old_text: old.replace("\r\n", "\n"),
+                new_text: new.replace("\r\n", "\n"),
+            });
+        }
+        apply_multi_edits(&normalized, &parsed, &shown)?
+    } else {
+        let old = old_single
+            .ok_or_else(|| anyhow!("edit_file needs old_text and new_text (or edits)"))?;
+        let new = new_single.ok_or_else(|| anyhow!("edit_file needs new_text"))?;
+        let old = old.replace("\r\n", "\n");
+        let new = new.replace("\r\n", "\n");
+        if old.is_empty() {
+            bail!("old_text must not be empty");
+        }
+        let matches = normalized.matches(&old).count();
+        if matches == 0 {
+            bail!("old_text not found in {shown}");
+        }
+        if matches > 1 && !replace_all {
+            bail!(
+                "old_text matched {matches} times in {shown}; include more surrounding context or pass replace_all: true"
+            );
+        }
+        let result = if replace_all {
+            normalized.replace(&old, &new)
+        } else {
+            normalized.replacen(&old, &new, 1)
+        };
+        (result, matches)
+    };
+
+    let lines = updated.lines().count();
+    let final_text = if uses_crlf {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
+    };
+    atomic_write(&target, final_text.as_bytes())
+        .map_err(|e| anyhow!("cannot write {shown}: {e}"))?;
+
+    Ok(format!("edited {shown} ({count} replacement(s), {lines} lines)"))
+}
+
+fn apply_multi_edits(normalized: &str, edits: &[EditSpec], shown: &str) -> Result<(String, usize)> {
+    struct Span<'a> {
+        start: usize,
+        end: usize,
+        replacement: &'a str,
+        index: usize,
+    }
+
+    let mut spans = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            bail!("edits[{index}].old_text must not be empty");
+        }
+        let mut iter = normalized.match_indices(&edit.old_text);
+        let Some((start, _)) = iter.next() else {
+            bail!("edits[{index}].old_text not found in {shown}");
+        };
+        if iter.next().is_some() {
+            let total = normalized.matches(&edit.old_text).count();
+            bail!(
+                "edits[{index}].old_text matched {total} times in {shown}; each edit must match uniquely"
+            );
+        }
+        spans.push(Span {
+            start,
+            end: start + edit.old_text.len(),
+            replacement: &edit.new_text,
+            index,
+        });
+    }
+
+    spans.sort_by_key(|s| (s.start, s.end));
+    for pair in spans.windows(2) {
+        if pair[1].start < pair[0].end {
+            bail!(
+                "edits[{}] and edits[{}] overlap in {shown}",
+                pair[0].index,
+                pair[1].index
+            );
+        }
+    }
+
+    let mut updated = normalized.to_string();
+    for span in spans.iter().rev() {
+        updated.replace_range(span.start..span.end, span.replacement);
+    }
+    Ok((updated, spans.len()))
+}
+
+// ---------------------------------------------------------------------------
+// Output truncation helpers
+// ---------------------------------------------------------------------------
+
+fn bound_output(text: String, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text;
     }
@@ -119,1243 +911,857 @@ pub fn bound_output(text: String, max_bytes: usize) -> String {
     format!("{}\n[output truncated: {omitted} bytes omitted]", &text[..end])
 }
 
-/// Who is calling the tools, which decides which tools they get.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Caller {
-    /// A conversation the user talks in.
-    Chat,
-    /// A run above the floor: it may hand work to an agent, one level down.
-    Run,
-    /// A run at the floor (`board::MAX_DEPTH`): delegation is not offered.
-    RunAtFloor,
+fn truncate_tail(text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let header_reserve =
+        format!("[earlier output truncated: {} bytes omitted]\n", text.len()).len();
+    let tail_budget = max_bytes.saturating_sub(header_reserve);
+    let mut start = text.len().saturating_sub(tail_budget);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[earlier output truncated: {start} bytes omitted]\n{}",
+        &text[start..]
+    )
 }
 
-pub fn caller(db: &Connection, conv: &str) -> Result<Caller> {
-    Ok(match board::run_depth(db, conv)? {
-        None => Caller::Chat,
-        Some(d) if d >= board::MAX_DEPTH => Caller::RunAtFloor,
-        Some(_) => Caller::Run,
-    })
-}
-
-/// What `finish` says when it accepts a report. The loop ends the run on it.
-pub const FINISHED: &str = "finished: your report is handed in";
-/// How many times `finish` turns a run back before it lets it through anyway,
-/// so a model that cannot clear what is open does not loop forever.
-const MAX_REFUSALS: usize = 3;
-
-const WORKER_NO_CHANGE: &str = "you are doing a task: you can read the board and file tasks, not change others";
-const HANDED_OFF: &str = "An agent will do it, knowing only its title and brief. Its result will come back here \
-                          when it finishes; finish your reply now instead of waiting.";
-const HANDED_OFF_BY_A_RUN: &str = "An agent will do it, knowing only its title and brief. Its result comes back \
-                                   here. Carry on with the rest meanwhile, or end your turn without calling finish to \
-                                   wait: you are woken when it reports. Call finish once you have what you need.";
-
-pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
-}
-
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        Self::default_registry()
+fn combine_streams(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (false, false) => {
+            let out = stdout.strip_suffix('\n').unwrap_or(stdout);
+            format!("{out}\n{stderr}")
+        }
     }
 }
 
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self { tools: Vec::new() }
-    }
+// ---------------------------------------------------------------------------
+// Process-group-reaped bash with parent-death pipe-EOF watchdog
+// ---------------------------------------------------------------------------
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
-        if let Some(slot) = self.tools.iter_mut().find(|t| t.name() == tool.name()) {
-            *slot = tool;
-        } else {
-            self.tools.push(tool);
+fn parse_timeout(args: &Value) -> Result<f64> {
+    let raw = match args.get("timeout") {
+        None | Some(Value::Null) => return Ok(DEFAULT_TIMEOUT_SECS),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .ok_or_else(|| anyhow!("timeout must be a positive number of seconds"))?,
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| anyhow!("timeout must be a positive number of seconds"))?,
+        Some(_) => bail!("timeout must be a positive number of seconds"),
+    };
+    if !raw.is_finite() || raw <= 0.0 {
+        bail!("timeout must be a positive number of seconds");
+    }
+    Ok(raw.min(MAX_TIMEOUT_SECS))
+}
+
+fn format_secs(secs: f64) -> String {
+    if secs.fract() == 0.0 {
+        format!("{}", secs as u64)
+    } else {
+        format!("{secs}")
+    }
+}
+
+fn spawn_shell(root_real: &Path, command: &str) -> Result<Child> {
+    let build = |shell: &str| {
+        let mut cmd = Command::new(shell);
+        cmd.arg("-c")
+            .arg(command)
+            .current_dir(root_real)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
         }
+        cmd
+    };
+
+    match build("bash").spawn() {
+        Ok(child) => Ok(child),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh")
+            .spawn()
+            .map_err(|e2| anyhow!("failed to spawn shell: {e2}")),
+        Err(e) => Err(anyhow!("failed to spawn bash: {e}")),
     }
+}
 
-    pub fn with(mut self, tool: Box<dyn Tool>) -> Self {
-        self.register(tool);
-        self
-    }
+/// Parent-death pipe-EOF watchdog guard.
+///
+/// Created *immediately after* spawning `bash`, so `bash` can never inherit
+/// `write_fd`. Only this process holds `write_fd` (with `FD_CLOEXEC`), so if
+/// this process dies abruptly (`SIGKILL`), the kernel closes `write_fd`, the
+/// watchdog's `cat >/dev/null` receives EOF immediately, and the watchdog sends
+/// `kill -9 -<pgid>` to reap the entire `bash` process group.
+struct WatchdogGuard {
+    #[cfg(unix)]
+    write_fd: Option<std::os::unix::io::OwnedFd>,
+    watchdog: Option<Child>,
+}
 
-    pub fn default_registry() -> Self {
-        let mut reg = Self::new();
-        reg.register(Box::new(ProposeTaskTool));
-        reg.register(Box::new(AddTaskTool));
-        reg.register(Box::new(UpdateTaskTool));
-        reg.register(Box::new(ListTasksTool));
-        reg.register(Box::new(CompleteTaskTool));
-        reg.register(Box::new(FinishTool));
-        reg.register(Box::new(MessageTool));
-        reg.register(Box::new(PapercutTool));
-        for tool in crate::files::tools() {
-            reg.register(tool);
-        }
-        for tool in crate::coding::tools() {
-            reg.register(tool);
-        }
-        reg
-    }
+impl WatchdogGuard {
+    #[cfg(unix)]
+    fn spawn(pgid: i64) -> Self {
+        use std::os::unix::io::{FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
 
-    pub fn all(&self) -> &[Box<dyn Tool>] {
-        &self.tools
-    }
-
-    pub fn specs(&self, vis: &ToolVisibility) -> Vec<ToolSpec> {
-        self.tools.iter().filter_map(|t| t.spec(vis)).collect()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
-    }
-
-    pub fn execute_call(&self, db: &Journal, conv: &str, model: &str, call: &ToolCall) -> Result<ToolOutput> {
-        match self.run_with_hooks(db, conv, model, call, |_, _, _| Ok(ToolHookDecision::Continue), |_, _| Ok(()))? {
-            ToolRun::Executed(output) => Ok(output),
-            ToolRun::Parked(approval) => anyhow::bail!("{} waits for approval #{}", call.name, approval.id),
-        }
-    }
-
-    /// Run `call` and commit its `tool` entry, unless it waits for the user.
-    /// `before` gets whether the user already allowed this call; once they
-    /// have, it should not ask again. A denied call is answered with an error
-    /// without asking `before` at all.
-    pub fn run_with_hooks<B, A>(
-        &self,
-        db: &Journal,
-        conv: &str,
-        model: &str,
-        call: &ToolCall,
-        mut before: B,
-        mut after: A,
-    ) -> Result<ToolRun>
-    where
-        B: FnMut(&ToolCall, &Value, bool) -> Result<ToolHookDecision>,
-        A: FnMut(&ToolCall, &mut ToolOutput) -> Result<()>,
-    {
-        let mut args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-        strip_dir(&mut args);
-
-        let vis = ToolVisibility {
-            caller: caller(db.conn(), conv)?,
-            folder: board::folder_of(db.conn(), conv)?,
-        };
-
-        let Some(tool) = self.get(&call.name) else {
-            let output = ToolOutput::err(format!("error: unknown tool {}", call.name));
-            return record(db, conv, call, output, &mut after);
-        };
-
-        if tool.spec(&vis).is_none() {
-            let reason = tool
-                .refused_message(&vis)
-                .unwrap_or_else(|| format!("unknown tool {}", call.name));
-            let msg = if reason.starts_with("error:") {
-                reason
-            } else {
-                format!("error: {reason}")
+        let mut fds = [0 as libc::c_int; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Self {
+                write_fd: None,
+                watchdog: None,
             };
-            return record(db, conv, call, ToolOutput::err(msg), &mut after);
         }
 
-        // If a crash interrupted a non-replay-safe external tool after its intent committed,
-        // emit an interrupted error without running `before` or re-executing the tool.
-        if let Execution::External { replay: Replay::Unsafe } = tool.execution() {
-            if has_tool_intent(db, conv, &call.id)? {
-                let output = ToolOutput::err(
-                    "error: interrupted by a crash before completing; not retried because this tool is not replay-safe",
-                );
-                return record(db, conv, call, output, &mut after);
-            }
+        // Set FD_CLOEXEC on both ends before spawning the watchdog.
+        // Command::stdin(Stdio::from(read_fd)) dup2s read_fd to fd 0 in the child
+        // (clearing CLOEXEC on fd 0), while write_fd stays closed in the child.
+        unsafe {
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
 
-        let approved = match approvals::check(db.conn(), conv, &call.id)? {
-            PriorDecision::None => false,
-            PriorDecision::Approved => true,
-            PriorDecision::Pending(id) => {
-                let approval = approvals::get(db.conn(), id)?
-                    .ok_or_else(|| anyhow::anyhow!("approval #{id} disappeared"))?;
-                return Ok(ToolRun::Parked(approval));
-            }
-            PriorDecision::Denied(note) => {
-                let note = note.trim();
-                let text = if note.is_empty() {
-                    "Tool call denied by user".to_string()
-                } else {
-                    format!("Tool call denied by user: {note}")
-                };
-                return record(db, conv, call, ToolOutput::err(text), &mut after);
-            }
-        };
+        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        match before(call, &args, approved)? {
-            ToolHookDecision::Continue => {}
-            ToolHookDecision::RewriteArgs(new_args) => {
-                args = new_args;
-                strip_dir(&mut args);
-            }
-            ToolHookDecision::Block(reason) => {
-                return record(db, conv, call, ToolOutput::err(format!("error: blocked: {reason}")), &mut after);
-            }
-            ToolHookDecision::AskApproval { hook, reason } => {
-                let approval = approvals::request(db.conn(), conv, &call.id, &call.name, &args, &hook, &reason)?;
-                return Ok(ToolRun::Parked(approval));
-            }
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            r#"cat >/dev/null; kill -9 -"$1" 2>/dev/null || true"#,
+            "_",
+            &pgid.to_string(),
+        ])
+        .stdin(Stdio::from(read_fd))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+
+        let watchdog = cmd.spawn().ok();
+        // `cmd` (and thus the parent's copy of `read_fd`) is dropped here.
+        drop(cmd);
+
+        Self {
+            write_fd: watchdog.as_ref().map(|_| write_fd),
+            watchdog,
         }
+    }
 
-        let output = match tool.execution() {
-            Execution::Atomic => db.immediate(|c| {
-                c.execute_batch("SAVEPOINT arity_tool_run")?;
-                let mut output = match tool.run_atomic(c, conv, model, &args) {
-                    Ok(out) => {
-                        c.execute_batch("RELEASE SAVEPOINT arity_tool_run")?;
-                        out
+    #[cfg(not(unix))]
+    fn spawn(_pgid: i64) -> Self {
+        Self { watchdog: None }
+    }
+
+    fn shutdown(&mut self) {
+        #[cfg(unix)]
+        {
+            // Closing write_fd delivers immediate EOF to the watchdog's `cat`.
+            drop(self.write_fd.take());
+        }
+        if let Some(mut wd) = self.watchdog.take() {
+            let deadline = Instant::now() + WATCHDOG_WAIT_TIMEOUT;
+            loop {
+                match wd.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = wd.kill();
+                            let _ = wd.wait();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
                     }
-                    Err(e) => {
-                        let _ = c.execute_batch("ROLLBACK TO SAVEPOINT arity_tool_run; RELEASE SAVEPOINT arity_tool_run");
-                        ToolOutput::err(format!("error: {e:#}"))
+                    Err(_) => {
+                        let _ = wd.kill();
+                        let _ = wd.wait();
+                        break;
                     }
-                };
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                after(call, &mut output)?;
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                approvals::consume(c, conv, &call.id)?;
-                crate::journal::insert(c, conv, "tool", &tool_entry_body(call, &output), None)?;
-                Ok(output)
-            })?,
-            Execution::External { replay } => {
-                if !has_tool_intent(db, conv, &call.id)? {
-                    db.append(
-                        conv,
-                        "tool_intent",
-                        &json!({
-                            "call_id": call.id,
-                            "name": call.name,
-                            "replay": match replay {
-                                Replay::Safe => "safe",
-                                Replay::Unsafe => "unsafe",
-                            }
-                        }),
-                        None,
-                    )?;
                 }
-                let mut output = match tool.run_external(&vis, &args) {
-                    Ok(out) => out,
-                    Err(e) => ToolOutput::err(format!("error: {e:#}")),
-                };
-                output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-                return record(db, conv, call, output, &mut after);
             }
-        };
-        Ok(ToolRun::Executed(output))
+        }
     }
 }
 
-/// Pass `output` through `after` and commit it as the call's `tool` entry,
-/// settling any decision the user made on the call in the same transaction.
-fn record<A>(db: &Journal, conv: &str, call: &ToolCall, mut output: ToolOutput, after: &mut A) -> Result<ToolRun>
-where
-    A: FnMut(&ToolCall, &mut ToolOutput) -> Result<()>,
-{
-    after(call, &mut output)?;
-    output.text = bound_output(output.text, MAX_TOOL_OUTPUT_BYTES);
-    db.immediate(|c| {
-        approvals::consume(c, conv, &call.id)?;
-        crate::journal::insert(c, conv, "tool", &tool_entry_body(call, &output), None)
-    })?;
-    Ok(ToolRun::Executed(output))
-}
-
-fn strip_dir(args: &mut Value) {
-    // A task's folder is set by the user, or passed down; a model never picks one.
-    if let Some(obj) = args.as_object_mut() {
-        obj.remove("dir");
+impl Drop for WatchdogGuard {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
-fn has_tool_intent(db: &Journal, conv: &str, call_id: &str) -> Result<bool> {
-    Ok(db
-        .chain(conv)?
-        .iter()
-        .any(|e| e.kind == "tool_intent" && e.body["call_id"] == call_id))
+struct StreamReader {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done_rx: mpsc::Receiver<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
-fn tool_entry_body(call: &ToolCall, output: &ToolOutput) -> Value {
-    let mut body = json!({
-        "call_id": call.id,
-        "name": call.name,
-        "output": output.text,
-        "is_error": output.is_error,
-    });
-    if let Some(details) = &output.details {
-        body["details"] = details.clone();
+impl StreamReader {
+    fn spawn<R: Read + Send + 'static>(pipe: Option<R>) -> Self {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let buf_clone = Arc::clone(&buf);
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            if let Some(mut reader) = pipe {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Ok(mut guard) = buf_clone.lock() {
+                                if guard.len() + n <= MAX_CAPTURE_BYTES {
+                                    guard.extend_from_slice(&chunk[..n]);
+                                } else {
+                                    // Keep rolling tail within MAX_CAPTURE_BYTES.
+                                    let combined_len = guard.len() + n;
+                                    let drop_bytes = combined_len - MAX_CAPTURE_BYTES;
+                                    if drop_bytes >= guard.len() {
+                                        guard.clear();
+                                        let keep_from = n.saturating_sub(MAX_CAPTURE_BYTES);
+                                        guard.extend_from_slice(&chunk[keep_from..n]);
+                                    } else {
+                                        guard.drain(..drop_bytes);
+                                        guard.extend_from_slice(&chunk[..n]);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        Self {
+            buf,
+            done_rx,
+            handle: Some(handle),
+        }
     }
-    body
+
+    fn collect_bounded(mut self, timeout: Duration) -> Vec<u8> {
+        if self.done_rx.recv_timeout(timeout).is_ok()
+            && let Some(h) = self.handle.take()
+        {
+            let _ = h.join();
+        }
+        self.buf
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
 }
 
-/// The fields `add_task`, `update_task` and `propose_task` all take.
-fn field_schema() -> Value {
-    json!({
-        "title": {"type": "string", "description": "Short, starts with a verb."},
-        "brief": {"type": "string", "description": "Everything whoever does it needs to know to do it well."},
-        "assignee": {"type": "string", "description": "\"agent\" hands it to an agent: one is picked to do it, and its \
-            result comes back here. \"user\" puts it on the user's own list."},
-        "choice": {"type": "string", "enum": ["smart", "fast", "free", "private"], "description": "Which kind of model \
-            an agent should be: \"smart\" the best available (the default), \"fast\" the quickest, \"free\" one that costs \
-            nothing extra, \"private\" only models on the user's computer, for private work."},
-        "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
-        "due": {"type": "string", "description": "A date, YYYY-MM-DD."},
-        "blocked_by": {"type": "array", "items": {"type": "integer"}, "description": "Ids of tasks that must be done first."},
-        "tags": {"type": "array", "items": {"type": "string"}}
+fn exit_status_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map_or(-1, |sig| 128 + sig)
+        }
+        #[cfg(not(unix))]
+        {
+            -1
+        }
     })
 }
 
-fn with_id(mut props: Value) -> Value {
-    props["id"] = json!({"type": "integer"});
-    props
-}
-
-fn when_done_prop() -> Value {
-    json!({"type": "string", "enum": ["after_turn", "steer"],
-        "description": "When its result reaches you if you are still working: \"after_turn\" (the default) \
-        when you next stop, \"steer\" as soon as it arrives, cutting off what you are writing. If you are \
-        waiting, \"steer\" wakes you for each result, \"after_turn\" once all your sub-tasks have reported."})
-}
-
-/// A run gets the same `add_task` a chat uses, so a subagent is a task one level
-/// down. At the floor, delegation is omitted. Runs cannot change other tasks.
-/// With a folder attached (`board::folder_of`), every caller also gets the
-/// read-only file tools.
-#[cfg(test)]
-pub fn specs(caller: Caller, folder: bool) -> Vec<ToolSpec> {
-    let vis = ToolVisibility {
-        caller,
-        folder: folder.then(|| PathBuf::from(".")),
+fn execute_bash(
+    root_real: &Path,
+    args: &Value,
+    on_spawn_pgid: &mut dyn FnMut(i64),
+    should_abort: &mut dyn FnMut() -> bool,
+) -> ToolExecOutput {
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return ToolExecOutput::err("error: bash needs a command");
     };
-    ToolRegistry::default_registry().specs(&vis)
-}
-
-/// `conv` is the conversation calling the tool.
-#[cfg(test)]
-pub fn execute(db: &Connection, conv: &str, model: &str, name: &str, arguments: &str) -> String {
-    let mut args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-    strip_dir(&mut args);
-    let registry = ToolRegistry::default_registry();
-    let result = (|| -> Result<ToolOutput> {
-        let vis = ToolVisibility {
-            caller: caller(db, conv)?,
-            folder: board::folder_of(db, conv)?,
-        };
-        let Some(tool) = registry.get(name) else {
-            anyhow::bail!("unknown tool {name}");
-        };
-        if tool.spec(&vis).is_none() {
-            let reason = tool
-                .refused_message(&vis)
-                .unwrap_or_else(|| format!("unknown tool {name}"));
-            anyhow::bail!("{reason}");
-        }
-        match tool.execution() {
-            Execution::Atomic => tool.run_atomic(db, conv, model, &args),
-            Execution::External { .. } => tool.run_external(&vis, &args),
-        }
-    })();
-    let out = match result {
-        Ok(o) => o.text,
-        Err(e) => format!("error: {e:#}"),
+    if command.trim().is_empty() {
+        return ToolExecOutput::err("error: bash needs a non-empty command");
+    }
+    let timeout_secs = match parse_timeout(args) {
+        Ok(t) => t,
+        Err(e) => return ToolExecOutput::err(format!("error: {e:#}")),
     };
-    bound_output(out, MAX_TOOL_OUTPUT_BYTES)
-}
 
-struct ProposeTaskTool;
+    let mut child = match spawn_shell(root_real, command) {
+        Ok(c) => c,
+        Err(e) => return ToolExecOutput::err(format!("error: {e:#}")),
+    };
+    let pgid = child.id() as i64;
+    on_spawn_pgid(pgid);
 
-impl Tool for ProposeTaskTool {
-    fn name(&self) -> &'static str {
-        "propose_task"
+    let mut watchdog = WatchdogGuard::spawn(pgid);
+
+    let stdout_reader = StreamReader::spawn(child.stdout.take());
+    let stderr_reader = StreamReader::spawn(child.stderr.take());
+
+    enum WaitEnd {
+        Exited(std::process::ExitStatus),
+        TimedOut,
+        Aborted,
+        WaitErr(std::io::Error),
     }
 
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
-        (vis.caller == Caller::Chat).then(|| ToolSpec {
-            name: "propose_task",
-            description: "Fill in the task card shown to the user in this conversation, or change the one that is open. \
-                          Fields you leave out keep their value. The user reviews the card and adds it to the board \
-                          themselves, so do not also call add_task for it.",
-            parameters: json!({"type": "object", "properties": field_schema()}),
-        })
-    }
-
-    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
-        (vis.caller != Caller::Chat).then(|| WORKER_NO_CHANGE.into())
-    }
-
-    fn run_atomic(&self, db: &Connection, conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let f = draft::propose(db, conv, args)?;
-        Ok(ToolOutput::ok(format!(
-            "The card now reads:\n{}\nIt is not on the board yet: the user can edit it and add it. \
-             Change it again with propose_task.",
-            f.describe()
-        )))
-    }
-}
-
-struct AddTaskTool;
-
-impl Tool for AddTaskTool {
-    fn name(&self) -> &'static str {
-        "add_task"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
-        match vis.caller {
-            Caller::Chat => {
-                let mut chat_add = field_schema();
-                chat_add["when_done"] = when_done_prop();
-                Some(ToolSpec {
-                    name: "add_task",
-                    description: "Put a task straight on the shared board, without the card. Use this only when the user asks \
-                                  you to add it directly. With assignee \"agent\", an agent does it and its result comes back here.",
-                    parameters: json!({"type": "object", "properties": chat_add, "required": ["title"]}),
-                })
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+    let outcome = loop {
+        if should_abort() {
+            reap_process_group(pgid);
+            let _ = child.kill();
+            let _ = child.wait();
+            break WaitEnd::Aborted;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Reap any lingering background subchildren in the process group.
+                reap_process_group(pgid);
+                break WaitEnd::Exited(status);
             }
-            Caller::Run => {
-                let mut props = field_schema();
-                props["assignee"] = json!({"type": "string", "description": "Leave it out to hand the task to an agent. \
-                    \"user\" puts it on the user's own list instead."});
-                props["when_done"] = when_done_prop();
-                Some(ToolSpec {
-                    name: "add_task",
-                    description: "Hand part of your task to another agent, one level down. It knows nothing but the \
-                                  title and brief, so say the goal, what its report should contain, and where to stop. \
-                                  Its result comes back to you.",
-                    parameters: json!({"type": "object", "properties": props, "required": ["title"]}),
-                })
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    reap_process_group(pgid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break WaitEnd::TimedOut;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            Caller::RunAtFloor => None,
-        }
-    }
-
-    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
-        (vis.caller == Caller::RunAtFloor)
-            .then(|| "you are at the maximum delegation depth; do the work directly and call finish".into())
-    }
-
-    fn run_atomic(&self, db: &Connection, conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let worker = caller(db, conv)? != Caller::Chat;
-        // A run's add_task hands work on: left out, the assignee is an agent, not the user.
-        let mut f = TaskFields {
-            assignee: if worker { AGENT.into() } else { TaskFields::default().assignee },
-            ..Default::default()
-        };
-        f.merge(args)?;
-        let id = board::add_task(db, &f, Some(conv))?;
-        let when = args["when_done"].as_str().and_then(turn::Delivery::parse);
-        if let Some(when @ (turn::Delivery::Steer | turn::Delivery::AfterTurn)) = when {
-            db.execute("UPDATE tasks SET report_when = ?2 WHERE id = ?1", rusqlite::params![id, when.name()])?;
-        }
-        Ok(ToolOutput::ok(match (f.assignee == AGENT, worker) {
-            (true, false) => format!("added task {id}. {HANDED_OFF}"),
-            (true, true) => format!("added task {id}. {HANDED_OFF_BY_A_RUN}"),
-            _ => format!("added task {id}"),
-        }))
-    }
-}
-
-struct UpdateTaskTool;
-
-impl Tool for UpdateTaskTool {
-    fn name(&self) -> &'static str {
-        "update_task"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
-        (vis.caller == Caller::Chat).then(|| ToolSpec {
-            name: "update_task",
-            description: "Change a task that is already on the board, by its id. Fields you leave out keep their \
-                          value. Setting assignee to \"agent\" hands a task that has not started to an agent. Not for \
-                          the task card: change that with propose_task.",
-            parameters: json!({"type": "object", "properties": with_id(field_schema()), "required": ["id"]}),
-        })
-    }
-
-    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
-        (vis.caller != Caller::Chat).then(|| WORKER_NO_CHANGE.into())
-    }
-
-    fn run_atomic(&self, db: &Connection, _conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
-        let old = board::task(db, id)?;
-        let mut f = old.fields.clone();
-        f.merge(args)?;
-        board::update_task(db, id, &f)?;
-        let handed_off = f.assignee == AGENT && old.fields.assignee != AGENT;
-        Ok(ToolOutput::ok(if handed_off {
-            format!("updated task {id}. {HANDED_OFF}")
-        } else {
-            format!("updated task {id}")
-        }))
-    }
-}
-
-struct ListTasksTool;
-
-impl Tool for ListTasksTool {
-    fn name(&self) -> &'static str {
-        "list_tasks"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, _vis: &ToolVisibility) -> Option<ToolSpec> {
-        Some(ToolSpec {
-            name: "list_tasks",
-            description: "List the tasks on the shared board that are not done, with their ids, states and fields.",
-            parameters: json!({"type": "object", "properties": {
-                "include_done": {"type": "boolean", "description": "Also list finished tasks."}
-            }}),
-        })
-    }
-
-    fn run_atomic(&self, db: &Connection, _conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let all = args["include_done"] == true;
-        let rows: Vec<String> = board::tasks(db)?
-            .iter()
-            .filter(|t| all || t.state != TaskState::Done)
-            .map(line)
-            .collect();
-        Ok(ToolOutput::ok(match (rows.is_empty(), all) {
-            (true, true) => "the board is empty".into(),
-            (true, false) => "no open tasks; include_done lists finished ones".into(),
-            _ => rows.join("\n"),
-        }))
-    }
-}
-
-struct CompleteTaskTool;
-
-impl Tool for CompleteTaskTool {
-    fn name(&self) -> &'static str {
-        "complete_task"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
-        (vis.caller == Caller::Chat).then(|| ToolSpec {
-            name: "complete_task",
-            description: "Mark a task on the board as done, by id. Do this after doing a task yourself in your reply.",
-            parameters: json!({"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}),
-        })
-    }
-
-    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
-        (vis.caller != Caller::Chat).then(|| WORKER_NO_CHANGE.into())
-    }
-
-    fn run_atomic(&self, db: &Connection, _conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let id = args["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
-        board::set_done(db, id, true)?;
-        Ok(ToolOutput::ok(format!("completed task {id}")))
-    }
-}
-
-struct FinishTool;
-
-impl Tool for FinishTool {
-    fn name(&self) -> &'static str {
-        "finish"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, vis: &ToolVisibility) -> Option<ToolSpec> {
-        (vis.caller != Caller::Chat).then(|| ToolSpec {
-            name: "finish",
-            description: "End your task and hand in your report. The report is all whoever wrote the task will see: \
-                          start with the outcome, then what they need to use it. If you could not do it, say what \
-                          you found and what stopped you.",
-            parameters: json!({"type": "object", "properties": {
-                "report": {"type": "string", "description": "The result of the task, in full."},
-                "outcome": {"type": "string", "enum": ["done", "blocked", "needs_review"], "description": "\"done\" \
-                    (the default) when the task is done; \"blocked\" when you cannot go on, saying in the report what \
-                    you need; \"needs_review\" when it is done but someone should check it before it is used."}
-            }, "required": ["report"]}),
-        })
-    }
-
-    fn refused_message(&self, vis: &ToolVisibility) -> Option<String> {
-        (vis.caller == Caller::Chat).then(|| "unknown tool finish".into())
-    }
-
-    fn run_atomic(&self, db: &Connection, conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let report = args["report"].as_str().unwrap_or_default().trim();
-        if report.is_empty() {
-            anyhow::bail!("finish needs your report: the result of the task, in full");
-        }
-        let outcome = args["outcome"].as_str().unwrap_or("done");
-        if !matches!(outcome, "done" | "blocked" | "needs_review") {
-            anyhow::bail!("outcome is one of done, blocked and needs_review");
-        }
-        // Refusals since the last report it was given; a wake starts the count again.
-        let refused = crate::journal::chain(db, conv)?
-            .iter()
-            .rev()
-            .take_while(|e| e.kind != "report")
-            .filter(|e| e.kind == "tool" && e.body["name"] == "finish")
-            .count();
-        // Blocked: it cannot go on, so sub-tasks still out are not a reason to keep it.
-        if refused < MAX_REFUSALS && outcome != "blocked" {
-            let out = board::children_out(db, conv)?;
-            if !out.is_empty() {
-                let ids: Vec<String> = out.iter().map(|i| i.to_string()).collect();
-                anyhow::bail!(
-                    "not finished: task {} has not reported yet: end your turn without calling finish to wait \
-                     for it, and you are woken with its result. Then call finish again.",
-                    ids.join(", ")
-                );
+            Err(e) => {
+                reap_process_group(pgid);
+                let _ = child.kill();
+                let _ = child.wait();
+                break WaitEnd::WaitErr(e);
             }
         }
-        db.execute("UPDATE trials SET outcome = ?2 WHERE conversation = ?1", rusqlite::params![conv, outcome])?;
-        Ok(ToolOutput::ok(FINISHED))
-    }
-}
-
-struct MessageTool;
-
-impl Tool for MessageTool {
-    fn name(&self) -> &'static str {
-        "message"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, _vis: &ToolVisibility) -> Option<ToolSpec> {
-        Some(ToolSpec {
-            name: "message",
-            description: "Tell someone something before you finish, without ending your task: whoever handed you \
-                          the task, or the agent doing a task you handed out. Use it when they are about to waste \
-                          work, or need to know now; the rest goes in your report.",
-            parameters: json!({"type": "object", "properties": {
-                "to": {"type": ["string", "integer"], "description": "\"parent\" for whoever handed you this task, \
-                    or the id of a task you handed out."},
-                "text": {"type": "string"},
-                "when": {"type": "string", "enum": ["steer", "after_turn", "inbox"], "description": "When it \
-                    reaches them if they are working: \"steer\" as soon as it can, cutting off what they are writing, \
-                    for when they are about to waste work; \"after_turn\" (the default) when they would stop; \
-                    \"inbox\" for something they only need to know, read when they are next ready and never waking them."}
-            }, "required": ["to", "text"]}),
-        })
-    }
-
-    fn run_atomic(&self, db: &Connection, conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        let text = args["text"].as_str().unwrap_or_default().trim();
-        if text.is_empty() {
-            anyhow::bail!("message needs its text");
-        }
-        let how = when(args)?;
-        let msg = match &args["to"] {
-            Value::String(s) if s == "parent" => message_parent(db, conv, text, how)?,
-            Value::Number(n) => message_child(db, conv, n.as_i64().unwrap_or_default(), text, how)?,
-            Value::String(s) => match s.trim().trim_start_matches("task").trim().parse() {
-                Ok(task) => message_child(db, conv, task, text, how)?,
-                Err(_) => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
-            },
-            _ => anyhow::bail!("to is \"parent\" or the id of a task you handed out"),
-        };
-        Ok(ToolOutput::ok(msg))
-    }
-}
-
-struct PapercutTool;
-
-impl Tool for PapercutTool {
-    fn name(&self) -> &'static str {
-        "papercut"
-    }
-
-    fn execution(&self) -> Execution {
-        Execution::Atomic
-    }
-
-    fn spec(&self, _vis: &ToolVisibility) -> Option<ToolSpec> {
-        Some(ToolSpec {
-            name: "papercut",
-            description: crate::papercut::DESCRIPTION,
-            parameters: crate::papercut::parameters(),
-        })
-    }
-
-    fn run_atomic(&self, db: &Connection, conv: &str, _model: &str, args: &Value) -> Result<ToolOutput> {
-        Ok(ToolOutput::ok(crate::papercut::execute(db, conv, args)?))
-    }
-}
-
-/// The `when` a tool was given, `after_turn` when it is left out.
-pub(crate) fn when(args: &Value) -> Result<turn::Delivery> {
-    match args["when"].as_str() {
-        None => Ok(turn::Delivery::AfterTurn),
-        Some(w) => turn::Delivery::parse(w).ok_or_else(|| anyhow::anyhow!("when is one of steer, after_turn and inbox")),
-    }
-}
-
-/// The task whose run `conv` is, as (id, title).
-fn own_task(db: &Connection, conv: &str) -> Result<(i64, String)> {
-    Ok(db.query_row(
-        "SELECT t.id, t.title FROM trials tr JOIN tasks t ON t.id = tr.task WHERE tr.conversation = ?1",
-        [conv],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?)
-}
-
-/// Deliver a message to `to` and wake it if it is waiting, unless it is inbox.
-fn send(db: &Connection, to: &str, said: String, from_task: i64, how: turn::Delivery) -> Result<()> {
-    turn::deliver(db, to, "message", &json!({ "text": said, "from_task": from_task }), how)?;
-    if how != turn::Delivery::Inbox {
-        board::wake(db, to)?;
-    }
-    Ok(())
-}
-
-/// What `message` does with `to: "parent"`: the text goes to whoever handed
-/// the run in `conv` its task, at `how`. Both a chat and a parent run are
-/// reached the same way and woken unless `how` is `inbox`.
-pub(crate) fn message_parent(db: &Connection, conv: &str, text: &str, how: turn::Delivery) -> Result<String> {
-    let (mine, title) = own_task(db, conv)?;
-    let said = format!("Message from task {mine}, \"{title}\":\n\n{text}");
-    let to = match board::parent(db, conv)? {
-        board::Parent::Run(p) | board::Parent::Chat(p) => p,
-        board::Parent::Unreachable => {
-            anyhow::bail!("whoever handed you this task cannot be reached now; say it in your report when you finish")
-        }
     };
-    send(db, &to, said, mine, how)?;
-    Ok("sent to whoever handed you this task".into())
-}
 
-/// What `message` does with a task id: the text goes to the run doing a task `conv` handed out.
-fn message_child(db: &Connection, conv: &str, task: i64, text: &str, how: turn::Delivery) -> Result<String> {
-    let (mine, _) = own_task(db, conv)?;
-    let Some(run) = board::child_run(db, conv, task)? else {
-        anyhow::bail!("nobody is working on task {task} now");
-    };
-    send(db, &run, format!("Message from whoever handed you this task (task {mine}):\n\n{text}"), mine, how)?;
-    Ok(format!("sent to task {task}"))
-}
+    watchdog.shutdown();
 
-/// One task as a line a model can read.
-fn line(t: &board::TaskRow) -> String {
-    let f = &t.fields;
-    let state = match t.state {
-        TaskState::Open => "open, waiting on blockers",
-        TaskState::Ready => "ready",
-        TaskState::Assigned => "assigned",
-        TaskState::InGates => "in gates",
-        TaskState::Done => "done",
-    };
-    let who = if f.assignee == board::me() { "the user" } else { &f.assignee };
-    let mut parts = vec![format!("{} {} [{state}] for {who}", t.id, f.title)];
-    if let Some(run) = t.run_state {
-        parts.push(
-            match run {
-                RunState::Running => "an agent is on it",
-                RunState::Waiting => "an agent is waiting on its sub-tasks",
-                RunState::NeedsApproval => "an agent waits for the user to allow a tool call",
-                RunState::Failing => "an agent is retrying it",
-                RunState::Paused => "stopped by the user part way",
-                RunState::NeedsRating => "finished, needs rating",
-                RunState::Rated => "finished and rated",
+    let stdout_bytes = stdout_reader.collect_bounded(READER_JOIN_TIMEOUT);
+    let stderr_bytes = stderr_reader.collect_bounded(READER_JOIN_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    let combined = combine_streams(&stdout, &stderr);
+
+    match outcome {
+        WaitEnd::Aborted => {
+            let prefix = "command aborted";
+            let budget = MAX_TOOL_OUTPUT_BYTES.saturating_sub(prefix.len() + 1);
+            let tail = truncate_tail(combined, budget);
+            let output = if tail.is_empty() {
+                prefix.into()
+            } else {
+                format!("{prefix}\n{tail}")
+            };
+            ToolExecOutput {
+                status: ToolReceiptStatus::Aborted,
+                output,
+                exit_code: None,
             }
-            .into(),
-        );
+        }
+        WaitEnd::TimedOut => {
+            let prefix = format!("command timed out after {}s", format_secs(timeout_secs));
+            let budget = MAX_TOOL_OUTPUT_BYTES.saturating_sub(prefix.len() + 1);
+            let tail = truncate_tail(combined, budget);
+            let output = if tail.is_empty() {
+                prefix
+            } else {
+                format!("{prefix}\n{tail}")
+            };
+            ToolExecOutput {
+                status: ToolReceiptStatus::Error,
+                output,
+                exit_code: None,
+            }
+        }
+        WaitEnd::WaitErr(e) => ToolExecOutput {
+            status: ToolReceiptStatus::Error,
+            output: format!("error: failed waiting for command: {e}"),
+            exit_code: None,
+        },
+        WaitEnd::Exited(status) => {
+            if status.success() {
+                let output = truncate_tail(combined, MAX_TOOL_OUTPUT_BYTES);
+                ToolExecOutput {
+                    status: ToolReceiptStatus::Ok,
+                    output: if output.is_empty() {
+                        "(no output)".into()
+                    } else {
+                        output
+                    },
+                    exit_code: Some(0),
+                }
+            } else {
+                let code = exit_status_code(status);
+                let prefix = format!("exit code {code}");
+                let budget = MAX_TOOL_OUTPUT_BYTES.saturating_sub(prefix.len() + 1);
+                let tail = truncate_tail(combined, budget);
+                let output = if tail.is_empty() {
+                    prefix
+                } else {
+                    format!("{prefix}\n{tail}")
+                };
+                ToolExecOutput {
+                    status: ToolReceiptStatus::Error,
+                    output,
+                    exit_code: Some(code),
+                }
+            }
+        }
     }
-    if f.priority != board::Priority::Normal {
-        parts.push(format!("{} priority", f.priority.name()));
-    }
-    if f.choice != board::Choice::Smart {
-        parts.push(format!("for a {} model", f.choice.name()));
-    }
-    if let Some(d) = &f.due {
-        parts.push(format!("due {d}"));
-    }
-    if !f.blocked_by.is_empty() {
-        let ids: Vec<String> = f.blocked_by.iter().map(|i| i.to_string()).collect();
-        parts.push(format!("blocked by {}", ids.join(", ")));
-    }
-    if !f.tags.is_empty() {
-        parts.push(format!("tags {}", f.tags.join(", ")));
-    }
-    let line = parts.join("; ");
-    if f.brief.is_empty() { line } else { format!("{line}\n    brief: {}", f.brief.replace('\n', "\n    ")) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::atomic::AtomicBool;
 
-    /// A run files a task with the same call a chat uses, one level down. At the
-    /// floor delegation is not offered.
-    #[test]
-    fn a_run_at_the_floor_cannot_delegate() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-depth-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-        let c = db.conn();
-        let run = |task: i64| {
-            c.execute("INSERT INTO trials (task, conversation, model) VALUES (?1, 'task-' || ?1, 'lab:m')", rusqlite::params![task])
-        };
-        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
-        let names = |conv: &str| -> Vec<&'static str> { specs(caller(c, conv).unwrap(), false).iter().map(|t| t.name).collect() };
-        let add_props = |conv: &str| specs(caller(c, conv).unwrap(), false).into_iter().find(|t| t.name == "add_task").unwrap().parameters;
-        // A chat files task 1; its run (level 1) hands task 2 to an agent with the same call.
-        assert!(call("chat", "add_task", json!({ "title": "top", "assignee": "agent" })).starts_with("added task 1"));
-        run(1)?;
-        assert_eq!(names("task-1"), ["add_task", "list_tasks", "finish", "message", "papercut"]);
-        assert!(add_props("task-1")["properties"]["assignee"].is_object(), "above the floor it may delegate");
-        let said = call("task-1", "add_task", json!({ "title": "sub" }));
-        assert!(said.starts_with("added task 2") && said.contains("comes back here"), "{said}");
-        assert_eq!(board::task(c, 2)?.created_by, "conversations/task-1");
-        // Task 2's run is at the floor: no add_task, no complete_task, no rate.
-        run(2)?;
-        assert_eq!(names("task-2"), ["list_tasks", "finish", "message", "papercut"]);
-        assert!(call("task-2", "add_task", json!({ "title": "deeper" })).contains("maximum delegation depth"));
-        assert!(call("task-1", "rate", json!({ "task": 2, "score": 5, "note": "x" })).starts_with("error:"), "rate is a hook, not a tool");
-        assert!(call("task-1", "complete_task", json!({ "id": 1 })).starts_with("error:"), "runs change nothing");
-        // A private run's tasks stay private, whatever it asks for.
-        c.execute("UPDATE tasks SET choice = 'private' WHERE id = 1", [])?;
-        assert!(call("task-1", "add_task", json!({ "title": "another", "assignee": "agent", "choice": "smart" })).starts_with("added task 3"));
-        assert_eq!(board::task(c, 3)?.fields.choice, board::Choice::Private);
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+    struct TestWorkspace {
+        base: PathBuf,
+        root: PathBuf,
     }
 
-    /// The file tools are offered only with a folder attached, and refused without one.
-    #[test]
-    fn file_tools_only_with_a_folder() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-filetools-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-        let c = db.conn();
-        let offered = |conv: &str| -> Vec<&'static str> {
-            let folder = board::folder_of(c, conv).unwrap().is_some();
-            specs(caller(c, conv).unwrap(), folder).iter().map(|t| t.name).collect()
-        };
-        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
-        let folder_tools = ["list_files", "read_file", "search_files", "write_file", "edit_file", "bash"];
-        for name in folder_tools {
-            assert!(!offered("chat").contains(&name));
+    impl TestWorkspace {
+        fn new(name: &str) -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!(
+                "arity-tools-{name}-{}-{seq}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&base);
+            let root = base.join("repo");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join(".git")).unwrap();
+            fs::write(root.join(".git/config"), "secret git config\n").unwrap();
+            fs::write(base.join("outside.txt"), "outside secret\n").unwrap();
+            Self { base, root }
         }
-        assert!(call("chat", "list_files", json!({})).contains("no folder is attached"));
-        let repo = std::env::temp_dir().join(format!("arity-filetools-repo-{}", std::process::id()));
-        std::fs::create_dir_all(&repo)?;
-        std::fs::write(repo.join("notes.txt"), "hello\n")?;
-        board::set_folder(c, "chat", repo.to_str())?;
-        assert!(offered("chat").ends_with(&folder_tools));
-        assert_eq!(call("chat", "list_files", json!({})), "notes.txt");
-        // A model cannot point a task somewhere else: the chat's folder passes down.
-        call("chat", "add_task", json!({ "title": "look", "assignee": "agent", "dir": "/" }));
-        c.execute("INSERT INTO trials (task, conversation, model) VALUES (1, 'task-1', 'lab:m')", [])?;
-        assert_eq!(board::folder_of(c, "task-1")?, Some(std::fs::canonicalize(&repo)?));
-        assert!(offered("task-1").contains(&"read_file"));
-        assert!(call("task-1", "read_file", json!({ "path": "notes.txt" })).contains("1  hello"));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&repo);
-        Ok(())
     }
 
-    /// A run messages whoever handed it its task, or the run of a task it
-    /// handed out, at a timing; a waiting parent (run or chat) is woken unless
-    /// it is inbox. Blocked finishes even with work open.
-    #[test]
-    fn runs_message_up_and_down_and_can_finish_blocked() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-message-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-        let c = db.conn();
-        let call = |conv: &str, tool: &str, args: Value| execute(c, conv, "lab:m", tool, &args.to_string());
-        // A chat files task 1; its run hands task 2 to an agent, and task 2's run starts.
-        db.append("chat", "assistant", &json!({ "text": "on it" }), Some("chat:m"))?;
-        call("chat", "add_task", json!({ "title": "top", "assignee": "agent" }));
-        c.execute("INSERT INTO trials (task, conversation, model, waiting) VALUES (1, 'task-1', 'a', 1)", [])?;
-        assert!(call("task-1", "message", json!({ "to": 2, "text": "hi" })).contains("not one you handed out"));
-        call("task-1", "add_task", json!({ "title": "sub" }));
-        assert!(call("task-1", "message", json!({ "to": 2, "text": "hi" })).contains("nobody is working on task 2"));
-        c.execute("INSERT INTO trials (task, conversation, model) VALUES (2, 'task-2', 'b')", [])?;
-        // Down: the parent tells its child something.
-        assert_eq!(call("task-1", "message", json!({ "to": "task 2", "text": "use metric" })), "sent to task 2");
-        let got = db.chain("task-2")?.last().unwrap().clone();
-        assert_eq!(got.kind, "message");
-        assert!(got.body["text"].as_str().unwrap().contains("use metric"));
-        // Up, inbox: the waiting parent has it, and is not woken.
-        assert!(call("task-2", "message", json!({ "to": "parent", "text": "fyi", "when": "inbox" })).starts_with("sent"));
-        let waiting = |conv: &str| -> bool { c.query_row("SELECT waiting FROM trials WHERE conversation = ?1", [conv], |r| r.get(0)).unwrap() };
-        assert!(waiting("task-1"));
-        // Up, steer: it is woken.
-        call("task-2", "message", json!({ "to": "parent", "text": "the repo does not exist", "when": "steer" }));
-        assert!(!waiting("task-1"));
-        assert_eq!(db.chain("task-1")?.iter().filter(|e| e.kind == "message").count(), 2);
-        // Task 1's parent is the chat: reached the same way and woken when not inbox.
-        assert!(call("task-1", "message", json!({ "to": "parent", "text": "halfway" })).starts_with("sent"));
-        assert!(db.chain("chat")?.last().unwrap().body["text"].as_str().unwrap().contains("halfway"));
-        let wake_at: i64 = c.query_row("SELECT wake_at FROM conversations WHERE name = 'chat'", [], |r| r.get(0))?;
-        assert_eq!(wake_at, 1);
-        assert!(call("task-1", "message", json!({ "to": "parent", "text": "x", "when": "soon" })).contains("when is one of"));
-        // Blocked: let through though task 2 is still out; done is refused for it.
-        assert!(call("task-1", "finish", json!({ "report": "r" })).contains("task 2 has not reported"));
-        assert_eq!(call("task-1", "finish", json!({ "report": "need a key", "outcome": "blocked" })), FINISHED);
-        let outcome: String = c.query_row("SELECT outcome FROM trials WHERE conversation = 'task-1'", [], |r| r.get(0))?;
-        assert_eq!(outcome, "blocked");
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
     }
 
-    struct MockExternalTool {
-        name: &'static str,
-        replay: Replay,
-        runs: Arc<AtomicUsize>,
-        db_path: Option<PathBuf>,
-    }
-
-    impl Tool for MockExternalTool {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-
-        fn execution(&self) -> Execution {
-            Execution::External { replay: self.replay }
-        }
-
-        fn spec(&self, _vis: &ToolVisibility) -> Option<ToolSpec> {
-            Some(ToolSpec {
-                name: self.name,
-                description: "mock external tool",
-                parameters: json!({"type": "object", "properties": {"val": {"type": "string"}}}),
-            })
-        }
-
-        fn run_external(&self, _vis: &ToolVisibility, args: &Value) -> Result<ToolOutput> {
-            // Verify SQLite is not write-locked while an external tool executes.
-            if let Some(path) = &self.db_path {
-                let other = Journal::open(path)?;
-                other.append("heartbeat-probe", "notice", &json!({ "text": "alive" }), None)?;
-            }
-            let n = self.runs.fetch_add(1, SeqCst) + 1;
-            let val = args["val"].as_str().unwrap_or("default");
-            Ok(ToolOutput::ok(format!("ran:{}:{val}:{n}", self.name)))
-        }
+    fn run(root: &Path, name: &str, args: Value) -> ToolExecOutput {
+        let mut pgid_cb = |_pgid: i64| {};
+        let mut abort_cb = || false;
+        execute_tool(
+            Some(root),
+            name,
+            &args.to_string(),
+            &mut pgid_cb,
+            &mut abort_cb,
+        )
     }
 
     #[test]
-    fn external_tool_commits_intent_and_respects_replay_safe_vs_unsafe() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-external-replay-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-
-        let safe_runs = Arc::new(AtomicUsize::new(0));
-        let unsafe_runs = Arc::new(AtomicUsize::new(0));
-
-        let reg = ToolRegistry::new()
-            .with(Box::new(MockExternalTool {
-                name: "ext_safe",
-                replay: Replay::Safe,
-                runs: safe_runs.clone(),
-                db_path: Some(path.clone()),
-            }))
-            .with(Box::new(MockExternalTool {
-                name: "ext_unsafe",
-                replay: Replay::Unsafe,
-                runs: unsafe_runs.clone(),
-                db_path: Some(path.clone()),
-            }));
-
-        // Fresh external call commits intent, runs outside any SQLite tx, then commits tool result.
-        let fresh = ToolCall {
-            id: "call-fresh".into(),
-            name: "ext_safe".into(),
-            arguments: json!({ "val": "one" }).to_string(),
-        };
-        let out = reg.execute_call(&db, "conv", "m", &fresh)?;
-        assert!(!out.is_error);
-        assert_eq!(out.text, "ran:ext_safe:one:1");
-        assert_eq!(safe_runs.load(SeqCst), 1);
-        let chain = db.chain("conv")?;
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0].kind, "tool_intent");
-        assert_eq!(chain[0].body["call_id"], "call-fresh");
-        assert_eq!(chain[0].body["replay"], "safe");
-        assert_eq!(chain[1].kind, "tool");
-        assert_eq!(chain[1].body["call_id"], "call-fresh");
-        assert_eq!(chain[1].body["is_error"], false);
-
-        // Simulated crash for Replay::Safe: tool_intent exists without a tool result -> reruns cleanly.
-        db.append(
-            "conv",
-            "tool_intent",
-            &json!({ "call_id": "call-crashed-safe", "name": "ext_safe", "replay": "safe" }),
-            None,
-        )?;
-        let crashed_safe = ToolCall {
-            id: "call-crashed-safe".into(),
-            name: "ext_safe".into(),
-            arguments: json!({ "val": "retry" }).to_string(),
-        };
-        let out = reg.execute_call(&db, "conv", "m", &crashed_safe)?;
-        assert!(!out.is_error);
-        assert_eq!(out.text, "ran:ext_safe:retry:2");
-        assert_eq!(safe_runs.load(SeqCst), 2);
-        let intents_for_safe = db
-            .chain("conv")?
+    fn tool_specs_and_mutating_classification() {
+        assert!(tool_specs(false).is_empty());
+        let specs = tool_specs(true);
+        let names: Vec<(&str, bool)> = specs
             .iter()
-            .filter(|e| e.kind == "tool_intent" && e.body["call_id"] == "call-crashed-safe")
-            .count();
-        assert_eq!(intents_for_safe, 1, "should not duplicate existing tool_intent");
+            .map(|s| (s.name.as_str(), s.mutating))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("list_files", false),
+                ("read_file", false),
+                ("search_files", false),
+                ("write_file", true),
+                ("edit_file", true),
+                ("bash", true),
+            ]
+        );
+        for (name, mutating) in names {
+            assert_eq!(is_mutating_tool(name), mutating);
+        }
+        assert!(!is_mutating_tool("unknown"));
 
-        // Simulated crash for Replay::Unsafe: tool_intent exists without a tool result -> refused without rerunning.
-        db.append(
-            "conv",
-            "tool_intent",
-            &json!({ "call_id": "call-crashed-unsafe", "name": "ext_unsafe", "replay": "unsafe" }),
-            None,
-        )?;
-        let crashed_unsafe = ToolCall {
-            id: "call-crashed-unsafe".into(),
-            name: "ext_unsafe".into(),
-            arguments: json!({ "val": "nope" }).to_string(),
-        };
-        let out = reg.execute_call(&db, "conv", "m", &crashed_unsafe)?;
-        assert!(out.is_error);
-        assert!(out.text.contains("interrupted by a crash") && out.text.contains("not replay-safe"), "{}", out.text);
-        assert_eq!(unsafe_runs.load(SeqCst), 0, "unsafe tool must not re-run after crash");
-        let last = db.chain("conv")?.pop().unwrap();
-        assert_eq!(last.kind, "tool");
-        assert_eq!(last.body["call_id"], "call-crashed-unsafe");
-        assert_eq!(last.body["is_error"], true);
-
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+        // Without a workspace, execute_tool returns Error.
+        let mut cb = |_| {};
+        let mut abort = || false;
+        let res = execute_tool(None, "list_files", "{}", &mut cb, &mut abort);
+        assert_eq!(res.status, ToolReceiptStatus::Error);
     }
 
     #[test]
-    fn run_with_hooks_supports_rewrite_block_and_after_mutation() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-hooks-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
+    fn path_jail_rejects_escapes_symlinks_and_case_insensitive_git_for_reads_and_writes() {
+        let ws = TestWorkspace::new("jail");
+        fs::write(ws.root.join("README.md"), "hello world\n").unwrap();
 
-        let runs = Arc::new(AtomicUsize::new(0));
-        let reg = ToolRegistry::default_registry().with(Box::new(MockExternalTool {
-            name: "ext_hook",
-            replay: Replay::Unsafe,
-            runs: runs.clone(),
-            db_path: None,
-        }));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.base.join("outside.txt"), ws.root.join("leak.txt"))
+                .unwrap();
+            std::os::unix::fs::symlink(&ws.base, ws.root.join("escape_dir")).unwrap();
+            std::os::unix::fs::symlink(ws.root.join(".git/config"), ws.root.join("git_link"))
+                .unwrap();
+            std::os::unix::fs::symlink(
+                ws.base.join("dangling_outside.txt"),
+                ws.root.join("dangling"),
+            )
+            .unwrap();
+        }
 
-        // 1. RewriteArgs + after mutation on an external tool.
-        let rewrite_call = ToolCall {
-            id: "call-rw".into(),
-            name: "ext_hook".into(),
-            arguments: json!({ "val": "orig" }).to_string(),
-        };
-        let out = reg.run_with_hooks(
-            &db,
-            "chat",
-            "m",
-            &rewrite_call,
-            |_call, args, _| {
-                assert_eq!(args["val"], "orig");
-                Ok(ToolHookDecision::RewriteArgs(json!({ "val": "rewritten" })))
-            },
-            |_call, out| {
-                out.text.push_str(" [audited]");
-                out.details = Some(json!({ "audited": true }));
-                Ok(())
-            },
-        )?;
-        let out = executed(out);
-        assert!(!out.is_error);
-        assert_eq!(out.text, "ran:ext_hook:rewritten:1 [audited]");
-        assert_eq!(runs.load(SeqCst), 1);
-        let last = db.chain("chat")?.pop().unwrap();
-        assert_eq!(last.kind, "tool");
-        assert_eq!(last.body["output"], "ran:ext_hook:rewritten:1 [audited]");
-        assert_eq!(last.body["details"]["audited"], true);
+        // Read tools reject .., absolute paths, symlinks escaping root, and .git (any case).
+        for bad in [
+            "../outside.txt",
+            "src/../../outside.txt",
+            ws.base.join("outside.txt").to_str().unwrap(),
+            "leak.txt",
+            "escape_dir/outside.txt",
+            ".git",
+            ".git/config",
+            ".GIT/config",
+            ".Git/config",
+            "git_link",
+        ] {
+            let r = run(&ws.root, "read_file", json!({ "path": bad }));
+            assert_eq!(
+                r.status,
+                ToolReceiptStatus::Error,
+                "read_file should reject {bad:?}: {}",
+                r.output
+            );
+        }
 
-        // 2. Block prevents tool_intent and execution, commits blocked error, and still runs `after`.
-        let block_call = ToolCall {
-            id: "call-blk".into(),
-            name: "ext_hook".into(),
-            arguments: json!({ "val": "danger" }).to_string(),
-        };
-        let out = reg.run_with_hooks(
-            &db,
-            "chat",
-            "m",
-            &block_call,
-            |_call, _args, _| Ok(ToolHookDecision::Block("policy denied".into())),
-            |_call, out| {
-                assert!(out.is_error);
-                assert_eq!(out.text, "error: blocked: policy denied");
-                out.text.push_str(" (logged)");
-                Ok(())
-            },
-        )?;
-        let out = executed(out);
-        assert!(out.is_error);
-        assert_eq!(out.text, "error: blocked: policy denied (logged)");
-        assert_eq!(runs.load(SeqCst), 1, "blocked tool must not execute");
-        let chain = db.chain("chat")?;
-        assert!(
-            !chain.iter().any(|e| e.kind == "tool_intent" && e.body["call_id"] == "call-blk"),
-            "blocked tool must not record tool_intent"
+        for bad_dir in ["..", "escape_dir", ".git", ".GIT", "src/../../"] {
+            let l = run(&ws.root, "list_files", json!({ "path": bad_dir }));
+            assert_eq!(
+                l.status,
+                ToolReceiptStatus::Error,
+                "list_files should reject {bad_dir:?}: {}",
+                l.output
+            );
+            let s = run(
+                &ws.root,
+                "search_files",
+                json!({ "query": "secret", "path": bad_dir }),
+            );
+            assert_eq!(
+                s.status,
+                ToolReceiptStatus::Error,
+                "search_files should reject {bad_dir:?}: {}",
+                s.output
+            );
+        }
+
+        // list_files and search_files hide escaping symlinks and .git / git_link.
+        let listed = run(&ws.root, "list_files", json!({}));
+        assert_eq!(listed.status, ToolReceiptStatus::Ok);
+        assert!(!listed.output.contains(".git"));
+        assert!(!listed.output.contains("leak.txt"));
+        assert!(!listed.output.contains("escape_dir"));
+        assert!(!listed.output.contains("git_link"));
+
+        let searched = run(&ws.root, "search_files", json!({ "query": "secret" }));
+        assert_eq!(searched.status, ToolReceiptStatus::Ok);
+        assert!(searched.output.starts_with("no matches"), "{}", searched.output);
+
+        // Write & edit tools reject .., absolute paths, escaping/dangling symlinks, and .git (any case).
+        for bad in [
+            "",
+            ".",
+            "/tmp/evil.txt",
+            "../outside.txt",
+            "src/../../outside.txt",
+            "leak.txt",
+            "escape_dir/new_dir/pwn.txt",
+            "dangling",
+            ".git/config",
+            ".GIT/config",
+            "sub/.Git/hooks/pre-commit",
+            "git_link",
+        ] {
+            let w = run(&ws.root, "write_file", json!({ "path": bad, "content": "pwn" }));
+            assert_eq!(
+                w.status,
+                ToolReceiptStatus::Error,
+                "write_file should reject {bad:?}: {}",
+                w.output
+            );
+            let e = run(
+                &ws.root,
+                "edit_file",
+                json!({ "path": bad, "old_text": "a", "new_text": "b" }),
+            );
+            assert_eq!(
+                e.status,
+                ToolReceiptStatus::Error,
+                "edit_file should reject {bad:?}: {}",
+                e.output
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(ws.base.join("outside.txt")).unwrap(),
+            "outside secret\n"
         );
-        let last = chain.last().unwrap();
-        assert_eq!(last.kind, "tool");
-        assert_eq!(last.body["call_id"], "call-blk");
-        assert_eq!(last.body["output"], "error: blocked: policy denied (logged)");
-        assert_eq!(last.body["is_error"], true);
-
-        // 3. RewriteArgs + after mutation also work on Atomic board tools.
-        let atomic_call = ToolCall {
-            id: "call-atomic".into(),
-            name: "add_task".into(),
-            arguments: json!({ "title": "old title" }).to_string(),
-        };
-        let out = reg.run_with_hooks(
-            &db,
-            "chat",
-            "m",
-            &atomic_call,
-            |_call, _args, _| Ok(ToolHookDecision::RewriteArgs(json!({ "title": "new title" }))),
-            |_call, out| {
-                out.text.push_str(" [hooked]");
-                Ok(())
-            },
-        )?;
-        let out = executed(out);
-        assert!(!out.is_error);
-        assert!(out.text.starts_with("added task 1") && out.text.ends_with(" [hooked]"), "{}", out.text);
-        assert_eq!(board::task(db.conn(), 1)?.fields.title, "new title");
-        let last = db.chain("chat")?.pop().unwrap();
-        assert_eq!(last.body["output"], out.text);
-
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+        assert_eq!(
+            fs::read_to_string(ws.root.join(".git/config")).unwrap(),
+            "secret git config\n"
+        );
     }
 
-    fn executed(run: ToolRun) -> ToolOutput {
-        match run {
-            ToolRun::Executed(output) => output,
-            ToolRun::Parked(approval) => panic!("expected the call to run, it parked: {approval:?}"),
+    #[test]
+    fn write_and_edit_file_atomic_permissions_single_and_multi_edits() {
+        let ws = TestWorkspace::new("edit");
+
+        let w = run(
+            &ws.root,
+            "write_file",
+            json!({ "path": "nested/script.sh", "content": "#!/bin/sh\necho one\necho two\n" }),
+        );
+        assert_eq!(w.status, ToolReceiptStatus::Ok);
+        let script_path = ws.root.join("nested/script.sh");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        // Single edit preserves permissions.
+        let e1 = run(
+            &ws.root,
+            "edit_file",
+            json!({ "path": "nested/script.sh", "old_text": "echo one", "new_text": "echo ONE" }),
+        );
+        assert_eq!(e1.status, ToolReceiptStatus::Ok, "{}", e1.output);
+        assert_eq!(
+            fs::read_to_string(&script_path).unwrap(),
+            "#!/bin/sh\necho ONE\necho two\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&script_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "atomic write must preserve file permissions");
+        }
+
+        // Multi-span edits array (order-independent swap).
+        fs::write(ws.root.join("multi.txt"), "first = 1\nsecond = 2\nthird = 3\n").unwrap();
+        let multi = run(
+            &ws.root,
+            "edit_file",
+            json!({
+                "path": "multi.txt",
+                "edits": [
+                    { "old_text": "third = 3", "new_text": "first = 1" },
+                    { "old_text": "first = 1", "new_text": "third = 3" }
+                ]
+            }),
+        );
+        assert_eq!(multi.status, ToolReceiptStatus::Ok, "{}", multi.output);
+        assert!(multi.output.contains("2 replacement(s)"), "{}", multi.output);
+        assert_eq!(
+            fs::read_to_string(ws.root.join("multi.txt")).unwrap(),
+            "third = 3\nsecond = 2\nfirst = 1\n"
+        );
+
+        // Reject overlapping spans in multi-edit.
+        let overlap = run(
+            &ws.root,
+            "edit_file",
+            json!({
+                "path": "multi.txt",
+                "edits": [
+                    { "old_text": "third = 3\nsecond", "new_text": "X" },
+                    { "old_text": "second = 2", "new_text": "Y" }
+                ]
+            }),
+        );
+        assert_eq!(overlap.status, ToolReceiptStatus::Error);
+        assert!(overlap.output.contains("overlap"), "{}", overlap.output);
+
+        // No leftover `.arity-tmp-*` files in target directory.
+        for entry in fs::read_dir(ws.root.join("nested")).unwrap().flatten() {
+            assert!(
+                !entry.file_name().to_string_lossy().starts_with(".arity-tmp-"),
+                "leftover temp file: {:?}",
+                entry.path()
+            );
         }
     }
 
-    #[test]
-    fn run_with_hooks_parks_asked_calls_until_the_user_decides() -> Result<()> {
-        let path = std::env::temp_dir().join(format!("arity-hooks-ask-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Journal::open(&path)?;
-
-        let runs = Arc::new(AtomicUsize::new(0));
-        let reg = ToolRegistry::default_registry().with(Box::new(MockExternalTool {
-            name: "ext_ask",
-            replay: Replay::Unsafe,
-            runs: runs.clone(),
-            db_path: None,
-        }));
-        let call = |id: &str| ToolCall { id: id.into(), name: "ext_ask".into(), arguments: json!({ "val": "x", "dir": "/" }).to_string() };
-        let asked = Arc::new(AtomicUsize::new(0));
-        let run = |id: &str| {
-            let asked = asked.clone();
-            reg.run_with_hooks(
-                &db,
-                "chat",
-                "m",
-                &call(id),
-                move |_, _, approved| {
-                    asked.fetch_add(1, SeqCst);
-                    Ok(if approved {
-                        ToolHookDecision::Continue
-                    } else {
-                        ToolHookDecision::AskApproval { hook: "guard".into(), reason: "looks risky".into() }
-                    })
-                },
-                |_, _| Ok(()),
-            )
-        };
-
-        // Asked: parked, nothing run, nothing in the journal for the call.
-        let ToolRun::Parked(first) = run("call-ask")? else { panic!("expected the call to park") };
-        assert_eq!((first.tool.as_str(), first.hook.as_str(), first.reason.as_str()), ("ext_ask", "guard", "looks risky"));
-        assert_eq!(serde_json::from_str::<Value>(&first.args)?, json!({ "val": "x" }), "a model never picks a dir");
-        assert_eq!(runs.load(SeqCst), 0);
-        assert!(db.chain("chat")?.iter().all(|e| e.body["call_id"] != "call-ask"));
-
-        // Still pending: parked again on the same approval, without asking the hooks.
-        let ToolRun::Parked(again) = run("call-ask")? else { panic!("expected the call to stay parked") };
-        assert_eq!(again.id, first.id);
-        assert_eq!(asked.load(SeqCst), 1);
-
-        // Allowed: runs once, the hooks told it was allowed, the decision consumed.
-        approvals::decide(db.conn(), first.id, true, "")?;
-        let out = executed(run("call-ask")?);
-        assert_eq!(out.text, "ran:ext_ask:x:1");
-        assert_eq!(runs.load(SeqCst), 1);
-        assert_eq!(approvals::check(db.conn(), "chat", "call-ask")?, PriorDecision::None);
-
-        // Denied: an error result with the note, the tool not run, the hooks not asked.
-        let ToolRun::Parked(second) = run("call-deny")? else { panic!("expected the call to park") };
-        let asked_before = asked.load(SeqCst);
-        approvals::decide(db.conn(), second.id, false, "not on main")?;
-        let out = executed(run("call-deny")?);
-        assert!(out.is_error);
-        assert_eq!(out.text, "Tool call denied by user: not on main");
-        assert_eq!(runs.load(SeqCst), 1);
-        assert_eq!(asked.load(SeqCst), asked_before);
-        let last = db.chain("chat")?.pop().unwrap();
-        assert_eq!((last.kind.as_str(), last.body["call_id"].as_str()), ("tool", Some("call-deny")));
-        assert!(!approvals::has_decided(db.conn(), "chat")?);
-
-        // Denied without a note.
-        let ToolRun::Parked(third) = run("call-deny-bare")? else { panic!("expected the call to park") };
-        approvals::decide(db.conn(), third.id, false, "  ")?;
-        assert_eq!(executed(run("call-deny-bare")?).text, "Tool call denied by user");
-
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+    #[cfg(unix)]
+    fn pid_is_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
     #[test]
-    fn bound_output_truncates_utf8_safely() {
-        assert_eq!(bound_output("hello".into(), 5), "hello");
-        assert_eq!(bound_output("hello".into(), 10), "hello");
+    fn bash_timeout_and_abort_reap_background_subchildren() {
+        let ws = TestWorkspace::new("bash-reap");
 
-        // Each '🦀' is 4 UTF-8 bytes; truncating at 5 bytes must back up to byte 4 (1 crab).
-        let crabs = "🦀🦀🦀".to_string(); // 12 bytes
-        let bounded = bound_output(crabs, 5);
-        assert_eq!(bounded, "🦀\n[output truncated: 8 bytes omitted]");
+        // 1. Timeout reaps `sleep 60 &` background subchild.
+        let pid_file = ws.root.join("bg_timeout.pid");
+        let cmd = format!(
+            "sleep 60 & echo $! > {}; echo started; sleep 60",
+            pid_file.display()
+        );
+        let mut spawned_pgid = 0i64;
+        let mut on_spawn = |pgid: i64| spawned_pgid = pgid;
+        let mut never_abort = || false;
 
-        // Truncating inside the first multi-byte char (max_bytes = 2) backs up to 0 cleanly.
-        let bounded_zero = bound_output("é".repeat(5), 1); // 10 bytes
-        assert_eq!(bounded_zero, "\n[output truncated: 10 bytes omitted]");
+        let start = Instant::now();
+        let timed = execute_tool(
+            Some(&ws.root),
+            "bash",
+            &json!({ "command": cmd, "timeout": 0.3 }).to_string(),
+            &mut on_spawn,
+            &mut never_abort,
+        );
+        assert_eq!(timed.status, ToolReceiptStatus::Error, "{}", timed.output);
+        assert!(spawned_pgid > 1);
+        assert!(timed.output.contains("timed out"), "{}", timed.output);
+        assert!(timed.output.contains("started"), "{}", timed.output);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timeout must return promptly without hanging on background child pipes"
+        );
+
+        #[cfg(unix)]
+        if let Ok(pid_str) = fs::read_to_string(&pid_file)
+            && let Ok(bg_pid) = pid_str.trim().parse::<i32>()
+        {
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !pid_is_alive(bg_pid),
+                "background subchild pid {bg_pid} should be reaped on timeout"
+            );
+        }
+
+        // 2. Abort via should_abort() reaps `sleep 60 &` background subchild.
+        let pid_file_abort = ws.root.join("bg_abort.pid");
+        let cmd_abort = format!(
+            "sleep 60 & echo $! > {}; echo before_abort; sleep 60",
+            pid_file_abort.display()
+        );
+        let aborted_flag = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&aborted_flag);
+        let killer_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            trigger.store(true, Ordering::SeqCst);
+        });
+
+        let mut pgid_abort = 0i64;
+        let mut on_spawn_abort = |pgid: i64| pgid_abort = pgid;
+        let mut check_abort = || aborted_flag.load(Ordering::SeqCst);
+
+        let start2 = Instant::now();
+        let aborted = execute_tool(
+            Some(&ws.root),
+            "bash",
+            &json!({ "command": cmd_abort, "timeout": 30 }).to_string(),
+            &mut on_spawn_abort,
+            &mut check_abort,
+        );
+        killer_thread.join().unwrap();
+
+        assert_eq!(aborted.status, ToolReceiptStatus::Aborted, "{}", aborted.output);
+        assert!(pgid_abort > 1);
+        assert!(
+            start2.elapsed() < Duration::from_secs(5),
+            "abort must kill process group and return promptly"
+        );
+
+        #[cfg(unix)]
+        if let Ok(pid_str) = fs::read_to_string(&pid_file_abort)
+            && let Ok(bg_pid) = pid_str.trim().parse::<i32>()
+        {
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !pid_is_alive(bg_pid),
+                "background subchild pid {bg_pid} should be reaped on abort"
+            );
+        }
+
+        // 3. Normal exit also reaps lingering background subchildren without hanging on stdout.
+        let pid_file_done = ws.root.join("bg_done.pid");
+        let cmd_done = format!(
+            "sleep 60 & echo $! > {}; echo done_fast",
+            pid_file_done.display()
+        );
+        let start3 = Instant::now();
+        let done = run(&ws.root, "bash", json!({ "command": cmd_done }));
+        assert_eq!(done.status, ToolReceiptStatus::Ok, "{}", done.output);
+        assert_eq!(done.exit_code, Some(0));
+        assert!(done.output.contains("done_fast"), "{}", done.output);
+        assert!(
+            start3.elapsed() < Duration::from_secs(5),
+            "normal exit must reap background subchildren holding stdout"
+        );
+        #[cfg(unix)]
+        if let Ok(pid_str) = fs::read_to_string(&pid_file_done)
+            && let Ok(bg_pid) = pid_str.trim().parse::<i32>()
+        {
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !pid_is_alive(bg_pid),
+                "background subchild pid {bg_pid} should be reaped when bash finishes"
+            );
+        }
+
+        // 4. Non-zero exit code reports Error status and captures exit_code.
+        let fail = run(
+            &ws.root,
+            "bash",
+            json!({ "command": "echo oops >&2; exit 7" }),
+        );
+        assert_eq!(fail.status, ToolReceiptStatus::Error);
+        assert_eq!(fail.exit_code, Some(7));
+        assert!(fail.output.contains("exit code 7") && fail.output.contains("oops"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_eof_watchdog_kills_process_group_on_write_fd_close() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i64;
+        let mut watchdog = WatchdogGuard::spawn(pgid);
+
+        assert!(pid_is_alive(pgid as i32));
+
+        // Simulate abrupt parent death (kernel closing write_fd) without calling reap_process_group.
+        drop(watchdog.write_fd.take());
+
+        // Wait for child to be killed by the watchdog.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut reaped = false;
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        watchdog.shutdown();
+        if !reaped {
+            reap_process_group(pgid);
+        }
+        let _ = child.wait();
+        assert!(reaped, "pipe-EOF watchdog must kill target process group when write_fd closes");
     }
 }
